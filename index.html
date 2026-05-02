@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nutriflow Pro</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <h1 class="brand" onclick="showMenu()">NUTRI<span>FLOW</span></h1>
+        </header>
+<style>
+@keyframes pulse {
+    0% { transform: scale(0.95); opacity: 0.1; }
+    50% { transform: scale(1.05); opacity: 0.3; }
+    100% { transform: scale(0.95); opacity: 0.1; }
+}
+</style>
+        <!-- DASHBOARD -->
+        <!-- HOOFDMENU MET 3 TEGELS -->
+<div id="main-menu" class="grid-main" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 40px;">
+    <div class="card orange" onclick="openModule('carbomax')" style="background: #1e293b; padding: 50px; border-radius: 15px; cursor: pointer; border-bottom: 5px solid #f97316;">
+        <h2>CARBOMAX</h2>
+    </div>
+    <div class="card blue" onclick="openModule('raceprep')" style="background: #1e293b; padding: 50px; border-radius: 15px; cursor: pointer; border-bottom: 5px solid #3b82f6;">
+        <h2>RACEPREP</h2>
+    </div>
+    <div class="card green" onclick="openModule('optimeal')" style="background: #1e293b; padding: 50px; border-radius: 15px; cursor: pointer; border-bottom: 5px solid #22c55e;">
+        <h2>OPTIMEAL</h2>
+    </div>
+</div>
+
+
+                <!-- CARBOMAX MODULE -->
+        <section id="carbomax-module" class="module-section" style="display:none;">
+            <div class="module-header">
+                <button class="btn-back" onclick="showMenu()">← TERUG</button>
+                <h2>CARBOMAX</h2>
+            </div>
+            <div class="user-inputs-row">
+                <div class="input-field">
+                    <label for="gewicht">Lichaamsgewicht (kg)</label>
+                    <input type="number" id="gewicht" placeholder="70">
+                </div>
+                <div class="input-field">
+                    <label for="duur">Wedstrijdduur (uren)</label>
+                    <input type="number" id="duur" placeholder="4">
+                </div>
+            </div>
+            <div class="day-tabs">
+                <button onclick="switchDay(1)" id="tab1" class="tab-btn active">DAG 1</button>
+                <button onclick="switchDay(2)" id="tab2" class="tab-btn">DAG 2</button>
+            </div>
+            <div id="day-content-container"></div>
+            <button class="btn-calculate" onclick="calculatePlan()">GENEREER SCHEMA</button>
+            <div id="result-overlay" class="result-card" style="display:none;">
+                <div id="result-data"></div>
+            </div>
+        </section>
+
+        <section id="raceprep-module" class="module-section" style="display:none; padding: 20px; color: white;">
+    <div class="module-header" style="margin-bottom: 25px;">
+        <button class="btn-back" onclick="showMenu()">← TERUG</button>
+        <h2 style="font-size: 2rem; margin-top: 10px; font-weight: 800;">RACEPREP <span style="color: #3b82f6;">PRO</span></h2>
+        
+        <!-- NIEUW: SPORT KEUZELIJST -->
+        <div style="margin-top: 15px; background: #1e293b; padding: 10px 15px; border-radius: 12px; border: 1px solid #334155; display: inline-flex; align-items: center; gap: 12px;">
+            <label for="rp-sport" style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Discipline:</label>
+            <select id="rp-sport" onchange="updateRacePreview()" style="background: #0f172a; color: white; border: none; padding: 8px 12px; border-radius: 8px; font-weight: bold; cursor: pointer; outline: none; border: 1px solid #3b82f6;">
+                <option value="fietsen">🚴 Fietsen</option>
+                <option value="lopen">🏃 Lopen</option>
+                <option value="duatlon">🏃🚴 Duatlon</option>
+                <option value="triatlon">🏊🚴 Triatlon</option>
+                <option value="crosstriatlon">🚵‍♂️ Crosstriatlon</option>
+            </select>
+        </div>
+    </div>
+    
+    <!-- De rest van je grid (INPUTS / DASHBOARD) volgt hier... -->
+
+        
+        <!-- LINKS: INPUTS -->
+        <div class="input-card" style="background: #1e293b; padding: 25px; border-radius: 20px; border: 1px solid #334155;">
+            
+                    <!-- LINKS: INPUTS -->
+        <div class="input-card" style="background: #1e293b; padding: 25px; border-radius: 20px; border: 1px solid #334155;">
+            
+            <!-- CONFIGURATIE RIJ (Aangepast Grid) -->
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px;">
+                <!-- Rij 1 -->
+                <div>
+                    <label style="display: block; font-size: 0.65rem; color: #94a3b8; text-transform: uppercase; margin-bottom: 5px; font-weight: bold;">Starttijd</label>
+                    <input type="time" id="rp-start" value="09:00" style="width:100%; border:1px solid #334155; padding: 10px; border-radius: 8px; background: #0f172a; color: white; height: 42px; box-sizing: border-box;">
+                </div>
+                <div>
+                    <label style="display: block; font-size: 0.65rem; color: #94a3b8; text-transform: uppercase; margin-bottom: 5px; font-weight: bold;">Geschatte Eindtijd</label>
+                    <input type="time" id="rp-eind" value="12:00" style="width:100%; border:1px solid #334155; padding: 10px; border-radius: 8px; background: #0f172a; color: white; height: 42px; box-sizing: border-box;">
+                </div>
+                <div>
+                    <label style="display: block; font-size: 0.65rem; color: #94a3b8; text-transform: uppercase; margin-bottom: 5px; font-weight: bold;">Temp °C</label>
+                    <input type="number" id="rp-temp" value="18" style="width:100%; border:1px solid #334155; padding: 10px; border-radius: 8px; background: #0f172a; color: white; height: 42px; box-sizing: border-box;">
+                </div>
+                <!-- Rij 2 -->
+                <div>
+                    <label style="display: block; font-size: 0.65rem; color: #94a3b8; text-transform: uppercase; margin-bottom: 5px; font-weight: bold;">Hoogte (m)</label>
+                    <input type="number" id="rp-height" value="0" placeholder="0" style="width:100%; border:1px solid #334155; padding: 10px; border-radius: 8px; background: #0f172a; color: white; height: 42px; box-sizing: border-box;">
+                </div>
+                <div>
+                    <label style="display: block; font-size: 0.65rem; color: #94a3b8; text-transform: uppercase; margin-bottom: 5px; font-weight: bold;">Vochtigheid (%)</label>
+                    <input type="number" id="rp-hum" value="50" placeholder="50" style="width:100%; border:1px solid #334155; padding: 10px; border-radius: 8px; background: #0f172a; color: white; height: 42px; box-sizing: border-box;">
+                </div>
+                <div>
+                    <!-- Leeg vak voor uitlijning -->
+                </div>
+            </div>
+
+            <p style="font-weight: bold; color: #3b82f6; margin-bottom: 20px; font-size: 1.1rem; border-bottom: 1px solid #334155; padding-bottom: 10px;">Geef weer welke producten je gaat gebruiken:</p>
+
+
+            <!-- PRODUCT SECTIES -->
+            <div style="display: flex; flex-direction: column; gap: 15px;">
+                <!-- Sportdrank -->
+                <div class="prod-group" style="border-left: 3px solid #3b82f6; padding-left: 15px;">
+                    <p style="font-weight: bold; font-size: 0.9rem;">🥤 Sportdrank (per 500ml)</p>
+                    <div id="list-drank"></div>
+                    <button onclick="addRow('drank')" style="margin-top: 5px; font-size: 0.75rem; color: #3b82f6; background: none; border: 1px dashed #3b82f6; padding: 4px 8px; cursor: pointer;">+ Sportdrank toevoegen</button>
+                </div>
+
+                <!-- Energy Gel -->
+                <div class="prod-group" style="border-left: 3px solid #60a5fa; padding-left: 15px;">
+                    <p style="font-weight: bold; font-size: 0.9rem;">🧪 Energy Gels</p>
+                    <div id="list-gels"></div>
+                    <button onclick="addRow('gels')" style="margin-top: 5px; font-size: 0.75rem; color: #60a5fa; background: none; border: 1px dashed #60a5fa; padding: 4px 8px; cursor: pointer;">+ Gel toevoegen</button>
+                </div>
+
+                <!-- Cafeine -->
+                <div class="prod-group" style="border-left: 3px solid #f59e0b; padding-left: 15px;">
+                    <p style="font-weight: bold; font-size: 0.9rem;">⚡ Gels + Cafeïne</p>
+                    <div id="list-cafe"></div>
+                    <button onclick="addRow('cafe')" style="margin-top: 5px; font-size: 0.75rem; color: #f59e0b; background: none; border: 1px dashed #f59e0b; padding: 4px 8px; cursor: pointer;">+ Cafeïne gel toevoegen</button>
+                </div>
+
+                <!-- Vast Voedsel -->
+                <div class="prod-group" style="border-left: 3px solid #10b981; padding-left: 15px;">
+                    <p style="font-weight: bold; font-size: 0.9rem;">🍱 Vaste Voeding</p>
+                    <div id="list-vast"></div>
+                    <button onclick="addRow('vast')" style="margin-top: 5px; font-size: 0.75rem; color: #10b981; background: none; border: 1px dashed #10b981; padding: 4px 8px; cursor: pointer;">+ Voeding toevoegen</button>
+                </div>
+            </div>
+
+            <button onclick="generateSmartPlan()" style="margin-top: 30px; width: 100%; padding: 18px; background: #3b82f6; border: none; border-radius: 12px; color: white; font-weight: bold; font-size: 1.1rem; cursor: pointer;">GENEREER SLIM RACEPLAN</button>
+        </div>
+
+        <!-- RECHTS: SLIM SCHEMA -->
+        <div id="race-dashboard" style="background: #ffffff; padding: 30px; border-radius: 25px; color: #1e293b; box-shadow: 0 15px 40px rgba(0,0,0,0.2); min-height: 600px; border: 1px solid #e2e8f0; overflow-y: auto;">
+    <div id="smart-plan-timeline">
+        <!-- PROFESSIONELE START-LOOK -->
+        <div style="text-align: center; margin-top: 150px; color: #94a3b8; max-width: 300px; margin-left: auto; margin-right: auto;">
+            <div style="width: 60px; height: 60px; background: #f1f5f9; border-radius: 15px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px auto;">
+                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10""")/>><path d="M18 20V4""")/>><path d="M6 20v-4""")/>></svg>
+            </div>
+            <h3 style="color: #0f172a; font-weight: 800; margin-bottom: 10px;">Analyse Stand-by</h3>
+            <p style="font-size: 0.85rem; line-height: 1.5;">Vul de parameters en producten links in om een optimaal raceplan te genereren.</p>
+        </div>
+    </div>
+</div>
+
+</section>
+
+
+
+
+
+    </div> <!-- Einde app-container -->
+
+    <script src="script.js"></script>
+</body>
+</html>
+
