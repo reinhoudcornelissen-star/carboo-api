@@ -419,60 +419,51 @@ async def gebruik_credit(omschrijving: str = "Rapport", user=Depends(get_current
 
 @app.post("/api/fuelc/scan-etiket")
 async def scan_etiket(request: Request, user=Depends(get_current_user)):
-    import anthropic, base64
+    import json, re
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(500, "anthropic pakket niet geinstalleerd")
+
     body = await request.json()
     image_data = body.get("image_data", "")
     media_type = body.get("media_type", "image/jpeg")
 
+    if not image_data:
+        raise HTTPException(400, "Geen afbeelding ontvangen")
+
+    if media_type not in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
+        media_type = "image/jpeg"
+
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        raise HTTPException(500, "Anthropic API key niet geconfigureerd")
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    prompt = """Analyseer dit voedseletiket en geef de voedingswaarden terug als JSON.
-Geef ALLEEN een JSON object terug, geen uitleg of markdown. Formaat:
-{
-  "naam": "productnaam",
-  "categorie": "een van: Granen en brood, Zuivel, Eieren, Vlees, Vis, Schaal- en schelpdieren, Peulvruchten, Sojaproducten, Noten en zaden, Groenten en fruit, Vetten en oliën, Sauzen en spreads, Dranken, Sportvoeding",
-  "portie_g": getal,
-  "portie_label": "bijv. 1 portie",
-  "kcal": getal per 100g,
-  "kh": koolhydraten per 100g,
-  "suikers": per 100g,
-  "vezels": per 100g of 0,
-  "eiwit": per 100g,
-  "vet": per 100g,
-  "verz": verzadigd vet per 100g,
-  "natrium": mg per 100g,
-  "kalium": mg per 100g of 0,
-  "calcium": mg per 100g of 0,
-  "ijzer": mg per 100g of 0,
-  "magnesium": mg per 100g of 0,
-  "vitc": mg per 100g of 0,
-  "vitd": mcg per 100g of 0,
-  "vitb12": mcg per 100g of 0,
-  "omega3": g per 100g of 0,
-  "gi": glycemische index of 0
-}"""
+        raise HTTPException(500, "ANTHROPIC_API_KEY niet ingesteld op Render")
 
     try:
+        client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model="claude-opus-4-5",
             max_tokens=1000,
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_data}},
-                    {"type": "text", "text": prompt}
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": image_data}
+                    },
+                    {
+                        "type": "text",
+                        "text": 'Analyseer dit voedseletiket. Geef ALLEEN een JSON object terug, geen uitleg. Gebruik dit formaat: {"naam":"","categorie":"Granen en brood","portie_g":100,"portie_label":"100g","kcal":0,"kh":0,"suikers":0,"vezels":0,"eiwit":0,"vet":0,"verz":0,"natrium":0,"kalium":0,"calcium":0,"ijzer":0,"magnesium":0,"vitc":0,"vitd":0,"vitb12":0,"omega3":0,"gi":0}'
+                    }
                 ]
             }]
         )
         tekst = msg.content[0].text.strip()
-        import json, re
         match = re.search(r'\{[\s\S]*\}', tekst)
         if not match:
-            raise HTTPException(422, "Geen voedingswaarden gevonden op etiket")
+            raise HTTPException(422, f"Claude antwoord: {tekst[:200]}")
         return json.loads(match.group())
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(500, f"Scan mislukt: {e}")
+        raise HTTPException(500, f"Claude fout: {type(e).__name__}: {str(e)[:200]}")
