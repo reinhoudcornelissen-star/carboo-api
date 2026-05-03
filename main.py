@@ -10,12 +10,7 @@ app = FastAPI(title="Carboo API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "https://carboo-next.vercel.app",
-    os.getenv("FRONTEND_URL", ""),
-],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
