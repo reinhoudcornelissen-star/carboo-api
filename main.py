@@ -232,6 +232,19 @@ async def verwijder_training(training_id: str, user=Depends(get_current_user), s
     supabase.table("fuelc_trainingen").delete().eq("id", training_id).eq("user_id", user.id).execute()
     return {"status": "verwijderd"}
 
+@app.get("/api/fuelc/dagboek/bereik")
+async def get_dagboek_bereik(van: str, tot: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haal alle dagboek items op voor een datumbereik in één call."""
+    r = supabase.table("fuelc_dagboek").select("*").eq("user_id", user.id).gte("datum", van).lte("datum", tot).execute()
+    # Groepeer per datum
+    per_dag: dict = {}
+    for item in (r.data or []):
+        d = item.get("datum", "")
+        if d not in per_dag:
+            per_dag[d] = []
+        per_dag[d].append(item)
+    return {"per_dag": per_dag}
+
 @app.get("/api/fuelc/dagboek/{datum}")
 async def get_dagboek(datum: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     r = supabase.table("fuelc_dagboek").select("*").eq("user_id", user.id).eq("datum", datum).execute()
