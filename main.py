@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import os
+import httpx
 from supabase import create_client, Client
 
 app = FastAPI(title="Carboo API", version="2.0.0")
@@ -231,6 +232,24 @@ async def voeg_training_toe(training: TrainingData, user=Depends(get_current_use
 async def verwijder_training(training_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     supabase.table("fuelc_trainingen").delete().eq("id", training_id).eq("user_id", user.id).execute()
     return {"status": "verwijderd"}
+
+@app.get("/api/fuelc/off-zoek")
+async def off_zoek(q: str, user=Depends(get_current_user)):
+    """Proxy naar Open Food Facts om CORS te omzeilen."""
+    if not q or len(q) < 2:
+        return {"products": []}
+    url = (
+        "https://world.openfoodfacts.org/cgi/search.pl"
+        f"?search_terms={q}&search_simple=1&action=process&json=1&page_size=20"
+        "&fields=id,product_name,product_name_nl,product_name_fr,nutriments,serving_size,serving_quantity"
+        "&lc=nl,fr,en"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(url, headers={"User-Agent": "Carboo/2.0 (sports nutrition app)"})
+            return r.json()
+    except Exception as e:
+        raise HTTPException(502, f"Open Food Facts niet bereikbaar: {e}")
 
 @app.get("/api/fuelc/dagboek/bereik")
 async def get_dagboek_bereik(van: str, tot: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
