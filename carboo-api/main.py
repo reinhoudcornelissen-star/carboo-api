@@ -13,8 +13,6 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "https://carboo-next.vercel.app",
-        "https://carboo.app",
-        "https://www.carboo.app",
         os.getenv("FRONTEND_URL", ""),
     ],
     allow_credentials=True,
