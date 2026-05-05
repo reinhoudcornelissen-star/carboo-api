@@ -301,8 +301,11 @@ async def genereer_invite(user=Depends(get_current_user), supabase: Client = Dep
     expires = (datetime.now() + timedelta(days=7)).isoformat()
     # Verwijder bestaande pending invite als die bestaat
     supabase.table("carboo_coach_klanten").delete().eq("coach_id", coach_id).eq("klant_id", user.id).eq("status", "pending").execute()
+    # klant_id tijdelijk leeg — wordt ingevuld bij acceptatie
+    import uuid
+    placeholder_klant_id = str(uuid.uuid4())
     supabase.table("carboo_coach_klanten").insert({
-        "coach_id": coach_id, "klant_id": user.id,
+        "coach_id": coach_id, "klant_id": placeholder_klant_id,
         "status": "pending", "invite_token": token, "invite_expires": expires
     }).execute()
     return {"token": token, "expires": expires, "link": f"/app/coach-zone/invite/{token}"}
