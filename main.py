@@ -233,8 +233,54 @@ async def verwijder_training(training_id: str, user=Depends(get_current_user), s
     supabase.table("fuelc_trainingen").delete().eq("id", training_id).eq("user_id", user.id).execute()
     return {"status": "verwijderd"}
 
+
+# ─── DOSSIER / RAPPORTEN ──────────────────────────────────────────────────────
+
+class RapportItem(BaseModel):
+    naam: str
+    type: str  # "race_plan" | "gut_log" | "analyse"
+    html: str
+    meta: Optional[dict] = {}
+
+@app.get("/api/dossier/rapporten")
+async def get_rapporten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", user.id).order("datum", desc=True).execute()
+    return {"rapporten": r.data or []}
+
+@app.get("/api/dossier/rapporten/{rapport_id}")
+async def get_rapport(rapport_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_rapporten").select("*").eq("user_id", user.id).eq("id", rapport_id).execute()
+    if not r.data:
+        raise HTTPException(404, "Rapport niet gevonden")
+    return r.data[0]
+
+@app.post("/api/dossier/rapporten")
+async def sla_rapport_op(item: RapportItem, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    from datetime import datetime
+    # Max 20 rapporten per gebruiker
+    bestaand = supabase.table("carboo_rapporten").select("id").eq("user_id", user.id).execute()
+    if len(bestaand.data or []) >= 20:
+        # Verwijder oudste
+        oudste = supabase.table("carboo_rapporten").select("id").eq("user_id", user.id).order("datum").limit(1).execute()
+        if oudste.data:
+            supabase.table("carboo_rapporten").delete().eq("id", oudste.data[0]["id"]).execute()
+    r = supabase.table("carboo_rapporten").insert({
+        "user_id": user.id,
+        "naam": item.naam,
+        "type": item.type,
+        "html": item.html,
+        "meta": item.meta or {},
+        "datum": datetime.now().isoformat(),
+    }).execute()
+    return {"id": r.data[0]["id"] if r.data else None, "ok": True}
+
+@app.delete("/api/dossier/rapporten/{rapport_id}")
+async def verwijder_rapport(rapport_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_rapporten").delete().eq("user_id", user.id).eq("id", rapport_id).execute()
+    return {"ok": True}
+
 @app.get("/api/fuelc/off-zoek")
-async def off_zoek(q: str, user=Depends(get_current_user)):
+async def off_zoek(q: str):
     """Proxy naar Open Food Facts om CORS te omzeilen."""
     if not q or len(q) < 2:
         return {"products": []}
