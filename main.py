@@ -299,7 +299,8 @@ async def genereer_invite(user=Depends(get_current_user), supabase: Client = Dep
     token = secrets.token_urlsafe(24)
     from datetime import datetime, timedelta
     expires = (datetime.now() + timedelta(days=7)).isoformat()
-    # Verwijder bestaande pending invite als die bestaat
+    # Verwijder alle bestaande pending invites van deze coach
+supabase.table("carboo_coach_klanten").delete().eq("coach_id", coach_id).eq("status", "pending").execute()
     supabase.table("carboo_coach_klanten").insert({
     "coach_id": coach_id,
     "klant_id": None,
