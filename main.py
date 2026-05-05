@@ -299,11 +299,13 @@ async def genereer_invite(user=Depends(get_current_user), supabase: Client = Dep
     token = secrets.token_urlsafe(24)
     from datetime import datetime, timedelta
     expires = (datetime.now() + timedelta(days=7)).isoformat()
+    # Verwijder bestaande pending invite als die bestaat
+    supabase.table("carboo_coach_klanten").delete().eq("coach_id", coach_id).eq("klant_id", user.id).eq("status", "pending").execute()
     supabase.table("carboo_coach_klanten").insert({
         "coach_id": coach_id, "klant_id": user.id,
         "status": "pending", "invite_token": token, "invite_expires": expires
     }).execute()
-    return {"token": token, "expires": expires, "link": f"/app/coach/invite/{token}"}
+    return {"token": token, "expires": expires, "link": f"/app/coach-zone/invite/{token}"}
 
 @app.get("/api/coach/invite/{token}")
 async def get_invite_info(token: str, supabase: Client = Depends(get_supabase)):
