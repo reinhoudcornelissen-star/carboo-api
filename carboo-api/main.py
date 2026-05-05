@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import os
+import httpx
 from supabase import create_client, Client
 
 app = FastAPI(title="Carboo API", version="2.0.0")
@@ -13,6 +14,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "https://carboo-next.vercel.app",
+        "https://carboo.app",
+        "https://www.carboo.app",
         os.getenv("FRONTEND_URL", ""),
     ],
     allow_credentials=True,
@@ -232,6 +235,575 @@ async def verwijder_training(training_id: str, user=Depends(get_current_user), s
     supabase.table("fuelc_trainingen").delete().eq("id", training_id).eq("user_id", user.id).execute()
     return {"status": "verwijderd"}
 
+
+# ─── COACH ZONE ───────────────────────────────────────────────────────────────
+
+import secrets
+
+class CoachProfiel(BaseModel):
+    naam: str
+    bio: Optional[str] = ""
+    specialisatie: Optional[str] = ""
+    email: str
+
+class PrivacyInstellingen(BaseModel):
+    relatie_id: str
+    fuelc_dagschema: bool = True
+    fuelc_analyses: bool = False
+    race_plannen: bool = True
+    train_gut: bool = False
+    dossier: bool = False
+
+class CoachOpmerking(BaseModel):
+    relatie_id: str
+    klant_id: str
+    tekst: str
+    item_type: Optional[str] = "algemeen"
+    item_id: Optional[str] = None
+    item_label: Optional[str] = None
+
+class CoachReactie(BaseModel):
+    opmerking_id: str
+    tekst: str
+
+class CoachNotitie(BaseModel):
+    klant_id: str
+    tekst: str
+
+# ── Coach profiel ──────────────────────────────────────────────────────────────
+
+@app.get("/api/coach/profiel")
+async def get_coach_profiel(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_coaches").select("*").eq("user_id", user.id).execute()
+    return {"profiel": r.data[0] if r.data else None}
+
+@app.post("/api/coach/profiel")
+async def sla_coach_profiel(item: CoachProfiel, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    data = {"user_id": user.id, "naam": item.naam, "bio": item.bio or "", "specialisatie": item.specialisatie or "", "email": item.email}
+    bestaand = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if bestaand.data:
+        supabase.table("carboo_coaches").update(data).eq("user_id", user.id).execute()
+    else:
+        supabase.table("carboo_coaches").insert(data).execute()
+    profiel = supabase.table("carboo_coaches").select("*").eq("user_id", user.id).execute()
+    return {"ok": True, "profiel": profiel.data[0] if profiel.data else None}
+
+# ── Invite systeem ──────────────────────────────────────────────────────────────
+
+@app.post("/api/coach/invite/genereer")
+async def genereer_invite(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(400, "Maak eerst een coach profiel aan")
+    coach_id = coach.data[0]["id"]
+    token = secrets.token_urlsafe(24)
+    from datetime import datetime, timedelta
+    expires = (datetime.now() + timedelta(days=7)).isoformat()
+    # Verwijder bestaande pending invite als die bestaat
+    supabase.table("carboo_coach_klanten").delete().eq("coach_id", coach_id).eq("klant_id", user.id).eq("status", "pending").execute()
+    supabase.table("carboo_coach_klanten").insert({
+        "coach_id": coach_id, "klant_id": user.id,
+        "status": "pending", "invite_token": token, "invite_expires": expires
+    }).execute()
+    return {"token": token, "expires": expires, "link": f"/app/coach-zone/invite/{token}"}
+
+@app.get("/api/coach/invite/{token}")
+async def get_invite_info(token: str, supabase: Client = Depends(get_supabase)):
+    from datetime import datetime
+    r = supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email)").eq("invite_token", token).eq("status", "pending").execute()
+    if not r.data:
+        raise HTTPException(404, "Uitnodiging niet gevonden of verlopen")
+    relatie = r.data[0]
+    if relatie.get("invite_expires") and relatie["invite_expires"] < datetime.now().isoformat():
+        raise HTTPException(410, "Uitnodiging verlopen")
+    return {"relatie": relatie}
+
+@app.post("/api/coach/invite/{token}/accepteer")
+async def accepteer_invite(token: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    from datetime import datetime
+    r = supabase.table("carboo_coach_klanten").select("*").eq("invite_token", token).eq("status", "pending").execute()
+    if not r.data:
+        raise HTTPException(404, "Uitnodiging niet gevonden")
+    relatie = r.data[0]
+    if relatie["invite_expires"] < datetime.now().isoformat():
+        raise HTTPException(410, "Uitnodiging verlopen")
+    # Update relatie
+    supabase.table("carboo_coach_klanten").update({
+        "klant_id": user.id, "status": "actief", "bijgewerkt": "now()"
+    }).eq("id", relatie["id"]).execute()
+    # Maak standaard privacy instellingen aan
+    supabase.table("carboo_coach_privacy").insert({
+        "relatie_id": relatie["id"], "klant_id": user.id,
+        "fuelc_dagschema": True, "fuelc_analyses": False,
+        "race_plannen": True, "train_gut": False, "dossier": False
+    }).execute()
+    return {"ok": True, "relatie_id": relatie["id"]}
+
+@app.post("/api/coach/invite/{token}/weiger")
+async def weiger_invite(token: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_coach_klanten").update({"status": "geweigerd", "bijgewerkt": "now()"}).eq("invite_token", token).execute()
+    return {"ok": True}
+
+# ── Klant: coaches beheren ─────────────────────────────────────────────────────
+
+@app.get("/api/coach/mijn-coaches")
+async def get_mijn_coaches(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email)").eq("klant_id", user.id).eq("status", "actief").execute()
+    return {"coaches": r.data or []}
+
+@app.delete("/api/coach/mijn-coaches/{relatie_id}")
+async def verwijder_coach(relatie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_coach_klanten").update({"status": "ingetrokken", "bijgewerkt": "now()"}).eq("id", relatie_id).eq("klant_id", user.id).execute()
+    return {"ok": True}
+
+# ── Privacy instellingen ────────────────────────────────────────────────────────
+
+@app.get("/api/coach/privacy/{relatie_id}")
+async def get_privacy(relatie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_coach_privacy").select("*").eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
+    return {"privacy": r.data[0] if r.data else None}
+
+@app.put("/api/coach/privacy/{relatie_id}")
+async def update_privacy(relatie_id: str, item: PrivacyInstellingen, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_coach_privacy").update({
+        "fuelc_dagschema": item.fuelc_dagschema, "fuelc_analyses": item.fuelc_analyses,
+        "race_plannen": item.race_plannen, "train_gut": item.train_gut,
+        "dossier": item.dossier, "bijgewerkt": "now()"
+    }).eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
+    return {"ok": True}
+
+# ── Coach: klanten overzicht ────────────────────────────────────────────────────
+
+@app.get("/api/coach/mijn-klanten")
+async def get_mijn_klanten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        return {"klanten": []}
+    coach_id = coach.data[0]["id"]
+    r = supabase.table("carboo_coach_klanten").select("*, carboo_coach_privacy(*)").eq("coach_id", coach_id).eq("status", "actief").execute()
+    return {"klanten": r.data or []}
+
+@app.get("/api/coach/klant/{klant_id}/data")
+async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach leest klantdata — enkel wat privacy toelaat."""
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    coach_id = coach.data[0]["id"]
+    relatie = supabase.table("carboo_coach_klanten").select("*, carboo_coach_privacy(*)").eq("coach_id", coach_id).eq("klant_id", klant_id).eq("status", "actief").execute()
+    if not relatie.data:
+        raise HTTPException(403, "Geen toegang tot deze klant")
+    privacy = relatie.data[0].get("carboo_coach_privacy") or {}
+    if isinstance(privacy, list) and privacy:
+        privacy = privacy[0]
+    result: dict = {"relatie_id": relatie.data[0]["id"], "privacy": privacy}
+    # Laad data op basis van privacy
+    if privacy.get("fuelc_dagschema"):
+        dag = supabase.table("carboo_dag_items").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(14).execute()
+        result["dagschema"] = dag.data or []
+    if privacy.get("race_plannen"):
+        rap = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
+        result["race_plannen"] = rap.data or []
+    if privacy.get("train_gut"):
+        gut = supabase.table("carboo_gut_sessies").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(20).execute()
+        result["gut_sessies"] = gut.data or []
+        wm = supabase.table("carboo_gut_winkelmandje").select("*").eq("user_id", klant_id).execute()
+        result["gut_winkelmandje"] = wm.data or []
+    return result
+
+# ── Opmerkingen ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/coach/opmerkingen")
+async def plaats_opmerking(item: CoachOpmerking, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    coach_id = coach.data[0]["id"]
+    # Verifieer relatie
+    relatie = supabase.table("carboo_coach_klanten").select("id").eq("id", item.relatie_id).eq("coach_id", coach_id).eq("status", "actief").execute()
+    if not relatie.data:
+        raise HTTPException(403, "Geen actieve relatie met deze klant")
+    r = supabase.table("carboo_coach_opmerkingen").insert({
+        "relatie_id": item.relatie_id, "coach_id": coach_id,
+        "klant_id": item.klant_id, "tekst": item.tekst,
+        "item_type": item.item_type or "algemeen",
+        "item_id": item.item_id, "item_label": item.item_label,
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+@app.get("/api/coach/opmerkingen/coach")
+async def get_opmerkingen_coach(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        return {"opmerkingen": []}
+    coach_id = coach.data[0]["id"]
+    r = supabase.table("carboo_coach_opmerkingen").select("*, carboo_coach_reacties(*)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute()
+    return {"opmerkingen": r.data or []}
+
+@app.get("/api/coach/opmerkingen/klant")
+async def get_opmerkingen_klant(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_coach_opmerkingen").select("*, carboo_coaches(naam), carboo_coach_reacties(*)").eq("klant_id", user.id).order("aangemaakt", desc=True).limit(50).execute()
+    # Tel ongelezen
+    ongelezen = sum(1 for o in (r.data or []) if not o.get("gelezen"))
+    return {"opmerkingen": r.data or [], "ongelezen": ongelezen}
+
+@app.put("/api/coach/opmerkingen/{opmerking_id}/gelezen")
+async def markeer_gelezen(opmerking_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_coach_opmerkingen").update({"gelezen": True}).eq("id", opmerking_id).eq("klant_id", user.id).execute()
+    return {"ok": True}
+
+@app.delete("/api/coach/opmerkingen/{opmerking_id}")
+async def verwijder_opmerking(opmerking_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if coach.data:
+        supabase.table("carboo_coach_opmerkingen").delete().eq("id", opmerking_id).eq("coach_id", coach.data[0]["id"]).execute()
+    return {"ok": True}
+
+@app.post("/api/coach/reacties")
+async def plaats_reactie(item: CoachReactie, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    # Verifieer dat klant eigenaar is van de opmerking
+    opm = supabase.table("carboo_coach_opmerkingen").select("id").eq("id", item.opmerking_id).eq("klant_id", user.id).execute()
+    if not opm.data:
+        raise HTTPException(403, "Geen toegang")
+    supabase.table("carboo_coach_reacties").insert({"opmerking_id": item.opmerking_id, "klant_id": user.id, "tekst": item.tekst}).execute()
+    supabase.table("carboo_coach_opmerkingen").update({"gelezen": True}).eq("id", item.opmerking_id).execute()
+    return {"ok": True}
+
+# ── Privé notities ─────────────────────────────────────────────────────────────
+
+@app.get("/api/coach/notities/{klant_id}")
+async def get_notities(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        return {"notities": []}
+    r = supabase.table("carboo_coach_notities").select("*").eq("coach_id", coach.data[0]["id"]).eq("klant_id", klant_id).order("bijgewerkt", desc=True).execute()
+    return {"notities": r.data or []}
+
+@app.post("/api/coach/notities")
+async def sla_notitie(item: CoachNotitie, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    supabase.table("carboo_coach_notities").insert({"coach_id": coach.data[0]["id"], "klant_id": item.klant_id, "tekst": item.tekst}).execute()
+    return {"ok": True}
+
+@app.delete("/api/coach/notities/{notitie_id}")
+async def verwijder_notitie(notitie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if coach.data:
+        supabase.table("carboo_coach_notities").delete().eq("id", notitie_id).eq("coach_id", coach.data[0]["id"]).execute()
+    return {"ok": True}
+
+
+# ─── DOSSIER / RAPPORTEN ──────────────────────────────────────────────────────
+
+class RapportItem(BaseModel):
+    naam: str
+    type: str  # "race_plan" | "gut_log" | "analyse"
+    html: str
+    meta: Optional[dict] = {}
+
+# ─── TRAIN THE GUT ───────────────────────────────────────────────────────────
+
+class GutProtocol(BaseModel):
+    sport: str
+    wedstrijd: Optional[str] = ""
+    niveau: str
+    ervaring: str
+    wedstrijd_datum: Optional[str] = None
+    trainingen_per_week: int = 1
+
+class GutSessie(BaseModel):
+    datum: Optional[str] = None
+    sport: Optional[str] = ""
+    duur_min: int
+    intensiteit: str
+    week_nummer: int
+    temp_c: Optional[int] = None
+    vochtigheid_pct: Optional[int] = None
+    notitie: Optional[str] = ""
+    energie_score: Optional[int] = None
+    prestatie_score: Optional[int] = None
+    wil_doorgaan: Optional[bool] = None
+    dosis_aanpassen: Optional[str] = "Zelfde"
+    producten: Optional[list] = []
+
+class WinkelmandjeItem(BaseModel):
+    naam: str
+    categorie: Optional[str] = ""
+    kh_gram: int
+    max_kh_uur: Optional[int] = None
+    gem_gi_score: Optional[float] = None
+    aantal_sessies: Optional[int] = 1
+    sport: Optional[str] = ""
+
+def bereken_startdosis(niveau: str, ervaring: str, sport: str) -> dict:
+    """Bereken start- en maxdosis op basis van niveau, ervaring en sport."""
+    # Basisdosis per ervaringsniveau
+    basis = {"Beginner": 20, "Gevorderd": 40, "Ervaren": 60}.get(ervaring, 20)
+    # Niveau-multiplier
+    mult = {"Recreant": 1.0, "Competitief": 1.3, "Professioneel": 1.6}.get(niveau, 1.0)
+    # Sport-correctie: lopen GI-gevoeliger
+    sport_factor = 0.8 if sport in ["Lopen"] else 1.0
+    startdosis = max(20, round(basis * sport_factor / 5) * 5)
+    # Max dosis per niveau
+    max_map = {"Recreant": 60, "Competitief": 90, "Professioneel": 120}
+    max_dosis = max_map.get(niveau, 60)
+    if sport == "Lopen":
+        max_dosis = round(max_dosis * 0.85 / 5) * 5
+    # Ratio aanbeveling
+    if startdosis < 60:
+        ratio = "Geen vereiste — glucose/maltodextrine volstaat"
+    elif startdosis < 90:
+        ratio = "2:1 glucose:fructose"
+    else:
+        ratio = "1:0.8 glucose:fructose"
+    return {
+        "startdosis": startdosis,
+        "max_dosis": max_dosis,
+        "ratio_advies": ratio,
+        "wk12_dosis": startdosis,
+        "wk34_dosis": min(startdosis + 15, max_dosis),
+        "wk56_dosis": min(startdosis + 30, max_dosis),
+    }
+
+@app.get("/api/gut/protocol")
+async def get_protocol(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_gut_protocol").select("*").eq("user_id", user.id).execute()
+    return {"protocol": r.data[0] if r.data else None}
+
+@app.post("/api/gut/protocol")
+async def sla_protocol_op(item: GutProtocol, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    dosis = bereken_startdosis(item.niveau, item.ervaring, item.sport)
+    data = {
+        "user_id": user.id,
+        "sport": item.sport,
+        "wedstrijd": item.wedstrijd or "",
+        "niveau": item.niveau,
+        "ervaring": item.ervaring,
+        "wedstrijd_datum": item.wedstrijd_datum,
+        "trainingen_per_week": item.trainingen_per_week,
+        "startdosis_g_uur": dosis["startdosis"],
+        "max_dosis_g_uur": dosis["max_dosis"],
+        "week_huidig": 1,
+        "bijgewerkt": "now()",
+    }
+    # Upsert op user_id
+    bestaand = supabase.table("carboo_gut_protocol").select("id").eq("user_id", user.id).execute()
+    if bestaand.data:
+        supabase.table("carboo_gut_protocol").update(data).eq("user_id", user.id).execute()
+    else:
+        supabase.table("carboo_gut_protocol").insert(data).execute()
+    return {"ok": True, "dosis": dosis}
+
+@app.get("/api/gut/sessies")
+async def get_sessies(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    sessies = supabase.table("carboo_gut_sessies").select("*").eq("user_id", user.id).order("datum", desc=True).execute()
+    sessie_ids = [s["id"] for s in (sessies.data or [])]
+    producten = []
+    if sessie_ids:
+        producten = supabase.table("carboo_gut_producten").select("*").in_("sessie_id", sessie_ids).execute().data or []
+    prod_map: dict = {}
+    for p in producten:
+        prod_map.setdefault(p["sessie_id"], []).append(p)
+    result = []
+    for s in (sessies.data or []):
+        s["producten"] = prod_map.get(s["id"], [])
+        result.append(s)
+    return {"sessies": result}
+
+@app.post("/api/gut/sessies")
+async def sla_sessie_op(item: GutSessie, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    from datetime import date
+    sessie_data = {
+        "user_id": user.id,
+        "datum": item.datum or str(date.today()),
+        "sport": item.sport or "",
+        "duur_min": item.duur_min,
+        "intensiteit": item.intensiteit,
+        "week_nummer": item.week_nummer,
+        "temp_c": item.temp_c,
+        "vochtigheid_pct": item.vochtigheid_pct,
+        "notitie": item.notitie or "",
+        "energie_score": item.energie_score,
+        "prestatie_score": item.prestatie_score,
+        "wil_doorgaan": item.wil_doorgaan,
+        "dosis_aanpassen": item.dosis_aanpassen or "Zelfde",
+    }
+    r = supabase.table("carboo_gut_sessies").insert(sessie_data).execute()
+    sessie_id = r.data[0]["id"] if r.data else None
+    if sessie_id and item.producten:
+        for p in item.producten:
+            supabase.table("carboo_gut_producten").insert({
+                "sessie_id": sessie_id,
+                "user_id": user.id,
+                "naam": p.get("naam", ""),
+                "categorie": p.get("categorie", ""),
+                "kh_gram": p.get("kh_gram", 0),
+                "hoeveelheid_ml_g": p.get("hoeveelheid_ml_g"),
+                "tijdstip_min": p.get("tijdstip_min"),
+                "gi_totaal": p.get("gi_totaal"),
+                "gi_misselijkheid": p.get("gi_misselijkheid"),
+                "gi_krampen": p.get("gi_krampen"),
+                "gi_opgeblazen": p.get("gi_opgeblazen"),
+                "gi_diarree": p.get("gi_diarree"),
+            }).execute()
+    # Update week_huidig in protocol
+    supabase.table("carboo_gut_protocol").update({
+        "week_huidig": item.week_nummer,
+        "bijgewerkt": "now()"
+    }).eq("user_id", user.id).execute()
+    return {"ok": True, "sessie_id": sessie_id}
+
+@app.delete("/api/gut/sessies/{sessie_id}")
+async def verwijder_sessie(sessie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_gut_sessies").delete().eq("user_id", user.id).eq("id", sessie_id).execute()
+    return {"ok": True}
+
+@app.get("/api/gut/winkelmandje")
+async def get_winkelmandje(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_gut_winkelmandje").select("*").eq("user_id", user.id).order("goedgekeurd_op", desc=True).execute()
+    return {"items": r.data or []}
+
+@app.post("/api/gut/winkelmandje")
+async def voeg_toe_winkelmandje(item: WinkelmandjeItem, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    data = {
+        "user_id": user.id,
+        "naam": item.naam,
+        "categorie": item.categorie or "",
+        "kh_gram": item.kh_gram,
+        "max_kh_uur": item.max_kh_uur,
+        "gem_gi_score": item.gem_gi_score,
+        "aantal_sessies": item.aantal_sessies,
+        "sport": item.sport or "",
+        "goedgekeurd_op": "now()",
+    }
+    # Upsert op naam
+    bestaand = supabase.table("carboo_gut_winkelmandje").select("id,aantal_sessies").eq("user_id", user.id).eq("naam", item.naam).execute()
+    if bestaand.data:
+        data["aantal_sessies"] = (bestaand.data[0].get("aantal_sessies") or 1) + 1
+        supabase.table("carboo_gut_winkelmandje").update(data).eq("user_id", user.id).eq("naam", item.naam).execute()
+    else:
+        supabase.table("carboo_gut_winkelmandje").insert(data).execute()
+    return {"ok": True}
+
+@app.delete("/api/gut/winkelmandje/{item_id}")
+async def verwijder_winkelmandje(item_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_gut_winkelmandje").delete().eq("user_id", user.id).eq("id", item_id).execute()
+    return {"ok": True}
+
+@app.get("/api/gut/advies")
+async def get_advies(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Genereer wetenschappelijk advies op basis van sessiehistoriek."""
+    protocol = supabase.table("carboo_gut_protocol").select("*").eq("user_id", user.id).execute()
+    if not protocol.data:
+        return {"advies": None}
+    p = protocol.data[0]
+    sessies = supabase.table("carboo_gut_sessies").select("*").eq("user_id", user.id).order("datum", desc=True).limit(10).execute()
+    sessie_ids = [s["id"] for s in (sessies.data or [])]
+    producten = []
+    if sessie_ids:
+        producten = supabase.table("carboo_gut_producten").select("*").in_("sessie_id", sessie_ids).execute().data or []
+    # Analyseer GI scores per product
+    product_stats: dict = {}
+    for prod in producten:
+        naam = prod["naam"]
+        gi = prod.get("gi_totaal") or 0
+        if naam not in product_stats:
+            product_stats[naam] = {"gi_scores": [], "kh": prod["kh_gram"], "cat": prod.get("categorie", "")}
+        product_stats[naam]["gi_scores"].append(gi)
+    adviezen = []
+    for naam, stats in product_stats.items():
+        gem_gi = sum(stats["gi_scores"]) / len(stats["gi_scores"]) if stats["gi_scores"] else 0
+        n = len(stats["gi_scores"])
+        if gem_gi <= 2 and n >= 2:
+            adviezen.append({"product": naam, "type": "positief", "bericht": f"{naam} scoort uitstekend (gem GI {gem_gi:.1f}/10). Klaar voor het winkelmandje?", "gem_gi": round(gem_gi, 1), "n": n})
+        elif gem_gi >= 5:
+            adviezen.append({"product": naam, "type": "waarschuwing", "bericht": f"{naam} geeft GI klachten (gem {gem_gi:.1f}/10). Overweeg lagere dosis of ander product.", "gem_gi": round(gem_gi, 1), "n": n})
+        elif n >= 1:
+            adviezen.append({"product": naam, "type": "neutraal", "bericht": f"{naam}: {n} sessie(s), gem GI {gem_gi:.1f}/10. Nog meer testen aanbevolen.", "gem_gi": round(gem_gi, 1), "n": n})
+    # Week advies
+    week = p.get("week_huidig", 1)
+    startdosis = p.get("startdosis_g_uur", 30)
+    wk_dosis = startdosis if week <= 2 else (startdosis + 15 if week <= 4 else min(startdosis + 30, p.get("max_dosis_g_uur", 90)))
+    ratio = "geen vereiste" if wk_dosis < 60 else ("2:1 glucose:fructose" if wk_dosis < 90 else "1:0.8 glucose:fructose")
+    return {
+        "week": week,
+        "dosis_huidig": wk_dosis,
+        "ratio_advies": ratio,
+        "product_adviezen": adviezen,
+        "protocol": p,
+    }
+
+
+@app.get("/api/dossier/rapporten")
+async def get_rapporten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", user.id).order("datum", desc=True).execute()
+    return {"rapporten": r.data or []}
+
+@app.get("/api/dossier/rapporten/{rapport_id}")
+async def get_rapport(rapport_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_rapporten").select("*").eq("user_id", user.id).eq("id", rapport_id).execute()
+    if not r.data:
+        raise HTTPException(404, "Rapport niet gevonden")
+    return r.data[0]
+
+@app.post("/api/dossier/rapporten")
+async def sla_rapport_op(item: RapportItem, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    from datetime import datetime
+    # Max 20 rapporten per gebruiker
+    bestaand = supabase.table("carboo_rapporten").select("id").eq("user_id", user.id).execute()
+    if len(bestaand.data or []) >= 20:
+        # Verwijder oudste
+        oudste = supabase.table("carboo_rapporten").select("id").eq("user_id", user.id).order("datum").limit(1).execute()
+        if oudste.data:
+            supabase.table("carboo_rapporten").delete().eq("id", oudste.data[0]["id"]).execute()
+    r = supabase.table("carboo_rapporten").insert({
+        "user_id": user.id,
+        "naam": item.naam,
+        "type": item.type,
+        "html": item.html,
+        "meta": item.meta or {},
+        "datum": datetime.now().isoformat(),
+    }).execute()
+    return {"id": r.data[0]["id"] if r.data else None, "ok": True}
+
+@app.delete("/api/dossier/rapporten/{rapport_id}")
+async def verwijder_rapport(rapport_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_rapporten").delete().eq("user_id", user.id).eq("id", rapport_id).execute()
+    return {"ok": True}
+
+@app.get("/api/fuelc/off-zoek")
+async def off_zoek(q: str):
+    """Proxy naar Open Food Facts om CORS te omzeilen."""
+    if not q or len(q) < 2:
+        return {"products": []}
+    url = (
+        "https://world.openfoodfacts.org/cgi/search.pl"
+        f"?search_terms={q}&search_simple=1&action=process&json=1&page_size=20"
+        "&fields=id,product_name,product_name_nl,product_name_fr,nutriments,serving_size,serving_quantity"
+        "&lc=nl,fr,en"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(url, headers={"User-Agent": "Carboo/2.0 (sports nutrition app)"})
+            return r.json()
+    except Exception as e:
+        raise HTTPException(502, f"Open Food Facts niet bereikbaar: {e}")
+
+@app.get("/api/fuelc/dagboek/bereik")
+async def get_dagboek_bereik(van: str, tot: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haal alle dagboek items op voor een datumbereik in één call."""
+    r = supabase.table("fuelc_dagboek").select("*").eq("user_id", user.id).gte("datum", van).lte("datum", tot).execute()
+    # Groepeer per datum
+    per_dag: dict = {}
+    for item in (r.data or []):
+        d = item.get("datum", "")
+        if d not in per_dag:
+            per_dag[d] = []
+        per_dag[d].append(item)
+    return {"per_dag": per_dag}
+
 @app.get("/api/fuelc/dagboek/{datum}")
 async def get_dagboek(datum: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     r = supabase.table("fuelc_dagboek").select("*").eq("user_id", user.id).eq("datum", datum).execute()
@@ -413,3 +985,180 @@ async def gebruik_credit(omschrijving: str = "Rapport", user=Depends(get_current
     supabase.table("carboo_gebruikers").update({"credits": credits - 1}).eq("id", user.id).execute()
     supabase.table("carboo_credit_log").insert({"user_id": user.id, "omschrijving": omschrijving, "bedrag": -1}).execute()
     return {"credits": credits - 1}
+
+
+# ═══ ETIKETSCAN ══════════════════════════════════════════════════════════════
+
+@app.post("/api/fuelc/scan-etiket")
+async def scan_etiket(request: Request, user=Depends(get_current_user)):
+    import json, re
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(500, "anthropic pakket niet geinstalleerd")
+
+    body = await request.json()
+    image_data = body.get("image_data", "")
+    media_type = body.get("media_type", "image/jpeg")
+
+    if not image_data:
+        raise HTTPException(400, "Geen afbeelding ontvangen")
+
+    if media_type not in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
+        media_type = "image/jpeg"
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY niet ingesteld op Render")
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=1000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": image_data}
+                    },
+                    {
+                        "type": "text",
+                        "text": 'Analyseer dit voedseletiket. Geef ALLEEN een JSON object terug, geen uitleg. Gebruik dit formaat: {"naam":"","categorie":"Granen en brood","portie_g":100,"portie_label":"100g","kcal":0,"kh":0,"suikers":0,"vezels":0,"eiwit":0,"vet":0,"verz":0,"natrium":0,"kalium":0,"calcium":0,"ijzer":0,"magnesium":0,"vitc":0,"vitd":0,"vitb12":0,"omega3":0,"gi":0}'
+                    }
+                ]
+            }]
+        )
+        tekst = msg.content[0].text.strip()
+        match = re.search(r'\{[\s\S]*\}', tekst)
+        if not match:
+            raise HTTPException(422, f"Claude antwoord: {tekst[:200]}")
+        return json.loads(match.group())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Claude fout: {type(e).__name__}: {str(e)[:200]}")
+
+# ─── COACH ZONE SOCIAAL ───────────────────────────────────────────────────────
+
+class CoachBericht(BaseModel):
+    tekst: str
+    type: Optional[str] = "bericht"
+
+class PrikbordPost(BaseModel):
+    titel: str
+    tekst: str
+    type: Optional[str] = "post"
+
+class PrikbordReactie(BaseModel):
+    post_id: str
+    tekst: str
+    anoniem: Optional[bool] = False
+
+# ── Groepsberichten ────────────────────────────────────────────────────────────
+
+@app.get("/api/coach/berichten")
+async def get_berichten_coach(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach haalt eigen berichten op."""
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        return {"berichten": []}
+    coach_id = coach.data[0]["id"]
+    r = supabase.table("carboo_coach_berichten").select("*, carboo_bericht_gelezen(klant_id)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute()
+    return {"berichten": r.data or []}
+
+@app.get("/api/coach/berichten/inbox")
+async def get_berichten_klant(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Klant haalt berichten van al zijn coaches op."""
+    coaches = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", user.id).eq("status", "actief").execute()
+    if not coaches.data:
+        return {"berichten": [], "ongelezen": 0}
+    coach_ids = [c["coach_id"] for c in coaches.data]
+    r = supabase.table("carboo_coach_berichten").select("*, carboo_coaches(naam), carboo_bericht_gelezen(klant_id)").in_("coach_id", coach_ids).order("aangemaakt", desc=True).limit(50).execute()
+    gelezen_ids = set()
+    for b in (r.data or []):
+        for g in (b.get("carboo_bericht_gelezen") or []):
+            if g.get("klant_id") == user.id:
+                gelezen_ids.add(b["id"])
+    ongelezen = sum(1 for b in (r.data or []) if b["id"] not in gelezen_ids)
+    return {"berichten": r.data or [], "ongelezen": ongelezen, "gelezen_ids": list(gelezen_ids)}
+
+@app.post("/api/coach/berichten")
+async def stuur_bericht(item: CoachBericht, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    r = supabase.table("carboo_coach_berichten").insert({
+        "coach_id": coach.data[0]["id"],
+        "tekst": item.tekst,
+        "type": item.type or "bericht",
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+@app.post("/api/coach/berichten/{bericht_id}/gelezen")
+async def markeer_bericht_gelezen(bericht_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    try:
+        supabase.table("carboo_bericht_gelezen").insert({"bericht_id": bericht_id, "klant_id": user.id}).execute()
+    except Exception:
+        pass
+    return {"ok": True}
+
+@app.delete("/api/coach/berichten/{bericht_id}")
+async def verwijder_bericht(bericht_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if coach.data:
+        supabase.table("carboo_coach_berichten").delete().eq("id", bericht_id).eq("coach_id", coach.data[0]["id"]).execute()
+    return {"ok": True}
+
+# ── Prikbord ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/coach/prikbord")
+async def get_prikbord(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haalt prikbord op — werkt voor coach én klant."""
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if coach.data:
+        coach_id = coach.data[0]["id"]
+        r = supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(*)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(30).execute()
+    else:
+        coaches = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", user.id).eq("status", "actief").execute()
+        if not coaches.data:
+            return {"posts": []}
+        coach_ids = [c["coach_id"] for c in coaches.data]
+        r = supabase.table("carboo_coach_prikbord").select("*, carboo_coaches(naam), carboo_prikbord_reacties(id,tekst,anoniem,aangemaakt,klant_id)").in_("coach_id", coach_ids).order("aangemaakt", desc=True).limit(30).execute()
+    return {"posts": r.data or []}
+
+@app.post("/api/coach/prikbord")
+async def maak_post(item: PrikbordPost, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    r = supabase.table("carboo_coach_prikbord").insert({
+        "coach_id": coach.data[0]["id"],
+        "titel": item.titel,
+        "tekst": item.tekst,
+        "type": item.type or "post",
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+@app.delete("/api/coach/prikbord/{post_id}")
+async def verwijder_post(post_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if coach.data:
+        supabase.table("carboo_coach_prikbord").delete().eq("id", post_id).eq("coach_id", coach.data[0]["id"]).execute()
+    return {"ok": True}
+
+@app.post("/api/coach/prikbord/reactie")
+async def plaats_prikbord_reactie(item: PrikbordReactie, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_prikbord_reacties").insert({
+        "post_id": item.post_id,
+        "klant_id": user.id,
+        "tekst": item.tekst,
+        "anoniem": item.anoniem or False,
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+@app.delete("/api/coach/prikbord/reactie/{reactie_id}")
+async def verwijder_prikbord_reactie(reactie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_prikbord_reacties").delete().eq("id", reactie_id).eq("klant_id", user.id).execute()
+    return {"ok": True}
