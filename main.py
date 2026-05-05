@@ -234,6 +234,263 @@ async def verwijder_training(training_id: str, user=Depends(get_current_user), s
     return {"status": "verwijderd"}
 
 
+# ─── COACH ZONE ───────────────────────────────────────────────────────────────
+
+import secrets
+
+class CoachProfiel(BaseModel):
+    naam: str
+    bio: Optional[str] = ""
+    specialisatie: Optional[str] = ""
+    email: str
+
+class PrivacyInstellingen(BaseModel):
+    relatie_id: str
+    fuelc_dagschema: bool = True
+    fuelc_analyses: bool = False
+    race_plannen: bool = True
+    train_gut: bool = False
+    dossier: bool = False
+
+class CoachOpmerking(BaseModel):
+    relatie_id: str
+    klant_id: str
+    tekst: str
+    item_type: Optional[str] = "algemeen"
+    item_id: Optional[str] = None
+    item_label: Optional[str] = None
+
+class CoachReactie(BaseModel):
+    opmerking_id: str
+    tekst: str
+
+class CoachNotitie(BaseModel):
+    klant_id: str
+    tekst: str
+
+# ── Coach profiel ──────────────────────────────────────────────────────────────
+
+@app.get("/api/coach/profiel")
+async def get_coach_profiel(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_coaches").select("*").eq("user_id", user.id).execute()
+    return {"profiel": r.data[0] if r.data else None}
+
+@app.post("/api/coach/profiel")
+async def sla_coach_profiel(item: CoachProfiel, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    data = {"user_id": user.id, "naam": item.naam, "bio": item.bio or "", "specialisatie": item.specialisatie or "", "email": item.email}
+    bestaand = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if bestaand.data:
+        supabase.table("carboo_coaches").update(data).eq("user_id", user.id).execute()
+    else:
+        supabase.table("carboo_coaches").insert(data).execute()
+    profiel = supabase.table("carboo_coaches").select("*").eq("user_id", user.id).execute()
+    return {"ok": True, "profiel": profiel.data[0] if profiel.data else None}
+
+# ── Invite systeem ──────────────────────────────────────────────────────────────
+
+@app.post("/api/coach/invite/genereer")
+async def genereer_invite(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(400, "Maak eerst een coach profiel aan")
+    coach_id = coach.data[0]["id"]
+    token = secrets.token_urlsafe(24)
+    from datetime import datetime, timedelta
+    expires = (datetime.now() + timedelta(days=7)).isoformat()
+    supabase.table("carboo_coach_klanten").insert({
+        "coach_id": coach_id, "klant_id": user.id,
+        "status": "pending", "invite_token": token, "invite_expires": expires
+    }).execute()
+    return {"token": token, "expires": expires, "link": f"/app/coach/invite/{token}"}
+
+@app.get("/api/coach/invite/{token}")
+async def get_invite_info(token: str, supabase: Client = Depends(get_supabase)):
+    from datetime import datetime
+    r = supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email)").eq("invite_token", token).eq("status", "pending").execute()
+    if not r.data:
+        raise HTTPException(404, "Uitnodiging niet gevonden of verlopen")
+    relatie = r.data[0]
+    if relatie.get("invite_expires") and relatie["invite_expires"] < datetime.now().isoformat():
+        raise HTTPException(410, "Uitnodiging verlopen")
+    return {"relatie": relatie}
+
+@app.post("/api/coach/invite/{token}/accepteer")
+async def accepteer_invite(token: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    from datetime import datetime
+    r = supabase.table("carboo_coach_klanten").select("*").eq("invite_token", token).eq("status", "pending").execute()
+    if not r.data:
+        raise HTTPException(404, "Uitnodiging niet gevonden")
+    relatie = r.data[0]
+    if relatie["invite_expires"] < datetime.now().isoformat():
+        raise HTTPException(410, "Uitnodiging verlopen")
+    # Update relatie
+    supabase.table("carboo_coach_klanten").update({
+        "klant_id": user.id, "status": "actief", "bijgewerkt": "now()"
+    }).eq("id", relatie["id"]).execute()
+    # Maak standaard privacy instellingen aan
+    supabase.table("carboo_coach_privacy").insert({
+        "relatie_id": relatie["id"], "klant_id": user.id,
+        "fuelc_dagschema": True, "fuelc_analyses": False,
+        "race_plannen": True, "train_gut": False, "dossier": False
+    }).execute()
+    return {"ok": True, "relatie_id": relatie["id"]}
+
+@app.post("/api/coach/invite/{token}/weiger")
+async def weiger_invite(token: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_coach_klanten").update({"status": "geweigerd", "bijgewerkt": "now()"}).eq("invite_token", token).execute()
+    return {"ok": True}
+
+# ── Klant: coaches beheren ─────────────────────────────────────────────────────
+
+@app.get("/api/coach/mijn-coaches")
+async def get_mijn_coaches(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email)").eq("klant_id", user.id).eq("status", "actief").execute()
+    return {"coaches": r.data or []}
+
+@app.delete("/api/coach/mijn-coaches/{relatie_id}")
+async def verwijder_coach(relatie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_coach_klanten").update({"status": "ingetrokken", "bijgewerkt": "now()"}).eq("id", relatie_id).eq("klant_id", user.id).execute()
+    return {"ok": True}
+
+# ── Privacy instellingen ────────────────────────────────────────────────────────
+
+@app.get("/api/coach/privacy/{relatie_id}")
+async def get_privacy(relatie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_coach_privacy").select("*").eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
+    return {"privacy": r.data[0] if r.data else None}
+
+@app.put("/api/coach/privacy/{relatie_id}")
+async def update_privacy(relatie_id: str, item: PrivacyInstellingen, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_coach_privacy").update({
+        "fuelc_dagschema": item.fuelc_dagschema, "fuelc_analyses": item.fuelc_analyses,
+        "race_plannen": item.race_plannen, "train_gut": item.train_gut,
+        "dossier": item.dossier, "bijgewerkt": "now()"
+    }).eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
+    return {"ok": True}
+
+# ── Coach: klanten overzicht ────────────────────────────────────────────────────
+
+@app.get("/api/coach/mijn-klanten")
+async def get_mijn_klanten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        return {"klanten": []}
+    coach_id = coach.data[0]["id"]
+    r = supabase.table("carboo_coach_klanten").select("*, carboo_coach_privacy(*)").eq("coach_id", coach_id).eq("status", "actief").execute()
+    return {"klanten": r.data or []}
+
+@app.get("/api/coach/klant/{klant_id}/data")
+async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach leest klantdata — enkel wat privacy toelaat."""
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    coach_id = coach.data[0]["id"]
+    relatie = supabase.table("carboo_coach_klanten").select("*, carboo_coach_privacy(*)").eq("coach_id", coach_id).eq("klant_id", klant_id).eq("status", "actief").execute()
+    if not relatie.data:
+        raise HTTPException(403, "Geen toegang tot deze klant")
+    privacy = relatie.data[0].get("carboo_coach_privacy") or {}
+    if isinstance(privacy, list) and privacy:
+        privacy = privacy[0]
+    result: dict = {"relatie_id": relatie.data[0]["id"], "privacy": privacy}
+    # Laad data op basis van privacy
+    if privacy.get("fuelc_dagschema"):
+        dag = supabase.table("carboo_dag_items").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(14).execute()
+        result["dagschema"] = dag.data or []
+    if privacy.get("race_plannen"):
+        rap = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
+        result["race_plannen"] = rap.data or []
+    if privacy.get("train_gut"):
+        gut = supabase.table("carboo_gut_sessies").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(20).execute()
+        result["gut_sessies"] = gut.data or []
+        wm = supabase.table("carboo_gut_winkelmandje").select("*").eq("user_id", klant_id).execute()
+        result["gut_winkelmandje"] = wm.data or []
+    return result
+
+# ── Opmerkingen ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/coach/opmerkingen")
+async def plaats_opmerking(item: CoachOpmerking, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    coach_id = coach.data[0]["id"]
+    # Verifieer relatie
+    relatie = supabase.table("carboo_coach_klanten").select("id").eq("id", item.relatie_id).eq("coach_id", coach_id).eq("status", "actief").execute()
+    if not relatie.data:
+        raise HTTPException(403, "Geen actieve relatie met deze klant")
+    r = supabase.table("carboo_coach_opmerkingen").insert({
+        "relatie_id": item.relatie_id, "coach_id": coach_id,
+        "klant_id": item.klant_id, "tekst": item.tekst,
+        "item_type": item.item_type or "algemeen",
+        "item_id": item.item_id, "item_label": item.item_label,
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+@app.get("/api/coach/opmerkingen/coach")
+async def get_opmerkingen_coach(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        return {"opmerkingen": []}
+    coach_id = coach.data[0]["id"]
+    r = supabase.table("carboo_coach_opmerkingen").select("*, carboo_coach_reacties(*)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute()
+    return {"opmerkingen": r.data or []}
+
+@app.get("/api/coach/opmerkingen/klant")
+async def get_opmerkingen_klant(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_coach_opmerkingen").select("*, carboo_coaches(naam), carboo_coach_reacties(*)").eq("klant_id", user.id).order("aangemaakt", desc=True).limit(50).execute()
+    # Tel ongelezen
+    ongelezen = sum(1 for o in (r.data or []) if not o.get("gelezen"))
+    return {"opmerkingen": r.data or [], "ongelezen": ongelezen}
+
+@app.put("/api/coach/opmerkingen/{opmerking_id}/gelezen")
+async def markeer_gelezen(opmerking_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_coach_opmerkingen").update({"gelezen": True}).eq("id", opmerking_id).eq("klant_id", user.id).execute()
+    return {"ok": True}
+
+@app.delete("/api/coach/opmerkingen/{opmerking_id}")
+async def verwijder_opmerking(opmerking_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if coach.data:
+        supabase.table("carboo_coach_opmerkingen").delete().eq("id", opmerking_id).eq("coach_id", coach.data[0]["id"]).execute()
+    return {"ok": True}
+
+@app.post("/api/coach/reacties")
+async def plaats_reactie(item: CoachReactie, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    # Verifieer dat klant eigenaar is van de opmerking
+    opm = supabase.table("carboo_coach_opmerkingen").select("id").eq("id", item.opmerking_id).eq("klant_id", user.id).execute()
+    if not opm.data:
+        raise HTTPException(403, "Geen toegang")
+    supabase.table("carboo_coach_reacties").insert({"opmerking_id": item.opmerking_id, "klant_id": user.id, "tekst": item.tekst}).execute()
+    supabase.table("carboo_coach_opmerkingen").update({"gelezen": True}).eq("id", item.opmerking_id).execute()
+    return {"ok": True}
+
+# ── Privé notities ─────────────────────────────────────────────────────────────
+
+@app.get("/api/coach/notities/{klant_id}")
+async def get_notities(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        return {"notities": []}
+    r = supabase.table("carboo_coach_notities").select("*").eq("coach_id", coach.data[0]["id"]).eq("klant_id", klant_id).order("bijgewerkt", desc=True).execute()
+    return {"notities": r.data or []}
+
+@app.post("/api/coach/notities")
+async def sla_notitie(item: CoachNotitie, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    supabase.table("carboo_coach_notities").insert({"coach_id": coach.data[0]["id"], "klant_id": item.klant_id, "tekst": item.tekst}).execute()
+    return {"ok": True}
+
+@app.delete("/api/coach/notities/{notitie_id}")
+async def verwijder_notitie(notitie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if coach.data:
+        supabase.table("carboo_coach_notities").delete().eq("id", notitie_id).eq("coach_id", coach.data[0]["id"]).execute()
+    return {"ok": True}
+
+
 # ─── DOSSIER / RAPPORTEN ──────────────────────────────────────────────────────
 
 class RapportItem(BaseModel):
