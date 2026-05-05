@@ -14,6 +14,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "https://carboo-next.vercel.app",
+        "https://carboo.app",
+        "https://www.carboo.app",
         os.getenv("FRONTEND_URL", ""),
     ],
     allow_credentials=True,
@@ -1035,3 +1037,126 @@ async def scan_etiket(request: Request, user=Depends(get_current_user)):
         raise
     except Exception as e:
         raise HTTPException(500, f"Claude fout: {type(e).__name__}: {str(e)[:200]}")
+
+# ─── COACH ZONE SOCIAAL ───────────────────────────────────────────────────────
+
+class CoachBericht(BaseModel):
+    tekst: str
+    type: Optional[str] = "bericht"
+
+class PrikbordPost(BaseModel):
+    titel: str
+    tekst: str
+    type: Optional[str] = "post"
+
+class PrikbordReactie(BaseModel):
+    post_id: str
+    tekst: str
+    anoniem: Optional[bool] = False
+
+# ── Groepsberichten ────────────────────────────────────────────────────────────
+
+@app.get("/api/coach/berichten")
+async def get_berichten_coach(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach haalt eigen berichten op."""
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        return {"berichten": []}
+    coach_id = coach.data[0]["id"]
+    r = supabase.table("carboo_coach_berichten").select("*, carboo_bericht_gelezen(klant_id)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute()
+    return {"berichten": r.data or []}
+
+@app.get("/api/coach/berichten/inbox")
+async def get_berichten_klant(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Klant haalt berichten van al zijn coaches op."""
+    coaches = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", user.id).eq("status", "actief").execute()
+    if not coaches.data:
+        return {"berichten": [], "ongelezen": 0}
+    coach_ids = [c["coach_id"] for c in coaches.data]
+    r = supabase.table("carboo_coach_berichten").select("*, carboo_coaches(naam), carboo_bericht_gelezen(klant_id)").in_("coach_id", coach_ids).order("aangemaakt", desc=True).limit(50).execute()
+    gelezen_ids = set()
+    for b in (r.data or []):
+        for g in (b.get("carboo_bericht_gelezen") or []):
+            if g.get("klant_id") == user.id:
+                gelezen_ids.add(b["id"])
+    ongelezen = sum(1 for b in (r.data or []) if b["id"] not in gelezen_ids)
+    return {"berichten": r.data or [], "ongelezen": ongelezen, "gelezen_ids": list(gelezen_ids)}
+
+@app.post("/api/coach/berichten")
+async def stuur_bericht(item: CoachBericht, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    r = supabase.table("carboo_coach_berichten").insert({
+        "coach_id": coach.data[0]["id"],
+        "tekst": item.tekst,
+        "type": item.type or "bericht",
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+@app.post("/api/coach/berichten/{bericht_id}/gelezen")
+async def markeer_bericht_gelezen(bericht_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    try:
+        supabase.table("carboo_bericht_gelezen").insert({"bericht_id": bericht_id, "klant_id": user.id}).execute()
+    except Exception:
+        pass
+    return {"ok": True}
+
+@app.delete("/api/coach/berichten/{bericht_id}")
+async def verwijder_bericht(bericht_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if coach.data:
+        supabase.table("carboo_coach_berichten").delete().eq("id", bericht_id).eq("coach_id", coach.data[0]["id"]).execute()
+    return {"ok": True}
+
+# ── Prikbord ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/coach/prikbord")
+async def get_prikbord(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haalt prikbord op — werkt voor coach én klant."""
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if coach.data:
+        coach_id = coach.data[0]["id"]
+        r = supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(*)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(30).execute()
+    else:
+        coaches = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", user.id).eq("status", "actief").execute()
+        if not coaches.data:
+            return {"posts": []}
+        coach_ids = [c["coach_id"] for c in coaches.data]
+        r = supabase.table("carboo_coach_prikbord").select("*, carboo_coaches(naam), carboo_prikbord_reacties(id,tekst,anoniem,aangemaakt,klant_id)").in_("coach_id", coach_ids).order("aangemaakt", desc=True).limit(30).execute()
+    return {"posts": r.data or []}
+
+@app.post("/api/coach/prikbord")
+async def maak_post(item: PrikbordPost, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    r = supabase.table("carboo_coach_prikbord").insert({
+        "coach_id": coach.data[0]["id"],
+        "titel": item.titel,
+        "tekst": item.tekst,
+        "type": item.type or "post",
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+@app.delete("/api/coach/prikbord/{post_id}")
+async def verwijder_post(post_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if coach.data:
+        supabase.table("carboo_coach_prikbord").delete().eq("id", post_id).eq("coach_id", coach.data[0]["id"]).execute()
+    return {"ok": True}
+
+@app.post("/api/coach/prikbord/reactie")
+async def plaats_prikbord_reactie(item: PrikbordReactie, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_prikbord_reacties").insert({
+        "post_id": item.post_id,
+        "klant_id": user.id,
+        "tekst": item.tekst,
+        "anoniem": item.anoniem or False,
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+@app.delete("/api/coach/prikbord/reactie/{reactie_id}")
+async def verwijder_prikbord_reactie(reactie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_prikbord_reacties").delete().eq("id", reactie_id).eq("klant_id", user.id).execute()
+    return {"ok": True}
