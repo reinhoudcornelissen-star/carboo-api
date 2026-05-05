@@ -296,24 +296,17 @@ async def genereer_invite(user=Depends(get_current_user), supabase: Client = Dep
     if not coach.data:
         raise HTTPException(400, "Maak eerst een coach profiel aan")
     coach_id = coach.data[0]["id"]
-    token = secrets.token_urlsafe(24)
     from datetime import datetime, timedelta
-    expires = (datetime.now() + timedelta(days=7)).isoformat()
     # Verwijder alle bestaande pending invites van deze coach
-supabase.table("carboo_coach_klanten").delete().eq("coach_id", coach_id).eq("status", "pending").execute()
+    supabase.table("carboo_coach_klanten").delete().eq("coach_id", coach_id).eq("status", "pending").execute()
+    token = secrets.token_urlsafe(24)
+    expires = (datetime.now() + timedelta(days=7)).isoformat()
     supabase.table("carboo_coach_klanten").insert({
-    "coach_id": coach_id,
-    "klant_id": None,
-    "status": "pending", 
-    "invite_token": token, 
-    "invite_expires": expires
-}).execute()
-    # klant_id tijdelijk leeg — wordt ingevuld bij acceptatie
-    import uuid
-    placeholder_klant_id = str(uuid.uuid4())
-    supabase.table("carboo_coach_klanten").insert({
-        "coach_id": coach_id, "klant_id": placeholder_klant_id,
-        "status": "pending", "invite_token": token, "invite_expires": expires
+        "coach_id": coach_id,
+        "klant_id": None,
+        "status": "pending",
+        "invite_token": token,
+        "invite_expires": expires
     }).execute()
     return {"token": token, "expires": expires, "link": f"/app/coach-zone/invite/{token}"}
 
