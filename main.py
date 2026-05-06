@@ -525,6 +525,14 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         result["gut_sessies"] = gut.data or []
         wm = supabase.table("carboo_gut_winkelmandje").select("*").eq("user_id", klant_id).execute()
         result["gut_winkelmandje"] = wm.data or []
+    if privacy.get("dossier"):
+        dos = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
+        result["dossier"] = dos.data or []
+    if privacy.get("fuelc_analyses"):
+        # Stuur recent dagschema mee voor analyses (als niet al gedaan)
+        if "dagschema" not in result:
+            dag = supabase.table("fuelc_dagboek").select("datum,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
+            result["dagschema"] = dag.data or []
     return result
 
 # ── Opmerkingen ─────────────────────────────────────────────────────────────────
