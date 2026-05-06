@@ -250,6 +250,8 @@ class PrivacyInstellingen(BaseModel):
     relatie_id: str
     fuelc_dagschema: bool = True
     fuelc_analyses: bool = False
+    macros: bool = False
+    gewicht: bool = False
     race_plannen: bool = True
     train_gut: bool = False
     dossier: bool = False
@@ -483,6 +485,7 @@ async def get_privacy(relatie_id: str, user=Depends(get_current_user), supabase:
 async def update_privacy(relatie_id: str, item: PrivacyInstellingen, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     supabase.table("carboo_coach_privacy").update({
         "fuelc_dagschema": item.fuelc_dagschema, "fuelc_analyses": item.fuelc_analyses,
+        "macros": item.macros, "gewicht": item.gewicht,
         "race_plannen": item.race_plannen, "train_gut": item.train_gut,
         "dossier": item.dossier, "bijgewerkt": "now()"
     }).eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
@@ -529,10 +532,37 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         dos = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
         result["dossier"] = dos.data or []
     if privacy.get("fuelc_analyses"):
-        # Stuur recent dagschema mee voor analyses (als niet al gedaan)
         if "dagschema" not in result:
             dag = supabase.table("fuelc_dagboek").select("datum,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
             result["dagschema"] = dag.data or []
+
+    if privacy.get("macros"):
+        dag = supabase.table("fuelc_dagboek").select("datum,kcal,kh_g,eiwit_g,vet_g").eq("user_id", klant_id).order("datum", desc=True).limit(70).execute()
+        items = dag.data or []
+        # Groepeer per dag
+        per_dag: dict = {}
+        for item in items:
+            d = item.get("datum", "")
+            if d not in per_dag:
+                per_dag[d] = {"kcal": 0, "kh": 0, "eiwit": 0, "vet": 0}
+            per_dag[d]["kcal"] += item.get("kcal", 0) or 0
+            per_dag[d]["kh"] += item.get("kh_g", 0) or 0
+            per_dag[d]["eiwit"] += item.get("eiwit_g", 0) or 0
+            per_dag[d]["vet"] += item.get("vet_g", 0) or 0
+        if per_dag:
+            n = len(per_dag)
+            result["macros_data"] = {
+                "gem_kcal": round(sum(d["kcal"] for d in per_dag.values()) / n),
+                "gem_kh": round(sum(d["kh"] for d in per_dag.values()) / n),
+                "gem_eiwit": round(sum(d["eiwit"] for d in per_dag.values()) / n),
+                "gem_vet": round(sum(d["vet"] for d in per_dag.values()) / n),
+                "dagen": n,
+            }
+
+    if privacy.get("gewicht"):
+        gew = supabase.table("fuelc_dagboek_welzijn").select("datum,gewicht_kg").eq("user_id", klant_id).not_.is_("gewicht_kg", "null").order("datum", desc=True).limit(20).execute()
+        result["gewicht_data"] = gew.data or []
+
     return result
 
 # ── Opmerkingen ─────────────────────────────────────────────────────────────────
