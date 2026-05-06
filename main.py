@@ -488,7 +488,7 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
     result: dict = {"relatie_id": relatie.data[0]["id"], "privacy": privacy}
     # Laad data op basis van privacy
     if privacy.get("fuelc_dagschema"):
-        dag = supabase.table("carboo_dag_items").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(14).execute()
+        dag = supabase.table("fuelc_dagboek").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(14).execute()
         result["dagschema"] = dag.data or []
     if privacy.get("race_plannen"):
         rap = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
