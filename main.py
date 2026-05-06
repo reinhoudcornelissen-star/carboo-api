@@ -252,6 +252,8 @@ class PrivacyInstellingen(BaseModel):
     fuelc_analyses: bool = False
     macros: bool = False
     gewicht: bool = False
+    voedingskwaliteit: bool = False
+    performance: bool = False
     race_plannen: bool = True
     train_gut: bool = False
     dossier: bool = False
@@ -452,8 +454,9 @@ async def accepteer_invite(token: str, user=Depends(get_current_user), supabase:
     # Maak standaard privacy instellingen aan
     supabase.table("carboo_coach_privacy").insert({
         "relatie_id": relatie["id"], "klant_id": user.id,
-        "fuelc_dagschema": True, "fuelc_analyses": False,
-        "race_plannen": True, "train_gut": False, "dossier": False
+        "dagschema": False, "gewicht": False, "macros": False,
+        "voedingskwaliteit": False, "performance": False,
+        "race_plannen": False, "train_gut": False, "dossier": False
     }).execute()
     return {"ok": True, "relatie_id": relatie["id"]}
 
@@ -486,6 +489,7 @@ async def update_privacy(relatie_id: str, item: PrivacyInstellingen, user=Depend
     supabase.table("carboo_coach_privacy").update({
         "fuelc_dagschema": item.fuelc_dagschema, "fuelc_analyses": item.fuelc_analyses,
         "macros": item.macros, "gewicht": item.gewicht,
+        "voedingskwaliteit": item.voedingskwaliteit, "performance": item.performance,
         "race_plannen": item.race_plannen, "train_gut": item.train_gut,
         "dossier": item.dossier, "bijgewerkt": "now()"
     }).eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
@@ -531,14 +535,16 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
     if privacy.get("dossier"):
         dos = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
         result["dossier"] = dos.data or []
-    if privacy.get("fuelc_analyses"):
+    if privacy.get("voedingskwaliteit") or privacy.get("performance") or privacy.get("macros"):
+        # Haal dagboek op voor berekeningen (als niet al gedaan)
         if "dagschema" not in result:
-            dag = supabase.table("fuelc_dagboek").select("datum,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
-            result["dagschema"] = dag.data or []
+            dag = supabase.table("fuelc_dagboek").select("datum,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g").eq("user_id", klant_id).order("datum", desc=True).limit(70).execute()
+            dag_items = dag.data or []
+        else:
+            dag_items = result["dagschema"]
 
     if privacy.get("macros"):
-        dag = supabase.table("fuelc_dagboek").select("datum,kcal,kh_g,eiwit_g,vet_g").eq("user_id", klant_id).order("datum", desc=True).limit(70).execute()
-        items = dag.data or []
+        items = dag_items if "dag_items" in dir() else []
         # Groepeer per dag
         per_dag: dict = {}
         for item in items:
@@ -562,6 +568,13 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
     if privacy.get("gewicht"):
         gew = supabase.table("fuelc_dagboek_welzijn").select("datum,gewicht_kg").eq("user_id", klant_id).not_.is_("gewicht_kg", "null").order("datum", desc=True).limit(20).execute()
         result["gewicht_data"] = gew.data or []
+
+    if privacy.get("performance") or privacy.get("voedingskwaliteit"):
+        # Stuur dagboek + welzijn mee voor score berekening
+        dag_all = supabase.table("fuelc_dagboek").select("datum,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,moment,categorie").eq("user_id", klant_id).order("datum", desc=True).limit(70).execute()
+        welzijn = supabase.table("fuelc_dagboek_welzijn").select("datum,energie_score,stemming,stress,slaap_uur,rpe,hf_rust").eq("user_id", klant_id).order("datum", desc=True).limit(14).execute()
+        result["dagboek_scores"] = dag_all.data or []
+        result["welzijn_scores"] = welzijn.data or []
 
     return result
 
