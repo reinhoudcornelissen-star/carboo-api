@@ -248,15 +248,15 @@ class CoachProfiel(BaseModel):
 
 class PrivacyInstellingen(BaseModel):
     relatie_id: str
-    fuelc_dagschema: bool = True
-    fuelc_analyses: bool = False
-    macros: bool = False
+    dagschema: bool = False
     gewicht: bool = False
+    macros: bool = False
     voedingskwaliteit: bool = False
     performance: bool = False
-    race_plannen: bool = True
+    race_plannen: bool = False
     train_gut: bool = False
     dossier: bool = False
+   dossier: bool = False
 
 class CoachOpmerking(BaseModel):
     relatie_id: str
@@ -487,11 +487,15 @@ async def get_privacy(relatie_id: str, user=Depends(get_current_user), supabase:
 @app.put("/api/coach/privacy/{relatie_id}")
 async def update_privacy(relatie_id: str, item: PrivacyInstellingen, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     supabase.table("carboo_coach_privacy").update({
-        "fuelc_dagschema": item.fuelc_dagschema, "fuelc_analyses": item.fuelc_analyses,
-        "macros": item.macros, "gewicht": item.gewicht,
-        "voedingskwaliteit": item.voedingskwaliteit, "performance": item.performance,
-        "race_plannen": item.race_plannen, "train_gut": item.train_gut,
-        "dossier": item.dossier, "bijgewerkt": "now()"
+        "dagschema": item.dagschema,
+        "gewicht": item.gewicht,
+        "macros": item.macros,
+        "voedingskwaliteit": item.voedingskwaliteit,
+        "performance": item.performance,
+        "race_plannen": item.race_plannen,
+        "train_gut": item.train_gut,
+        "dossier": item.dossier,
+        "bijgewerkt": "now()"
     }).eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
     return {"ok": True}
 
@@ -521,7 +525,7 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         privacy = privacy[0]
     result: dict = {"relatie_id": relatie.data[0]["id"], "privacy": privacy}
     # Laad data op basis van privacy
-    if privacy.get("fuelc_dagschema"):
+    if privacy.get("dagschema"):
         dag = supabase.table("fuelc_dagboek").select("datum,naam,kcal,kh_g,eiwit_g,vet_g").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
         result["dagschema"] = dag.data or []
     if privacy.get("race_plannen"):
