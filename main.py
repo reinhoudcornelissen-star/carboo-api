@@ -356,6 +356,33 @@ async def dien_aanvraag_in(item: CoachAanvraag, user=Depends(get_current_user), 
 
 # ── Coach profiel ──────────────────────────────────────────────────────────────
 
+@app.post("/api/admin/coach-aanmaken")
+async def admin_maak_coach(item: CoachProfiel, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+    # Zoek user op basis van email
+    gebruiker = supabase.auth.admin.list_users()
+    klant_id = None
+    for u in (gebruiker or []):
+        if hasattr(u, 'email') and u.email == item.email:
+            klant_id = u.id
+            break
+    if not klant_id:
+        raise HTTPException(404, f"Geen Carboo account gevonden voor {item.email}")
+    bestaand = supabase.table("carboo_coaches").select("id").eq("user_id", klant_id).execute()
+    if bestaand.data:
+        supabase.table("carboo_coaches").update({"verified": True, "naam": item.naam, "email": item.email}).eq("user_id", klant_id).execute()
+    else:
+        supabase.table("carboo_coaches").insert({"user_id": klant_id, "naam": item.naam, "email": item.email, "bio": item.bio or "", "specialisatie": item.specialisatie or "", "verified": True}).execute()
+    return {"ok": True}
+
+@app.delete("/api/admin/coach/{coach_id}")
+async def admin_verwijder_coach(coach_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+    supabase.table("carboo_coaches").update({"verified": False}).eq("id", coach_id).execute()
+    return {"ok": True}
+
 @app.get("/api/coach/profiel")
 async def get_coach_profiel(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     r = supabase.table("carboo_coaches").select("*").eq("user_id", user.id).execute()
@@ -488,7 +515,7 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
     result: dict = {"relatie_id": relatie.data[0]["id"], "privacy": privacy}
     # Laad data op basis van privacy
     if privacy.get("fuelc_dagschema"):
-        dag = supabase.table("fuelc_dagboek").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(14).execute()
+        dag = supabase.table("fuelc_dagboek").select("datum,naam,kcal,kh_g,eiwit_g,vet_g").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
         result["dagschema"] = dag.data or []
     if privacy.get("race_plannen"):
         rap = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
