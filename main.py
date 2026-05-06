@@ -270,6 +270,90 @@ class CoachNotitie(BaseModel):
     klant_id: str
     tekst: str
 
+
+# ─── ADMIN + COACH AANVRAGEN ─────────────────────────────────────────────────
+
+class CoachAanvraag(BaseModel):
+    naam: str
+    email: str
+    bio: Optional[str] = ""
+    specialisatie: Optional[str] = ""
+
+async def is_admin(user, supabase: Client) -> bool:
+    r = supabase.table("carboo_admins").select("user_id").eq("user_id", user.id).execute()
+    return bool(r.data)
+
+@app.get("/api/admin/check")
+async def check_admin(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    return {"is_admin": await is_admin(user, supabase)}
+
+@app.get("/api/admin/aanvragen")
+async def get_aanvragen(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+    r = supabase.table("carboo_coach_aanvragen").select("*").order("aangemaakt", desc=True).execute()
+    return {"aanvragen": r.data or []}
+
+@app.post("/api/admin/aanvragen/{aanvraag_id}/keur-goed")
+async def keur_goed(aanvraag_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+    from datetime import datetime
+    aanvraag = supabase.table("carboo_coach_aanvragen").select("*").eq("id", aanvraag_id).execute()
+    if not aanvraag.data:
+        raise HTTPException(404, "Aanvraag niet gevonden")
+    a = aanvraag.data[0]
+    # Maak coach profiel aan of update verified
+    bestaand = supabase.table("carboo_coaches").select("id").eq("user_id", a["user_id"]).execute()
+    if bestaand.data:
+        supabase.table("carboo_coaches").update({"verified": True}).eq("user_id", a["user_id"]).execute()
+    else:
+        supabase.table("carboo_coaches").insert({
+            "user_id": a["user_id"], "naam": a["naam"], "email": a["email"],
+            "bio": a["bio"] or "", "specialisatie": a["specialisatie"] or "", "verified": True
+        }).execute()
+    supabase.table("carboo_coach_aanvragen").update({
+        "status": "goedgekeurd", "behandeld": datetime.now().isoformat()
+    }).eq("id", aanvraag_id).execute()
+    return {"ok": True}
+
+@app.post("/api/admin/aanvragen/{aanvraag_id}/weiger")
+async def weiger_aanvraag(aanvraag_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+    from datetime import datetime
+    supabase.table("carboo_coach_aanvragen").update({
+        "status": "geweigerd", "behandeld": datetime.now().isoformat()
+    }).eq("id", aanvraag_id).execute()
+    return {"ok": True}
+
+@app.get("/api/coach/aanvraag")
+async def get_mijn_aanvraag(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_coach_aanvragen").select("*").eq("user_id", user.id).execute()
+    return {"aanvraag": r.data[0] if r.data else None}
+
+@app.post("/api/coach/aanvraag")
+async def dien_aanvraag_in(item: CoachAanvraag, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    bestaand = supabase.table("carboo_coach_aanvragen").select("id,status").eq("user_id", user.id).execute()
+    if bestaand.data:
+        bestaand_status = bestaand.data[0]["status"]
+        if bestaand_status == "goedgekeurd":
+            raise HTTPException(400, "Aanvraag al goedgekeurd")
+        if bestaand_status == "pending":
+            raise HTTPException(400, "Aanvraag al ingediend — wacht op goedkeuring")
+        # Geweigerd — laat opnieuw indienen
+        supabase.table("carboo_coach_aanvragen").update({
+            "naam": item.naam, "email": item.email,
+            "bio": item.bio or "", "specialisatie": item.specialisatie or "",
+            "status": "pending", "behandeld": None
+        }).eq("user_id", user.id).execute()
+    else:
+        supabase.table("carboo_coach_aanvragen").insert({
+            "user_id": user.id, "naam": item.naam, "email": item.email,
+            "bio": item.bio or "", "specialisatie": item.specialisatie or ""
+        }).execute()
+    return {"ok": True}
+
 # ── Coach profiel ──────────────────────────────────────────────────────────────
 
 @app.get("/api/coach/profiel")
@@ -292,9 +376,11 @@ async def sla_coach_profiel(item: CoachProfiel, user=Depends(get_current_user), 
 
 @app.post("/api/coach/invite/genereer")
 async def genereer_invite(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    coach = supabase.table("carboo_coaches").select("id,verified").eq("user_id", user.id).execute()
     if not coach.data:
         raise HTTPException(400, "Maak eerst een coach profiel aan")
+    if not coach.data[0].get("verified"):
+        raise HTTPException(403, "Coach account nog niet goedgekeurd door admin")
     coach_id = coach.data[0]["id"]
     from datetime import datetime, timedelta
     # Verwijder alle bestaande pending invites van deze coach
