@@ -1179,7 +1179,7 @@ async def scan_etiket(request: Request, user=Depends(get_current_user)):
                     },
                     {
                         "type": "text",
-                        "text": 'Analyseer dit voedseletiket. Geef ALLEEN een JSON object terug, geen uitleg. Gebruik dit formaat: {"naam":"","categorie":"Granen en brood","portie_g":100,"portie_label":"100g","kcal":0,"kh":0,"suikers":0,"vezels":0,"eiwit":0,"vet":0,"verz":0,"natrium":0,"kalium":0,"calcium":0,"ijzer":0,"magnesium":0,"vitc":0,"vitd":0,"vitb12":0,"omega3":0,"gi":0}'
+                        "text": 'Analyseer dit voedseletiket. Geef ALLEEN een JSON object terug, geen uitleg. BELANGRIJK: alle voedingswaarden (kcal, kh, suikers, vezels, eiwit, vet, verz, natrium, kalium, calcium, ijzer, magnesium, vitc, vitd, vitb12, omega3) moeten PER 100G zijn, niet per portie. De portie_g en portie_label zijn informatief. Gebruik dit formaat: {"naam":"","categorie":"Granen en brood","portie_g":100,"portie_label":"100g","kcal":0,"kh":0,"suikers":0,"vezels":0,"eiwit":0,"vet":0,"verz":0,"natrium":0,"kalium":0,"calcium":0,"ijzer":0,"magnesium":0,"vitc":0,"vitd":0,"vitb12":0,"omega3":0,"gi":0}'
                     }
                 ]
             }]
