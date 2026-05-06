@@ -256,7 +256,6 @@ class PrivacyInstellingen(BaseModel):
     race_plannen: bool = False
     train_gut: bool = False
     dossier: bool = False
-   dossier: bool = False
 
 class CoachOpmerking(BaseModel):
     relatie_id: str
