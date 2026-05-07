@@ -525,8 +525,12 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
     result: dict = {"relatie_id": relatie.data[0]["id"], "privacy": privacy}
     # Laad data op basis van privacy
     if privacy.get("dagschema"):
-        dag = supabase.table("fuelc_dagboek").select("datum,naam,kcal,kh_g,eiwit_g,vet_g").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
+        dag = supabase.table("fuelc_dagboek").select("datum,moment,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,suikers_g,natrium_mg,vitd_mcg,vitb12_mcg,omega3_g,calcium_mg,ijzer_mg,gi").eq("user_id", klant_id).order("datum", desc=True).limit(100).execute()
         result["dagschema"] = dag.data or []
+        tr = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
+        result["trainingen"] = tr.data or []
+        wz = supabase.table("fuelc_dagboek_welzijn").select("datum,energie_score,stemming,stress,slaap_uur,gewicht_kg,hf_rust,rpe").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
+        result["welzijn"] = wz.data or []
     if privacy.get("race_plannen"):
         rap = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
         result["race_plannen"] = rap.data or []
@@ -569,7 +573,7 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
             }
 
     if privacy.get("gewicht"):
-        gew = supabase.table("fuelc_dagboek_welzijn").select("datum,gewicht_kg").eq("user_id", klant_id).not_.is_("gewicht_kg", "null").order("datum", desc=True).limit(20).execute()
+        gew = supabase.table("fuelc_dagboek_welzijn").select("datum,gewicht_kg,energie_score,stemming,stress,slaap_uur,slaap_kwaliteit,hf_rust,hrv").eq("user_id", klant_id).not_.is_("gewicht_kg", "null").order("datum", desc=True).limit(30).execute()
         result["gewicht_data"] = gew.data or []
 
     if privacy.get("voedingskwaliteit") or privacy.get("performance"):
