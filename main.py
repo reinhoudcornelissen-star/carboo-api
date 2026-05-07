@@ -572,12 +572,80 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         gew = supabase.table("fuelc_dagboek_welzijn").select("datum,gewicht_kg").eq("user_id", klant_id).not_.is_("gewicht_kg", "null").order("datum", desc=True).limit(20).execute()
         result["gewicht_data"] = gew.data or []
 
-    if privacy.get("performance") or privacy.get("voedingskwaliteit"):
-        # Stuur dagboek + welzijn mee voor score berekening
-        dag_all = supabase.table("fuelc_dagboek").select("datum,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,moment,categorie").eq("user_id", klant_id).order("datum", desc=True).limit(70).execute()
-        welzijn = supabase.table("fuelc_dagboek_welzijn").select("datum,energie_score,stemming,stress,slaap_uur,rpe,hf_rust").eq("user_id", klant_id).order("datum", desc=True).limit(14).execute()
-        result["dagboek_scores"] = dag_all.data or []
-        result["welzijn_scores"] = welzijn.data or []
+    if privacy.get("voedingskwaliteit") or privacy.get("performance"):
+        # Gebruik dag_items als al geladen, anders opnieuw ophalen
+        vq_items = dag_items if "dag_items" in dir() and dag_items else []
+        if not vq_items:
+            dag_vq = supabase.table("fuelc_dagboek").select("datum,kcal,kh_g,eiwit_g,vet_g,vezels_g").eq("user_id", klant_id).order("datum", desc=True).limit(70).execute()
+            vq_items = dag_vq.data or []
+
+    if privacy.get("voedingskwaliteit") and vq_items:
+        # Groepeer per dag
+        vq_dag: dict = {}
+        for item in vq_items:
+            d = item.get("datum", "")
+            if d not in vq_dag:
+                vq_dag[d] = {"vezels": 0, "kcal": 0, "kh": 0, "eiwit": 0}
+            vq_dag[d]["vezels"] += item.get("vezels_g", 0) or 0
+            vq_dag[d]["kcal"] += item.get("kcal", 0) or 0
+            vq_dag[d]["kh"] += item.get("kh_g", 0) or 0
+            vq_dag[d]["eiwit"] += item.get("eiwit_g", 0) or 0
+        if vq_dag:
+            n = len(vq_dag)
+            gem_vezels = round(sum(d["vezels"] for d in vq_dag.values()) / n, 1)
+            gem_kcal = round(sum(d["kcal"] for d in vq_dag.values()) / n)
+            gem_kh = round(sum(d["kh"] for d in vq_dag.values()) / n)
+            gem_eiwit = round(sum(d["eiwit"] for d in vq_dag.values()) / n)
+            vezels_score = min(10, round(gem_vezels / 2.5))
+            result["voedingskwaliteit"] = {
+                "gem_vezels_dag": gem_vezels,
+                "gem_kcal_dag": gem_kcal,
+                "aantal_dagen": n,
+                "scores": [
+                    {"label": "Vezels", "score": vezels_score},
+                    {"label": "Energie gemiddeld", "score": min(10, round(gem_kcal / 200))},
+                    {"label": "Koolhydraten", "score": min(10, round(gem_kh / 30))},
+                    {"label": "Eiwit", "score": min(10, round(gem_eiwit / 15))},
+                ]
+            }
+
+    if privacy.get("performance") and vq_items:
+        # Bereken performance score op basis van dagboek
+        vq_dag2: dict = {}
+        for item in vq_items:
+            d = item.get("datum", "")
+            if d not in vq_dag2:
+                vq_dag2[d] = {"kcal": 0, "kh": 0, "eiwit": 0, "vezels": 0}
+            vq_dag2[d]["kcal"] += item.get("kcal", 0) or 0
+            vq_dag2[d]["kh"] += item.get("kh_g", 0) or 0
+            vq_dag2[d]["eiwit"] += item.get("eiwit_g", 0) or 0
+            vq_dag2[d]["vezels"] += item.get("vezels_g", 0) or 0
+
+        # Haal trainingen op voor context
+        trainingen = supabase.table("fuelc_trainingen").select("datum,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(14).execute()
+        tr_kcal = {t["datum"][:10]: (t.get("kcal_verbranding") or 0) for t in (trainingen.data or [])}
+
+        dag_scores = []
+        for d, vals in list(vq_dag2.items())[:14]:
+            extra = tr_kcal.get(d, 0)
+            doel = 1914 + extra
+            kcal_score = min(10, round(vals["kcal"] / max(doel, 1) * 10))
+            kh_score = min(10, round(vals["kh"] / 265 * 10))
+            ei_score = min(10, round(vals["eiwit"] / 120 * 10))
+            vez_score = min(10, round(vals["vezels"] / 25 * 10))
+            dag_score = round((kcal_score + kh_score + ei_score + vez_score) / 4, 1)
+            dag_scores.append(dag_score)
+
+        gem_score = round(sum(dag_scores) / max(len(dag_scores), 1), 1) if dag_scores else 0
+        result["performance"] = {
+            "score": gem_score,
+            "details": [
+                {"label": "Energiebalans", "score": min(10, round(gem_score))},
+                {"label": "Koolhydraten", "score": min(10, round(gem_score * 0.9))},
+                {"label": "Eiwit", "score": min(10, round(gem_score * 1.1))},
+                {"label": "Vezels", "score": min(10, round(gem_score * 0.8))},
+            ]
+        }
 
     return result
 
