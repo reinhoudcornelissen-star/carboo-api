@@ -1591,16 +1591,32 @@ async def abonnement_toewijzen(item: dict, user=Depends(get_current_user)):
     admin = supabase_admin.table("carboo_admins").select("user_id").eq("user_id", user.id).execute()
     if not admin.data:
         raise HTTPException(403, "Geen toegang")
+    # Zoek user op basis van email
+    email = item.get("email", "")
+    user_id = item.get("user_id", "")
+    if email and not user_id:
+        try:
+            users = supabase_admin.auth.admin.list_users()
+            match = next((u for u in users if u.email == email), None)
+            if not match:
+                raise HTTPException(404, f"Gebruiker '{email}' niet gevonden in Carboo")
+            user_id = str(match.id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Fout bij zoeken gebruiker: {e}")
+    if not user_id:
+        raise HTTPException(400, "Geef email of user_id op")
     from datetime import date, timedelta
     duur = int(item.get("duur_maanden", 1))
     verval = date.today() + timedelta(days=30 * duur)
     supabase_admin.table("carboo_abonnementen").upsert({
-        "user_id": item["user_id"],
-        "pakket": item["pakket"],
+        "user_id": user_id,
+        "pakket": item.get("pakket", "alles"),
         "status": "actief",
-        "prijs": item.get("prijs", 0),
+        "prijs": float(item.get("prijs", 0)),
         "start_datum": date.today().isoformat(),
         "verval_datum": verval.isoformat(),
         "mollie_payment_id": f"admin_manueel_{user.id}",
     }).execute()
-    return {"ok": True}
+    return {"ok": True, "user_id": user_id, "pakket": item.get("pakket")}
