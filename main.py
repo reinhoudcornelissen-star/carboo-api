@@ -1407,3 +1407,200 @@ async def plaats_prikbord_reactie(item: PrikbordReactie, user=Depends(get_curren
 async def verwijder_prikbord_reactie(reactie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     supabase.table("carboo_prikbord_reacties").delete().eq("id", reactie_id).eq("klant_id", user.id).execute()
     return {"ok": True}
+
+# ═══════════════════════════════════════════════════════
+# MOLLIE BETALINGEN
+# ═══════════════════════════════════════════════════════
+
+import os
+import hmac
+import hashlib
+
+MOLLIE_API_KEY = os.environ.get("MOLLIE_API_KEY", "")
+APP_URL = os.environ.get("APP_URL", "https://carboo.app")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://carboo-api.onrender.com/api/mollie/webhook")
+
+PAKKETTEN = {
+    "fueling": {"label": "Fueling",            "module": "fueling"},
+    "race":    {"label": "Race Nutrition Plan", "module": "race"},
+    "gut":     {"label": "Train the Gut",       "module": "gut"},
+    "alles":   {"label": "Alles-in-één",        "module": "alles"},
+    "coach":   {"label": "Coach Zone",          "module": "coach"},
+}
+
+def get_prijs(pakket_id: str) -> float:
+    """Haal prijs op uit Supabase (admin kan aanpassen)."""
+    try:
+        r = supabase_admin.table("carboo_prijzen").select("prijs").eq("id", pakket_id).single().execute()
+        return float(r.data["prijs"])
+    except:
+        # Fallback prijzen
+        fallback = {"fueling": 5.99, "race": 4.99, "gut": 3.99, "alles": 9.99, "coach": 14.99}
+        return fallback.get(pakket_id, 9.99)
+
+
+class BetalingRequest(BaseModel):
+    pakket_id: str  # fueling, race, gut, alles, coach
+
+
+@app.post("/api/mollie/betaling-aanmaken")
+async def maak_betaling(item: BetalingRequest, user=Depends(get_current_user)):
+    """Maak Mollie betaling aan voor abonnement."""
+    if item.pakket_id not in PAKKETTEN:
+        raise HTTPException(400, "Ongeldig pakket")
+    if not MOLLIE_API_KEY:
+        raise HTTPException(500, "Mollie niet geconfigureerd")
+
+    pakket = PAKKETTEN[item.pakket_id]
+    prijs = get_prijs(item.pakket_id)
+
+    payload = {
+        "amount": {"currency": "EUR", "value": f"{prijs:.2f}"},
+        "description": f"Carboo — {pakket['label']} (1 maand)",
+        "redirectUrl": f"{APP_URL}/app/abonnement?betaling=ok&pakket={item.pakket_id}&user_id={user.id}",
+        "webhookUrl": WEBHOOK_URL,
+        "metadata": {
+            "user_id": user.id,
+            "user_email": user.email,
+            "pakket": item.pakket_id,
+            "type": "abonnement"
+        },
+        "locale": "nl_BE",
+    }
+
+    import httpx
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.mollie.com/v2/payments",
+            headers={"Authorization": f"Bearer {MOLLIE_API_KEY}", "Content-Type": "application/json"},
+            json=payload, timeout=10
+        )
+        data = resp.json()
+        if resp.status_code == 201:
+            return {"checkout_url": data["_links"]["checkout"]["href"], "payment_id": data["id"]}
+        raise HTTPException(500, f"Mollie fout: {data.get('detail', 'Onbekende fout')}")
+
+
+@app.post("/api/mollie/webhook")
+async def mollie_webhook(request: Request):
+    """Mollie webhook — wordt aangeroepen na succesvolle betaling."""
+    body = await request.form()
+    payment_id = body.get("id", "")
+    if not payment_id:
+        return {"status": "ok"}
+
+    # Verifieer betaling bij Mollie
+    import httpx
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"https://api.mollie.com/v2/payments/{payment_id}",
+            headers={"Authorization": f"Bearer {MOLLIE_API_KEY}"}, timeout=10
+        )
+        if resp.status_code != 200:
+            return {"status": "ok"}
+        betaling = resp.json()
+
+    if betaling.get("status") != "paid":
+        return {"status": "ok"}
+
+    metadata = betaling.get("metadata", {})
+    user_id = metadata.get("user_id", "")
+    pakket = metadata.get("pakket", "")
+
+    if not user_id or not pakket:
+        return {"status": "ok"}
+
+    # Bereken vervaldatum (1 maand)
+    from datetime import date, timedelta
+    verval = (date.today().replace(day=1) + timedelta(days=32)).replace(day=date.today().day)
+
+    # Kijk of er al een abonnement is voor dit pakket
+    bestaand = supabase_admin.table("carboo_abonnementen").select("id").eq("user_id", user_id).eq("pakket", pakket).execute()
+
+    if bestaand.data:
+        # Update bestaand abonnement
+        supabase_admin.table("carboo_abonnementen").update({
+            "status": "actief",
+            "verval_datum": verval.isoformat(),
+            "mollie_payment_id": payment_id,
+            "bijgewerkt": "now()"
+        }).eq("user_id", user_id).eq("pakket", pakket).execute()
+    else:
+        # Nieuw abonnement
+        prijs = get_prijs(pakket)
+        supabase_admin.table("carboo_abonnementen").insert({
+            "user_id": user_id,
+            "pakket": pakket,
+            "status": "actief",
+            "prijs": prijs,
+            "start_datum": date.today().isoformat(),
+            "verval_datum": verval.isoformat(),
+            "mollie_payment_id": payment_id,
+        }).execute()
+
+    return {"status": "ok"}
+
+
+@app.get("/api/mollie/mijn-abonnement")
+async def mijn_abonnement(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haal actieve abonnementen op voor de ingelogde gebruiker."""
+    abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").execute()
+    prijzen = supabase.table("carboo_prijzen").select("*").execute()
+    return {
+        "abonnementen": abos.data or [],
+        "prijzen": {p["id"]: p for p in (prijzen.data or [])}
+    }
+
+
+@app.get("/api/mollie/prijzen")
+async def get_prijzen(supabase: Client = Depends(get_supabase)):
+    """Publieke route — haal actuele prijzen op."""
+    prijzen = supabase.table("carboo_prijzen").select("*").eq("actief", True).execute()
+    return {"prijzen": prijzen.data or []}
+
+
+# ── ADMIN: prijzen beheren ──────────────────────────────────────────────────
+class PrijsUpdate(BaseModel):
+    prijs: float
+
+@app.put("/api/admin/prijzen/{pakket_id}")
+async def update_prijs(pakket_id: str, item: PrijsUpdate, user=Depends(get_current_user)):
+    """Admin kan prijzen aanpassen."""
+    admin = supabase_admin.table("carboo_admins").select("user_id").eq("user_id", user.id).execute()
+    if not admin.data:
+        raise HTTPException(403, "Geen toegang")
+    supabase_admin.table("carboo_prijzen").update({
+        "prijs": item.prijs, "bijgewerkt": "now()"
+    }).eq("id", pakket_id).execute()
+    return {"ok": True, "pakket": pakket_id, "nieuwe_prijs": item.prijs}
+
+
+@app.get("/api/admin/abonnementen")
+async def admin_abonnementen(user=Depends(get_current_user)):
+    """Admin overzicht van alle abonnementen."""
+    admin = supabase_admin.table("carboo_admins").select("user_id").eq("user_id", user.id).execute()
+    if not admin.data:
+        raise HTTPException(403, "Geen toegang")
+    abos = supabase_admin.table("carboo_abonnementen").select("*").order("aangemaakt", desc=True).execute()
+    return {"abonnementen": abos.data or []}
+
+
+@app.post("/api/admin/abonnement-toewijzen")
+async def abonnement_toewijzen(item: dict, user=Depends(get_current_user)):
+    """Admin wijst manueel een abonnement toe (voor fitnesszaken/clubs)."""
+    admin = supabase_admin.table("carboo_admins").select("user_id").eq("user_id", user.id).execute()
+    if not admin.data:
+        raise HTTPException(403, "Geen toegang")
+    from datetime import date, timedelta
+    duur = int(item.get("duur_maanden", 1))
+    verval = date.today() + timedelta(days=30 * duur)
+    supabase_admin.table("carboo_abonnementen").upsert({
+        "user_id": item["user_id"],
+        "pakket": item["pakket"],
+        "status": "actief",
+        "prijs": item.get("prijs", 0),
+        "start_datum": date.today().isoformat(),
+        "verval_datum": verval.isoformat(),
+        "mollie_payment_id": f"admin_manueel_{user.id}",
+    }).execute()
+    return {"ok": True}
