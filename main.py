@@ -1443,9 +1443,33 @@ class BetalingRequest(BaseModel):
     pakket_id: str  # fueling, race, gut, alles, coach
 
 
+async def _get_of_maak_mollie_klant(user_id: str, email: str, naam: str) -> str:
+    """Haal Mollie customer ID op of maak een nieuwe aan."""
+    import httpx
+    bestaand = supabase_admin.table("carboo_mollie_klanten").select("mollie_customer_id").eq("user_id", user_id).execute()
+    if bestaand.data:
+        return bestaand.data[0]["mollie_customer_id"]
+    # Nieuw Mollie customer aanmaken
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.mollie.com/v2/customers",
+            headers={"Authorization": f"Bearer {MOLLIE_API_KEY}", "Content-Type": "application/json"},
+            json={"name": naam or email, "email": email, "locale": "nl_BE"},
+            timeout=10
+        )
+        data = resp.json()
+        if resp.status_code != 201:
+            raise HTTPException(500, f"Mollie customer fout: {data.get('detail')}")
+        customer_id = data["id"]
+        supabase_admin.table("carboo_mollie_klanten").insert({
+            "user_id": user_id, "mollie_customer_id": customer_id
+        }).execute()
+        return customer_id
+
+
 @app.post("/api/mollie/betaling-aanmaken")
 async def maak_betaling(item: BetalingRequest, user=Depends(get_current_user)):
-    """Maak Mollie betaling aan voor abonnement."""
+    """Maak Mollie eerste betaling aan — start automatisch abonnement."""
     if item.pakket_id not in PAKKETTEN:
         raise HTTPException(400, "Ongeldig pakket")
     if not MOLLIE_API_KEY:
@@ -1454,16 +1478,22 @@ async def maak_betaling(item: BetalingRequest, user=Depends(get_current_user)):
     pakket = PAKKETTEN[item.pakket_id]
     prijs = get_prijs(item.pakket_id)
 
+    # Zorg voor Mollie customer
+    customer_id = await _get_of_maak_mollie_klant(user.id, user.email, user.email)
+
+    # Eerste betaling met sequenceType=first → mandate aanmaken
     payload = {
         "amount": {"currency": "EUR", "value": f"{prijs:.2f}"},
-        "description": f"Carboo — {pakket['label']} (1 maand)",
+        "description": f"Carboo — {pakket['label']} (maandelijks)",
+        "sequenceType": "first",
+        "customerId": customer_id,
         "redirectUrl": f"{APP_URL}/app/abonnement?betaling=ok&pakket={item.pakket_id}&user_id={user.id}",
         "webhookUrl": WEBHOOK_URL,
         "metadata": {
             "user_id": user.id,
             "user_email": user.email,
             "pakket": item.pakket_id,
-            "type": "abonnement"
+            "type": "abonnement_eerste"
         },
         "locale": "nl_BE",
     }
@@ -1517,8 +1547,10 @@ async def mollie_webhook(request: Request):
     # Kijk of er al een abonnement is voor dit pakket
     bestaand = supabase_admin.table("carboo_abonnementen").select("id").eq("user_id", user_id).eq("pakket", pakket).execute()
 
+    betaling_type = metadata.get("type", "abonnement")
+    prijs = get_prijs(pakket)
+
     if bestaand.data:
-        # Update bestaand abonnement
         supabase_admin.table("carboo_abonnementen").update({
             "status": "actief",
             "verval_datum": verval.isoformat(),
@@ -1526,17 +1558,45 @@ async def mollie_webhook(request: Request):
             "bijgewerkt": "now()"
         }).eq("user_id", user_id).eq("pakket", pakket).execute()
     else:
-        # Nieuw abonnement
-        prijs = get_prijs(pakket)
         supabase_admin.table("carboo_abonnementen").insert({
-            "user_id": user_id,
-            "pakket": pakket,
-            "status": "actief",
-            "prijs": prijs,
-            "start_datum": date.today().isoformat(),
-            "verval_datum": verval.isoformat(),
-            "mollie_payment_id": payment_id,
+            "user_id": user_id, "pakket": pakket, "status": "actief",
+            "prijs": prijs, "start_datum": date.today().isoformat(),
+            "verval_datum": verval.isoformat(), "mollie_payment_id": payment_id,
         }).execute()
+
+    # Na eerste betaling → maak Mollie subscription aan voor automatische verlenging
+    if betaling_type == "abonnement_eerste":
+        import httpx
+        # Haal mandate op
+        klant_rec = supabase_admin.table("carboo_mollie_klanten").select("mollie_customer_id").eq("user_id", user_id).execute()
+        if klant_rec.data:
+            customer_id = klant_rec.data[0]["mollie_customer_id"]
+            async with httpx.AsyncClient() as client:
+                # Wacht even tot mandate actief is
+                import asyncio
+                await asyncio.sleep(2)
+                # Maak subscription
+                sub_resp = await client.post(
+                    f"https://api.mollie.com/v2/customers/{customer_id}/subscriptions",
+                    headers={"Authorization": f"Bearer {MOLLIE_API_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "amount": {"currency": "EUR", "value": f"{prijs:.2f}"},
+                        "interval": "1 month",
+                        "description": f"Carboo — {PAKKETTEN.get(pakket, {}).get('label', pakket)} (maandelijks)",
+                        "webhookUrl": WEBHOOK_URL,
+                        "metadata": {"user_id": user_id, "pakket": pakket, "type": "abonnement_verlenging"},
+                    },
+                    timeout=15
+                )
+                if sub_resp.status_code == 201:
+                    sub_data = sub_resp.json()
+                    # Sla subscription ID op
+                    supabase_admin.table("carboo_abonnementen").update({
+                        "mollie_subscription_id": sub_data["id"]
+                    }).eq("user_id", user_id).eq("pakket", pakket).execute()
+                    supabase_admin.table("carboo_mollie_klanten").update({
+                        "mollie_mandate_id": sub_data.get("mandateId", "")
+                    }).eq("user_id", user_id).execute()
 
     return {"status": "ok"}
 
@@ -1620,3 +1680,26 @@ async def abonnement_toewijzen(item: dict, user=Depends(get_current_user)):
         "mollie_payment_id": f"admin_manueel_{user.id}",
     }).execute()
     return {"ok": True, "user_id": user_id, "pakket": item.get("pakket")}
+
+@app.delete("/api/mollie/abonnement/{pakket_id}")
+async def annuleer_abonnement(pakket_id: str, user=Depends(get_current_user)):
+    """Annuleer automatische verlenging van abonnement."""
+    import httpx
+    abo = supabase_admin.table("carboo_abonnementen").select("mollie_subscription_id").eq("user_id", user.id).eq("pakket", pakket_id).execute()
+    if not abo.data or not abo.data[0].get("mollie_subscription_id"):
+        raise HTTPException(404, "Geen actief abonnement gevonden")
+    sub_id = abo.data[0]["mollie_subscription_id"]
+    klant = supabase_admin.table("carboo_mollie_klanten").select("mollie_customer_id").eq("user_id", user.id).execute()
+    if not klant.data:
+        raise HTTPException(404, "Geen Mollie klant gevonden")
+    customer_id = klant.data[0]["mollie_customer_id"]
+    async with httpx.AsyncClient() as client:
+        resp = await client.delete(
+            f"https://api.mollie.com/v2/customers/{customer_id}/subscriptions/{sub_id}",
+            headers={"Authorization": f"Bearer {MOLLIE_API_KEY}"}, timeout=10
+        )
+    # Update status in Supabase — abonnement loopt nog tot vervaldatum
+    supabase_admin.table("carboo_abonnementen").update({
+        "mollie_subscription_id": None, "bijgewerkt": "now()"
+    }).eq("user_id", user.id).eq("pakket", pakket_id).execute()
+    return {"ok": True, "bericht": "Automatische verlenging geannuleerd. Abonnement loopt door tot vervaldatum."}
