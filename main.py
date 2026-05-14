@@ -376,6 +376,26 @@ async def admin_maak_coach(item: CoachProfiel, user=Depends(get_current_user), s
         supabase.table("carboo_coaches").insert({"user_id": klant_id, "naam": item.naam, "email": item.email, "bio": item.bio or "", "specialisatie": item.specialisatie or "", "verified": True}).execute()
     return {"ok": True}
 
+@app.get("/api/admin/coaches")
+async def admin_lijst_coaches(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Alle coaches (geverifieerd + gedeactiveerd) met aantal klanten."""
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+    coaches = supabase.table("carboo_coaches").select("*").order("naam").execute()
+    result = []
+    for c in (coaches.data or []):
+        kl = supabase.table("carboo_coach_klanten").select("id", count="exact").eq("coach_id", c["id"]).eq("status", "actief").execute()
+        result.append({**c, "aantal_klanten": kl.count or 0})
+    return {"coaches": result}
+
+@app.post("/api/admin/coach/{coach_id}/activeer")
+async def admin_activeer_coach(coach_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach licentie heractiveren (verified=true)."""
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+    supabase.table("carboo_coaches").update({"verified": True}).eq("id", coach_id).execute()
+    return {"ok": True}
+
 @app.delete("/api/admin/coach/{coach_id}")
 async def admin_verwijder_coach(coach_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     if not await is_admin(user, supabase):
