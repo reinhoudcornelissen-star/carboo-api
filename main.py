@@ -1374,36 +1374,71 @@ async def verwijder_bericht(bericht_id: str, user=Depends(get_current_user), sup
 
 @app.get("/api/coach/prikbord")
 async def get_prikbord(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haalt prikbord op:
+    - Iedereen ziet admin posts (is_admin_post=true)
+    - Klant ziet ook posts van zijn eigen coaches
+    - Coach ziet ook zijn eigen posts
+    """
+    posts = []
+    # Admin posts (voor iedereen)
+    admin_r = supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(id,tekst,anoniem,aangemaakt,klant_id)").eq("is_admin_post", True).order("aangemaakt", desc=True).limit(30).execute()
+    posts.extend(admin_r.data or [])
+
+    # Coach? Voeg eigen posts toe
     coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
     if coach.data:
         coach_id = coach.data[0]["id"]
-        r = supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(*)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(30).execute()
-    else:
-        coaches = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", user.id).eq("status", "actief").execute()
-        if not coaches.data:
-            return {"posts": []}
-        coach_ids = [c["coach_id"] for c in coaches.data]
-        r = supabase.table("carboo_coach_prikbord").select("*, carboo_coaches(naam), carboo_prikbord_reacties(id,tekst,anoniem,aangemaakt,klant_id)").in_("coach_id", coach_ids).order("aangemaakt", desc=True).limit(30).execute()
-    return {"posts": r.data or []}
+        c_r = supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(*)").eq("coach_id", coach_id).eq("is_admin_post", False).order("aangemaakt", desc=True).limit(30).execute()
+        posts.extend(c_r.data or [])
+
+    # Klant van een coach? Voeg posts van eigen coaches toe
+    klant_coaches = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", user.id).eq("status", "actief").execute()
+    if klant_coaches.data:
+        coach_ids = [c["coach_id"] for c in klant_coaches.data]
+        k_r = supabase.table("carboo_coach_prikbord").select("*, carboo_coaches(naam), carboo_prikbord_reacties(id,tekst,anoniem,aangemaakt,klant_id)").in_("coach_id", coach_ids).eq("is_admin_post", False).order("aangemaakt", desc=True).limit(30).execute()
+        posts.extend(k_r.data or [])
+
+    # Sorteer alles op datum
+    posts.sort(key=lambda p: p.get("aangemaakt", ""), reverse=True)
+    return {"posts": posts}
 
 @app.post("/api/coach/prikbord")
 async def maak_post(item: PrikbordPost, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach maakt post voor klanten, admin maakt post voor iedereen."""
+    is_adm = await is_admin(user, supabase)
     coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
-    if not coach.data:
-        raise HTTPException(403, "Geen coach account")
-    r = supabase.table("carboo_coach_prikbord").insert({
-        "coach_id": coach.data[0]["id"],
-        "titel": item.titel,
-        "tekst": item.tekst,
-        "type": item.type or "post",
-    }).execute()
+
+    if is_adm:
+        # Admin post — zichtbaar voor iedereen
+        r = supabase.table("carboo_coach_prikbord").insert({
+            "coach_id": coach.data[0]["id"] if coach.data else None,
+            "is_admin_post": True,
+            "titel": item.titel,
+            "tekst": item.tekst,
+            "type": item.type or "post",
+        }).execute()
+    else:
+        if not coach.data:
+            raise HTTPException(403, "Geen coach of admin account")
+        r = supabase.table("carboo_coach_prikbord").insert({
+            "coach_id": coach.data[0]["id"],
+            "is_admin_post": False,
+            "titel": item.titel,
+            "tekst": item.tekst,
+            "type": item.type or "post",
+        }).execute()
     return {"ok": True, "id": r.data[0]["id"] if r.data else None}
 
 @app.delete("/api/coach/prikbord/{post_id}")
 async def verwijder_post(post_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
-    if coach.data:
-        supabase.table("carboo_coach_prikbord").delete().eq("id", post_id).eq("coach_id", coach.data[0]["id"]).execute()
+    is_adm = await is_admin(user, supabase)
+    if is_adm:
+        # Admin mag elke post verwijderen
+        supabase.table("carboo_coach_prikbord").delete().eq("id", post_id).execute()
+    else:
+        coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+        if coach.data:
+            supabase.table("carboo_coach_prikbord").delete().eq("id", post_id).eq("coach_id", coach.data[0]["id"]).execute()
     return {"ok": True}
 
 @app.post("/api/coach/prikbord/reactie")
