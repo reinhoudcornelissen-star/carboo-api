@@ -435,11 +435,20 @@ async def genereer_invite(data: dict, user=Depends(get_current_user), supabase: 
         raise HTTPException(403, "Coach account nog niet goedgekeurd door admin")
     coach_id = coach.data[0]["id"]
 
-    # Zoek klant in carboo_users via email
-    klant_lookup = supabase.table("carboo_users").select("id,email").eq("email", klant_email).execute()
-    if not klant_lookup.data:
-        raise HTTPException(404, f"Geen Carboo-gebruiker gevonden met email {klant_email}. De klant moet eerst een account aanmaken.")
-    klant_id = klant_lookup.data[0]["id"]
+    # Zoek klant in auth.users via Supabase admin API
+    klant_id = None
+    try:
+        all_users = supabase.auth.admin.list_users()
+        for u in (all_users or []):
+            user_email = getattr(u, 'email', None) or (u.get('email') if isinstance(u, dict) else None)
+            user_uid = getattr(u, 'id', None) or (u.get('id') if isinstance(u, dict) else None)
+            if user_email and user_email.lower() == klant_email:
+                klant_id = str(user_uid)
+                break
+    except Exception as e:
+        raise HTTPException(500, f"Fout bij zoeken gebruiker: {e}")
+    if not klant_id:
+        raise HTTPException(404, f"Geen Carboo-gebruiker gevonden met email {klant_email}. De klant moet eerst een account aanmaken in de app.")
 
     if klant_id == user.id:
         raise HTTPException(400, "Je kan jezelf niet als klant uitnodigen")
