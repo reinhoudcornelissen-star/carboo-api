@@ -602,10 +602,19 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         result["dossier"] = dos.data or []
     if privacy.get("voedingskwaliteit") or privacy.get("performance") or privacy.get("macros"):
         if "dagschema" not in result:
-            dag = supabase.table("fuelc_dagboek").select("datum,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g").eq("user_id", klant_id).order("datum", desc=True).limit(70).execute()
+            # Voor coach analyses: volledige velden inclusief micronutrienten
+            dag = supabase.table("fuelc_dagboek").select("datum,moment,naam,categorie,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,suikers_g,natrium_mg,kalium_mg,calcium_mg,ijzer_mg,vitd_mcg,vitb12_mcg,omega3_g,verz_g,gi").eq("user_id", klant_id).order("datum", desc=True).limit(200).execute()
             dag_items = dag.data or []
+            # Stuur ook mee in result voor frontend berekening
+            result["dagschema_full"] = dag_items
+            # Trainingen ook nodig voor de berekening
+            tr_full = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(60).execute()
+            result["trainingen_full"] = tr_full.data or []
         else:
             dag_items = result["dagschema"]
+            result["dagschema_full"] = dag_items
+            tr_full = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(60).execute()
+            result["trainingen_full"] = tr_full.data or []
 
     if privacy.get("macros"):
         items = dag_items if "dag_items" in dir() else []
@@ -1467,6 +1476,95 @@ async def plaats_prikbord_reactie(item: PrikbordReactie, user=Depends(get_curren
 async def verwijder_prikbord_reactie(reactie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     supabase.table("carboo_prikbord_reacties").delete().eq("id", reactie_id).eq("klant_id", user.id).execute()
     return {"ok": True}
+
+
+# ─── FORUM ─────────────────────────────────────────────────────────────────────
+
+class ForumPost(BaseModel):
+    titel: str
+    tekst: str
+    categorie: Optional[str] = "algemeen"
+    foto_url: Optional[str] = None
+
+class ForumReactie(BaseModel):
+    post_id: str
+    tekst: str
+
+@app.get("/api/forum/posts")
+async def get_forum_posts(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Alle zichtbare forum posts."""
+    r = supabase.table("carboo_forum").select("*").eq("verborgen", False).order("aangemaakt", desc=True).limit(50).execute()
+    posts = r.data or []
+    # Voor elke post de reacties halen
+    for p in posts:
+        reacties = supabase.table("carboo_forum_reacties").select("*").eq("post_id", p["id"]).eq("verborgen", False).order("aangemaakt").execute()
+        p["reacties"] = reacties.data or []
+    return {"posts": posts}
+
+@app.post("/api/forum/posts")
+async def maak_forum_post(item: ForumPost, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Iedereen kan posten."""
+    # Haal naam op (uit auth metadata of email)
+    auteur_naam = getattr(user, "email", "").split("@")[0] if hasattr(user, "email") else "Gebruiker"
+    r = supabase.table("carboo_forum").insert({
+        "auteur_id": user.id,
+        "auteur_naam": auteur_naam,
+        "titel": item.titel,
+        "tekst": item.tekst,
+        "foto_url": item.foto_url,
+        "categorie": item.categorie or "algemeen",
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+@app.post("/api/forum/reacties")
+async def plaats_forum_reactie(item: ForumReactie, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    auteur_naam = getattr(user, "email", "").split("@")[0] if hasattr(user, "email") else "Gebruiker"
+    r = supabase.table("carboo_forum_reacties").insert({
+        "post_id": item.post_id,
+        "auteur_id": user.id,
+        "auteur_naam": auteur_naam,
+        "tekst": item.tekst,
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+@app.delete("/api/forum/posts/{post_id}")
+async def verwijder_forum_post(post_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Eigen post verwijderen of admin verwijdert (zet verborgen=true)."""
+    is_adm = await is_admin(user, supabase)
+    if is_adm:
+        # Admin verbergt (zachte delete voor audit)
+        supabase.table("carboo_forum").update({"verborgen": True}).eq("id", post_id).execute()
+    else:
+        # Eigen post hard verwijderen
+        supabase.table("carboo_forum").delete().eq("id", post_id).eq("auteur_id", user.id).execute()
+    return {"ok": True}
+
+@app.delete("/api/forum/reacties/{reactie_id}")
+async def verwijder_forum_reactie(reactie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    is_adm = await is_admin(user, supabase)
+    if is_adm:
+        supabase.table("carboo_forum_reacties").update({"verborgen": True}).eq("id", reactie_id).execute()
+    else:
+        supabase.table("carboo_forum_reacties").delete().eq("id", reactie_id).eq("auteur_id", user.id).execute()
+    return {"ok": True}
+
+@app.post("/api/admin/forum/posts/{post_id}/herstel")
+async def admin_herstel_post(post_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Admin maakt verborgen post terug zichtbaar."""
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+    supabase.table("carboo_forum").update({"verborgen": False}).eq("id", post_id).execute()
+    return {"ok": True}
+
+@app.get("/api/admin/forum/verborgen")
+async def admin_verborgen_posts(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Admin: lijst verborgen posts om eventueel te herstellen."""
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+    r = supabase.table("carboo_forum").select("*").eq("verborgen", True).order("aangemaakt", desc=True).limit(50).execute()
+    return {"posts": r.data or []}
+
+
 
 # ═══════════════════════════════════════════════════════
 # MOLLIE BETALINGEN
