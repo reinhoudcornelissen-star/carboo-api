@@ -593,10 +593,24 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         rap = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
         result["race_plannen"] = rap.data or []
     if privacy.get("train_gut"):
-        gut = supabase.table("carboo_gut_sessies").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(20).execute()
-        result["gut_sessies"] = gut.data or []
-        wm = supabase.table("carboo_gut_winkelmandje").select("*").eq("user_id", klant_id).execute()
+        gut = supabase.table("carboo_gut_sessies").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
+        sessie_list = gut.data or []
+        # Producten per sessie nested
+        if sessie_list:
+            sessie_ids = [s["id"] for s in sessie_list]
+            prod = supabase.table("carboo_gut_producten").select("*").in_("sessie_id", sessie_ids).order("tijdstip_min").execute()
+            prod_map: dict = {}
+            for p in (prod.data or []):
+                sid = p["sessie_id"]
+                if sid not in prod_map: prod_map[sid] = []
+                prod_map[sid].append(p)
+            for s in sessie_list:
+                s["producten"] = prod_map.get(s["id"], [])
+        result["gut_sessies"] = sessie_list
+        wm = supabase.table("carboo_gut_winkelmandje").select("*").eq("user_id", klant_id).order("aantal_sessies", desc=True).execute()
         result["gut_winkelmandje"] = wm.data or []
+        prot = supabase.table("carboo_gut_protocol").select("*").eq("user_id", klant_id).eq("actief", True).execute()
+        result["gut_protocol"] = prot.data[0] if prot.data else None
     if privacy.get("dossier"):
         dos = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
         result["dossier"] = dos.data or []
