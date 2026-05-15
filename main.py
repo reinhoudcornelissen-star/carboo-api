@@ -1320,6 +1320,7 @@ class PrikbordPost(BaseModel):
     titel: str
     tekst: str
     type: Optional[str] = "post"
+    foto_url: Optional[str] = None
 
 class PrikbordReactie(BaseModel):
     post_id: str
@@ -1425,6 +1426,7 @@ async def maak_post(item: PrikbordPost, user=Depends(get_current_user), supabase
             "titel": item.titel,
             "tekst": item.tekst,
             "type": item.type or "post",
+            "foto_url": item.foto_url,
         }).execute()
     else:
         if not coach.data:
@@ -1435,6 +1437,7 @@ async def maak_post(item: PrikbordPost, user=Depends(get_current_user), supabase
             "titel": item.titel,
             "tekst": item.tekst,
             "type": item.type or "post",
+            "foto_url": item.foto_url,
         }).execute()
     return {"ok": True, "id": r.data[0]["id"] if r.data else None}
 
@@ -1675,24 +1678,47 @@ async def admin_abonnementen(user=Depends(get_current_user)):
 
 @app.post("/api/admin/abonnement-toewijzen")
 async def abonnement_toewijzen(item: dict, user=Depends(get_current_user)):
+    """Admin wijst abonnement toe. Als gebruiker niet bestaat + wachtwoord opgegeven → maakt account aan."""
     admin = supabase_admin.table("carboo_admins").select("user_id").eq("user_id", user.id).execute()
     if not admin.data:
         raise HTTPException(403, "Geen toegang")
-    email = item.get("email", "")
+
+    email = (item.get("email") or "").strip().lower()
+    wachtwoord = (item.get("wachtwoord") or "").strip()
     user_id = item.get("user_id", "")
+    nieuwe_gebruiker = False
+
     if email and not user_id:
+        # Zoek of gebruiker al bestaat
         try:
             users = supabase_admin.auth.admin.list_users()
-            match = next((u for u in users if u.email == email), None)
-            if not match:
-                raise HTTPException(404, f"Gebruiker '{email}' niet gevonden in Carboo")
-            user_id = str(match.id)
+            match = next((u for u in users if getattr(u, 'email', None) == email), None)
+            if match:
+                user_id = str(match.id)
+            elif wachtwoord:
+                # Maak nieuwe gebruiker aan
+                if len(wachtwoord) < 6:
+                    raise HTTPException(400, "Wachtwoord moet minstens 6 karakters lang zijn")
+                created = supabase_admin.auth.admin.create_user({
+                    "email": email,
+                    "password": wachtwoord,
+                    "email_confirm": True
+                })
+                if created and created.user:
+                    user_id = str(created.user.id)
+                    nieuwe_gebruiker = True
+                else:
+                    raise HTTPException(500, "Kon gebruiker niet aanmaken")
+            else:
+                raise HTTPException(404, f"Gebruiker '{email}' bestaat niet. Geef ook een wachtwoord op om een nieuw account aan te maken.")
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(500, f"Fout bij zoeken gebruiker: {e}")
+            raise HTTPException(500, f"Fout: {e}")
+
     if not user_id:
-        raise HTTPException(400, "Geef email of user_id op")
+        raise HTTPException(400, "Geef email op")
+
     from datetime import date, timedelta
     duur = int(item.get("duur_maanden", 1))
     verval = date.today() + timedelta(days=30 * duur)
@@ -1705,7 +1731,8 @@ async def abonnement_toewijzen(item: dict, user=Depends(get_current_user)):
         "verval_datum": verval.isoformat(),
         "mollie_payment_id": f"admin_manueel_{user.id}",
     }).execute()
-    return {"ok": True, "user_id": user_id, "pakket": item.get("pakket")}
+
+    return {"ok": True, "user_id": user_id, "nieuwe_gebruiker": nieuwe_gebruiker, "email": email}
 
 @app.delete("/api/mollie/abonnement/{pakket_id}")
 async def annuleer_abonnement(pakket_id: str, user=Depends(get_current_user)):
