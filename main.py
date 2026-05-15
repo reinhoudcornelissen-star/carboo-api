@@ -1570,6 +1570,242 @@ async def admin_herstel_post(post_id: str, user=Depends(get_current_user), supab
     supabase.table("carboo_forum").update({"verborgen": False}).eq("id", post_id).execute()
     return {"ok": True}
 
+
+
+# ─── CHALLENGES + LEADERBOARD ──────────────────────────────────────────────────
+
+class ChallengeMaak(BaseModel):
+    titel: str
+    omschrijving: Optional[str] = None
+    type: str  # plantaardig|performance|vocht|wedstrijd_tijd|afstand|vrije_score
+    hoger_beter: bool = True
+    doel_waarde: Optional[float] = None
+    eenheid: Optional[str] = None
+    start_datum: str
+    eind_datum: str
+
+class ChallengeScore(BaseModel):
+    manuele_score: float
+
+def _bereken_auto_score(supabase: Client, user_id: str, ctype: str, start: str, eind: str) -> Optional[float]:
+    """Bereken auto score voor een challenge type tussen start en eind."""
+    dag = supabase.table("fuelc_dagboek").select("*").eq("user_id", user_id).gte("datum", start).lte("datum", eind).execute()
+    items = dag.data or []
+    if not items:
+        return None
+    # Groepeer per dag
+    per_dag: dict = {}
+    for it in items:
+        d = (it.get("datum") or "")[:10]
+        per_dag.setdefault(d, []).append(it)
+    dagen = list(per_dag.values())
+    if not dagen:
+        return None
+
+    if ctype == "plantaardig":
+        PLANT = {"Granen & brood","Groenten","Fruit","Noten & zaden","Peulvruchten"}
+        DIER = {"Vlees & vis","Zuivel","Eieren"}
+        pcts = []
+        for dag_items in dagen:
+            pl, di = 0.0, 0.0
+            for it in dag_items:
+                cat = it.get("categorie", "")
+                k = it.get("kcal") or 0
+                if cat in PLANT: pl += k
+                elif cat in DIER: di += k
+            tot = pl + di
+            if tot > 0: pcts.append(pl / tot * 100)
+        return sum(pcts) / len(pcts) if pcts else None
+
+    if ctype == "vocht":
+        VOCHT = {"water":100,"melk":100,"yoghurt":85,"koffie":100,"thee":100,"sap":100,"sportdrank":100,"smoothie":90,"cola":100,"soep":85,"bouillon":100}
+        dag_vocht = []
+        for dag_items in dagen:
+            v = 0
+            for it in dag_items:
+                n = (it.get("naam") or "").lower()
+                g = it.get("hoeveelheid_g") or 0
+                for k, pct in VOCHT.items():
+                    if k in n:
+                        v += g * pct / 100
+                        break
+            dag_vocht.append(v)
+        return sum(dag_vocht) / len(dag_vocht) if dag_vocht else None
+
+    if ctype == "performance":
+        prof = supabase.table("fuelc_profiel").select("energie_doel,kh_doel_pct,eiwit_doel_pct").eq("user_id", user_id).execute()
+        p = prof.data[0] if prof.data else {}
+        eDoel = p.get("energie_doel") or 2200
+        khPct = p.get("kh_doel_pct") or 50
+        eiPct = p.get("eiwit_doel_pct") or 20
+        scores = []
+        for dag_items in dagen:
+            kcal = sum((it.get("kcal") or 0) for it in dag_items)
+            kh = sum((it.get("kh_g") or 0) for it in dag_items)
+            ei = sum((it.get("eiwit_g") or 0) for it in dag_items)
+            vez = sum((it.get("vezels_g") or 0) for it in dag_items)
+            if kcal <= 0: continue
+            import math
+            score = 0
+            pctE = kcal / eDoel if eDoel > 0 else 0
+            score += max(2, min(25, round(25 * math.exp(-((pctE - 1) ** 2) / (2 * 0.18 * 0.18)))))
+            khD = round(eDoel * khPct / 100 / 4)
+            khPctD = kh / khD if khD > 0 else 0
+            score += 20 if khPctD >= 0.95 else 14 if khPctD >= 0.80 else 8 if khPctD >= 0.60 else 4 if khPctD >= 0.40 else 2
+            eiD = round(eDoel * eiPct / 100 / 4)
+            eiPctD = ei / eiD if eiD > 0 else 0
+            score += 20 if eiPctD >= 0.95 else 14 if eiPctD >= 0.80 else 8 if eiPctD >= 0.60 else 4 if eiPctD >= 0.40 else 2
+            score += 15 if vez >= 30 else 10 if vez >= 20 else 5 if vez >= 10 else 0
+            momenten = len(set(it.get("moment") for it in dag_items if it.get("moment")))
+            score += min(10, momenten * 2)
+            VOCHT_MAP = {"water":100,"melk":100,"yoghurt":85,"koffie":100,"thee":100,"sap":100,"sportdrank":100,"smoothie":90,"cola":100,"soep":85}
+            v = 0
+            for it in dag_items:
+                n = (it.get("naam") or "").lower()
+                g = it.get("hoeveelheid_g") or 0
+                for k, pct in VOCHT_MAP.items():
+                    if k in n: v += g * pct / 100; break
+            score += 10 if v >= 2000 else 7 if v >= 1500 else 4 if v >= 1000 else 2 if v >= 500 else 0
+            scores.append(min(100, score))
+        return sum(scores) / len(scores) if scores else None
+    return None
+
+@app.get("/api/challenges")
+async def lijst_challenges(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Geef actieve challenges terug die de user kan zien:
+    - Alle admin challenges
+    - Coach challenges van zijn eigen coaches (voor klanten)
+    - Eigen challenges (voor coach)
+    """
+    is_adm = await is_admin(user, supabase)
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    coach_id = coach.data[0]["id"] if coach.data else None
+    klant_coaches = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", user.id).eq("status", "actief").execute()
+    klant_coach_ids = [c["coach_id"] for c in (klant_coaches.data or [])]
+
+    alle = supabase.table("carboo_challenges").select("*").eq("actief", True).order("eind_datum", desc=True).execute()
+    zichtbaar = []
+    for ch in (alle.data or []):
+        if ch["maker_type"] == "admin":
+            zichtbaar.append(ch)
+        elif coach_id and ch["coach_id"] == coach_id:
+            zichtbaar.append(ch)
+        elif klant_coach_ids and ch["coach_id"] in klant_coach_ids:
+            zichtbaar.append(ch)
+    return {"challenges": zichtbaar}
+
+@app.post("/api/challenges")
+async def maak_challenge(item: ChallengeMaak, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    is_adm = await is_admin(user, supabase)
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).eq("verified", True).execute()
+    coach_id = coach.data[0]["id"] if coach.data else None
+    if not (is_adm or coach_id):
+        raise HTTPException(403, "Alleen admin of coach kan challenges aanmaken")
+    if item.type not in ["plantaardig", "performance", "vocht", "wedstrijd_tijd", "afstand", "vrije_score"]:
+        raise HTTPException(400, "Ongeldig type")
+    data = {
+        "maker_id": user.id, "maker_type": "admin" if is_adm else "coach",
+        "coach_id": coach_id if not is_adm else None,
+        "titel": item.titel, "omschrijving": item.omschrijving, "type": item.type,
+        "hoger_beter": item.hoger_beter, "doel_waarde": item.doel_waarde, "eenheid": item.eenheid,
+        "start_datum": item.start_datum, "eind_datum": item.eind_datum,
+    }
+    r = supabase.table("carboo_challenges").insert(data).execute()
+    new_id = r.data[0]["id"] if r.data else None
+    # Auto-toevoeg eigen klanten als coach
+    if coach_id and new_id:
+        klanten = supabase.table("carboo_coach_klanten").select("klant_id").eq("coach_id", coach_id).eq("status", "actief").execute()
+        for k in (klanten.data or []):
+            try:
+                supabase.table("carboo_challenge_deelnemers").insert({"challenge_id": new_id, "user_id": k["klant_id"]}).execute()
+            except: pass
+    return {"ok": True, "id": new_id}
+
+@app.delete("/api/challenges/{ch_id}")
+async def verwijder_challenge(ch_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    is_adm = await is_admin(user, supabase)
+    if is_adm:
+        supabase.table("carboo_challenges").update({"actief": False}).eq("id", ch_id).execute()
+    else:
+        supabase.table("carboo_challenges").update({"actief": False}).eq("id", ch_id).eq("maker_id", user.id).execute()
+    return {"ok": True}
+
+@app.post("/api/challenges/{ch_id}/deelnemen")
+async def deelnemen(ch_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    naam = getattr(user, "email", "").split("@")[0]
+    try:
+        supabase.table("carboo_challenge_deelnemers").insert({"challenge_id": ch_id, "user_id": user.id, "user_naam": naam}).execute()
+    except Exception as e:
+        if "duplicate" not in str(e).lower():
+            raise HTTPException(500, str(e))
+    return {"ok": True}
+
+@app.post("/api/challenges/{ch_id}/score")
+async def update_score(ch_id: str, item: ChallengeScore, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Update eigen manuele score."""
+    supabase.table("carboo_challenge_deelnemers").update({"manuele_score": item.manuele_score}).eq("challenge_id", ch_id).eq("user_id", user.id).execute()
+    return {"ok": True}
+
+@app.get("/api/challenges/{ch_id}/leaderboard")
+async def leaderboard(ch_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    ch = supabase.table("carboo_challenges").select("*").eq("id", ch_id).single().execute()
+    if not ch.data:
+        raise HTTPException(404, "Challenge niet gevonden")
+    ch_data = ch.data
+    deeln = supabase.table("carboo_challenge_deelnemers").select("*").eq("challenge_id", ch_id).execute()
+    deelnemers = deeln.data or []
+    auto_types = {"plantaardig", "performance", "vocht"}
+    results = []
+    for d in deelnemers:
+        if ch_data["type"] in auto_types:
+            score = _bereken_auto_score(supabase, d["user_id"], ch_data["type"], ch_data["start_datum"], ch_data["eind_datum"])
+        else:
+            score = d.get("manuele_score")
+        results.append({
+            "user_id": d["user_id"], "user_naam": d.get("user_naam") or "Deelnemer",
+            "score": float(score) if score is not None else None,
+            "is_mij": d["user_id"] == user.id,
+        })
+    # Sorteer
+    met_score = [r for r in results if r["score"] is not None]
+    zonder = [r for r in results if r["score"] is None]
+    hoger_beter = ch_data.get("hoger_beter", True)
+    met_score.sort(key=lambda x: x["score"], reverse=hoger_beter)
+    for i, r in enumerate(met_score): r["rang"] = i + 1
+    # Badges berekenen
+    totaal = len(met_score)
+    if totaal > 0:
+        for r in met_score:
+            if r["rang"] == 1: r["badge"] = "diamond"
+            elif r["rang"] <= max(1, round(totaal * 0.1)): r["badge"] = "goud"
+            elif r["rang"] <= max(1, round(totaal * 0.5)): r["badge"] = "zilver"
+            else: r["badge"] = "brons"
+    for r in zonder: r["rang"] = None; r["badge"] = None
+    return {"challenge": ch_data, "leaderboard": met_score + zonder}
+
+@app.get("/api/badges")
+async def mijn_badges(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haal opgeslagen badges van user op."""
+    r = supabase.table("carboo_badges").select("*, carboo_challenges(titel, type, eind_datum)").eq("user_id", user.id).order("toegekend_op", desc=True).execute()
+    return {"badges": r.data or []}
+
+@app.post("/api/challenges/{ch_id}/badges-toekennen")
+async def toekennen_badges(ch_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Admin/coach kent definitieve badges toe aan einde challenge."""
+    is_adm = await is_admin(user, supabase)
+    ch = supabase.table("carboo_challenges").select("*").eq("id", ch_id).single().execute()
+    if not ch.data: raise HTTPException(404, "Niet gevonden")
+    if not is_adm and ch.data["maker_id"] != user.id:
+        raise HTTPException(403, "Geen rechten")
+    # Recompute leaderboard
+    lb = await leaderboard(ch_id, user, supabase)
+    for r in lb["leaderboard"]:
+        if r.get("badge"):
+            try:
+                supabase.table("carboo_badges").upsert({"user_id": r["user_id"], "challenge_id": ch_id, "niveau": r["badge"]}, on_conflict="user_id,challenge_id").execute()
+            except: pass
+    return {"ok": True, "toegekend": sum(1 for r in lb["leaderboard"] if r.get("badge"))}
+
 @app.get("/api/admin/forum/verborgen")
 async def admin_verborgen_posts(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Admin: lijst verborgen posts om eventueel te herstellen."""
