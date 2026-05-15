@@ -1806,6 +1806,162 @@ async def toekennen_badges(ch_id: str, user=Depends(get_current_user), supabase:
             except: pass
     return {"ok": True, "toegekend": sum(1 for r in lb["leaderboard"] if r.get("badge"))}
 
+
+
+# ─── NOTIFICATIES ──────────────────────────────────────────────────────────────
+
+@app.get("/api/notificaties")
+async def get_notificaties(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Bereken alle actieve notificaties voor de huidige user."""
+    from datetime import date, datetime, timedelta, timezone
+    notifs = []
+    today = date.today()
+
+    # Welke notif_keys zijn al gelezen?
+    gelezen_r = supabase.table("carboo_notificatie_gelezen").select("notificatie_key").eq("user_id", user.id).execute()
+    gelezen_keys = set(g["notificatie_key"] for g in (gelezen_r.data or []))
+
+    def add(key: str, icon: str, titel: str, tekst: str, link: str = None, niveau: str = "info"):
+        if key in gelezen_keys: return
+        notifs.append({"key": key, "icon": icon, "titel": titel, "tekst": tekst, "link": link, "niveau": niveau, "aangemaakt": datetime.now(timezone.utc).isoformat()})
+
+    # 1. Dagschema 2 dagen niet ingevuld
+    try:
+        recent = supabase.table("fuelc_dagboek").select("datum").eq("user_id", user.id).gte("datum", (today - timedelta(days=3)).isoformat()).execute()
+        dagen_ingevuld = set((it["datum"] or "")[:10] for it in (recent.data or []))
+        gemiste = []
+        for d in range(1, 3):
+            checkdag = (today - timedelta(days=d)).isoformat()
+            if checkdag not in dagen_ingevuld:
+                gemiste.append(checkdag)
+        if len(gemiste) >= 2:
+            add(f"dagschema_inactief_{today.isoformat()}", "📋", "Dagschema bijhouden",
+                f"Je hebt je dagschema {len(gemiste)} dagen niet ingevuld. Houd je voeding bij voor betere inzichten!",
+                "/app/fueling", "warning")
+    except Exception as e: print(f"notif dagboek fout: {e}")
+
+    # 2. Gewicht 7 dagen niet — alleen bij doel = gewichtsverlies
+    try:
+        prof = supabase.table("fuelc_profiel").select("doel,energie_doel").eq("user_id", user.id).execute()
+        if prof.data:
+            doel = (prof.data[0].get("doel") or "").lower()
+            if "afval" in doel or "verlies" in doel or "gewichtsverlies" in doel:
+                gewicht = supabase.table("fuelc_gewicht").select("datum").eq("user_id", user.id).gte("datum", (today - timedelta(days=8)).isoformat()).execute()
+                if not gewicht.data:
+                    add(f"gewicht_inactief_{today.isoformat()}", "⚖️", "Gewicht bijhouden",
+                        "Je hebt je gewicht 7+ dagen niet ingegeven. Wekelijks wegen helpt bij gewichtsverlies!",
+                        "/app/fueling", "warning")
+    except Exception as e: print(f"notif gewicht fout: {e}")
+
+    # 3 + 4. Nieuwe feed posts (admin + coach posts laatste 7 dagen)
+    try:
+        sinds = (today - timedelta(days=7)).isoformat()
+        # Admin posts voor iedereen
+        adm_posts = supabase.table("carboo_coach_prikbord").select("id,titel,aangemaakt,is_admin_post").eq("is_admin_post", True).gte("aangemaakt", sinds).order("aangemaakt", desc=True).limit(5).execute()
+        for p in (adm_posts.data or []):
+            add(f"feed_post_{p['id']}", "📣", "Nieuwe Carboo post", p["titel"], "/app/coach-zone", "info")
+        # Posts van eigen coaches
+        klant_coaches = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", user.id).eq("status", "actief").execute()
+        coach_ids = [k["coach_id"] for k in (klant_coaches.data or [])]
+        if coach_ids:
+            coach_posts = supabase.table("carboo_coach_prikbord").select("id,titel,aangemaakt").in_("coach_id", coach_ids).eq("is_admin_post", False).gte("aangemaakt", sinds).order("aangemaakt", desc=True).limit(5).execute()
+            for p in (coach_posts.data or []):
+                add(f"feed_post_{p['id']}", "💬", "Nieuwe post van je coach", p["titel"], "/app/coach-zone", "info")
+    except Exception as e: print(f"notif feed fout: {e}")
+
+    # 5. Coach feedback (ongelezen opmerkingen)
+    try:
+        opm = supabase.table("carboo_coach_opmerkingen").select("id,tekst,aangemaakt").eq("klant_id", user.id).eq("gelezen", False).order("aangemaakt", desc=True).limit(5).execute()
+        for o in (opm.data or []):
+            preview = (o["tekst"] or "")[:60] + ("..." if len(o.get("tekst") or "") > 60 else "")
+            add(f"coach_feedback_{o['id']}", "💬", "Feedback van je coach", preview, "/app/coach-zone", "info")
+    except Exception as e: print(f"notif feedback fout: {e}")
+
+    # 6. Forum reactie op eigen post
+    try:
+        sinds = (today - timedelta(days=7)).isoformat()
+        # Eigen posts ophalen
+        eigen = supabase.table("carboo_forum").select("id,titel").eq("auteur_id", user.id).execute()
+        if eigen.data:
+            post_ids = [p["id"] for p in eigen.data]
+            reacties = supabase.table("carboo_forum_reacties").select("id,tekst,auteur_naam,post_id,aangemaakt").in_("post_id", post_ids).neq("auteur_id", user.id).gte("aangemaakt", sinds).order("aangemaakt", desc=True).limit(5).execute()
+            post_titels = {p["id"]: p["titel"] for p in eigen.data}
+            for r in (reacties.data or []):
+                add(f"forum_reactie_{r['id']}", "💬", f"Nieuwe reactie van {r.get('auteur_naam', 'iemand')}",
+                    f"Op '{post_titels.get(r['post_id'], 'je post')}'", "/app/coach-zone", "info")
+    except Exception as e: print(f"notif forum fout: {e}")
+
+    # 7. Nieuwe challenge beschikbaar
+    try:
+        sinds = (today - timedelta(days=7)).isoformat()
+        # Globale + relevante coach challenges van laatste 7 dagen
+        is_adm = await is_admin(user, supabase)
+        coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+        coach_id = coach.data[0]["id"] if coach.data else None
+        klant_coaches_r = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", user.id).eq("status", "actief").execute()
+        klant_coach_ids = [c["coach_id"] for c in (klant_coaches_r.data or [])]
+        alle = supabase.table("carboo_challenges").select("id,titel,maker_type,coach_id,aangemaakt").eq("actief", True).gte("aangemaakt", sinds).execute()
+        for ch in (alle.data or []):
+            relevant = False
+            if ch["maker_type"] == "admin": relevant = True
+            elif coach_id and ch["coach_id"] == coach_id: relevant = False  # eigen challenge
+            elif ch["coach_id"] in klant_coach_ids: relevant = True
+            if relevant:
+                add(f"challenge_nieuw_{ch['id']}", "🏆", "Nieuwe challenge", ch["titel"], "/app/coach-zone", "info")
+    except Exception as e: print(f"notif challenge nieuw fout: {e}")
+
+    # 8. Challenge eindigt over 3 dagen (waar je in deelneemt)
+    try:
+        eind3 = (today + timedelta(days=3)).isoformat()
+        eind1 = (today + timedelta(days=1)).isoformat()
+        mijn_deeln = supabase.table("carboo_challenge_deelnemers").select("challenge_id").eq("user_id", user.id).execute()
+        ch_ids = [d["challenge_id"] for d in (mijn_deeln.data or [])]
+        if ch_ids:
+            eindigend = supabase.table("carboo_challenges").select("id,titel,eind_datum").in_("id", ch_ids).eq("actief", True).gte("eind_datum", eind1).lte("eind_datum", eind3).execute()
+            for ch in (eindigend.data or []):
+                dagen = (date.fromisoformat(ch["eind_datum"]) - today).days
+                add(f"challenge_eind_{ch['id']}_{today.isoformat()}", "⏰", "Challenge bijna afgelopen",
+                    f"'{ch['titel']}' eindigt over {dagen} dag{'en' if dagen != 1 else ''}!", "/app/coach-zone", "warning")
+    except Exception as e: print(f"notif challenge eind fout: {e}")
+
+    # 9. Abonnement vervalt over 7 dagen
+    try:
+        vervalt = (today + timedelta(days=7)).isoformat()
+        abo = supabase.table("carboo_abonnementen").select("id,pakket,verval_datum").eq("user_id", user.id).eq("status", "actief").lte("verval_datum", vervalt).gte("verval_datum", today.isoformat()).execute()
+        for a in (abo.data or []):
+            dagen = (date.fromisoformat(a["verval_datum"]) - today).days
+            add(f"abo_vervalt_{a['id']}_{today.isoformat()}", "⚠️", "Abonnement verloopt",
+                f"Je '{a['pakket']}' abonnement vervalt over {dagen} dag{'en' if dagen != 1 else ''}",
+                "/app/account", "warning")
+    except Exception as e: print(f"notif abo fout: {e}")
+
+    # Sorteer op niveau dan datum
+    niveau_orde = {"warning": 0, "info": 1}
+    notifs.sort(key=lambda n: (niveau_orde.get(n["niveau"], 2), n["aangemaakt"]), reverse=False)
+    return {"notificaties": notifs, "ongelezen": len(notifs)}
+
+class NotifGelezen(BaseModel):
+    key: str
+
+@app.post("/api/notificaties/gelezen")
+async def markeer_notif_gelezen(item: NotifGelezen, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    try:
+        supabase.table("carboo_notificatie_gelezen").insert({"user_id": user.id, "notificatie_key": item.key}).execute()
+    except Exception as e:
+        if "duplicate" not in str(e).lower():
+            raise HTTPException(500, str(e))
+    return {"ok": True}
+
+@app.post("/api/notificaties/alles-gelezen")
+async def markeer_alles_gelezen(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Markeer ALLE huidige notificaties als gelezen."""
+    huidige = await get_notificaties(user, supabase)
+    for n in huidige["notificaties"]:
+        try:
+            supabase.table("carboo_notificatie_gelezen").insert({"user_id": user.id, "notificatie_key": n["key"]}).execute()
+        except: pass
+    return {"ok": True, "aantal": huidige["ongelezen"]}
+
 @app.get("/api/admin/forum/verborgen")
 async def admin_verborgen_posts(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Admin: lijst verborgen posts om eventueel te herstellen."""
