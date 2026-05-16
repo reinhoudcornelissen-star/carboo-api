@@ -2065,7 +2065,42 @@ async def mollie_webhook(request: Request, supabase: Client = Depends(get_supaba
         if not payment_id:
             return {"ok": False, "reden": "Geen id"}
 
-        payment = mollie_client.payments.get(payment_id)
+        # Probeer met SDK, fallback naar directe HTTP call bij SSL/connectie problemen
+        payment = None
+        last_err = None
+        for poging in range(3):
+            try:
+                payment = mollie_client.payments.get(payment_id)
+                break
+            except Exception as err:
+                last_err = err
+                print(f"Mollie SDK poging {poging+1} faalde: {err}")
+                import time
+                time.sleep(0.5 * (poging + 1))
+        if payment is None:
+            # Fallback: direct HTTP call met httpx
+            try:
+                import asyncio
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(
+                        f"https://api.mollie.com/v2/payments/{payment_id}",
+                        headers={"Authorization": f"Bearer {os.getenv('MOLLIE_API_KEY')}"}
+                    )
+                    if resp.status_code != 200:
+                        raise Exception(f"Mollie HTTP {resp.status_code}: {resp.text}")
+                    pd = resp.json()
+                    class P:
+                        pass
+                    payment = P()
+                    payment.id = pd.get("id")
+                    payment.status = pd.get("status")
+                    payment.metadata = pd.get("metadata") or {}
+                    payment.amount = pd.get("amount") or {"value": "0", "currency": "EUR"}
+                    payment.is_paid = lambda: pd.get("status") == "paid"
+            except Exception as fallback_err:
+                print(f"Mollie fallback faalde: {fallback_err}")
+                raise Exception(f"Kan Mollie payment niet ophalen: {last_err or fallback_err}")
+
         if not payment.is_paid():
             return {"ok": True, "status": str(payment.status)}
 
@@ -2124,7 +2159,8 @@ async def mollie_webhook(request: Request, supabase: Client = Depends(get_supaba
         return {"ok": True}
     except Exception as e:
         print(f"Mollie webhook fout: {e}")
-        return {"ok": False, "error": str(e)}
+        # Belangrijk: 500 returnen zodat Mollie het opnieuw probeert (max 14 dagen retry)
+        raise HTTPException(500, f"Webhook verwerking faalde: {str(e)}")
 
 @app.delete("/api/mollie/abonnement/{pakket_id}")
 async def annuleer_abonnement(pakket_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
