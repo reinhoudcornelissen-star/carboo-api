@@ -2168,6 +2168,32 @@ async def annuleer_abonnement(pakket_id: str, user=Depends(get_current_user), su
     supabase.table("carboo_abonnementen").update({"auto_verleng": False}).eq("user_id", user.id).eq("pakket", pakket_id).eq("status", "actief").execute()
     return {"ok": True, "bericht": "Automatische verlenging gestopt. Je abonnement blijft actief tot vervaldatum."}
 
+
+
+# ─── SJABLONEN ─────────────────────────────────────────────────────────────────
+
+class SjabloonMaak(BaseModel):
+    naam: str
+    items: List[dict] = []
+
+@app.get("/api/fuelc/sjablonen")
+async def lijst_sjablonen(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_sjablonen").select("*").eq("user_id", user.id).order("aangemaakt", desc=True).execute()
+    return {"sjablonen": r.data or []}
+
+@app.post("/api/fuelc/sjablonen")
+async def maak_sjabloon(item: SjabloonMaak, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    if not item.naam.strip():
+        raise HTTPException(400, "Naam verplicht")
+    data = {"user_id": user.id, "naam": item.naam.strip(), "items": item.items}
+    r = supabase.table("carboo_sjablonen").insert(data).execute()
+    return {"ok": True, "sjabloon": r.data[0] if r.data else None}
+
+@app.delete("/api/fuelc/sjablonen/{sjabloon_id}")
+async def verwijder_sjabloon(sjabloon_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_sjablonen").delete().eq("id", sjabloon_id).eq("user_id", user.id).execute()
+    return {"ok": True}
+
 @app.get("/api/admin/forum/verborgen")
 async def admin_verborgen_posts(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Admin: lijst verborgen posts om eventueel te herstellen."""
