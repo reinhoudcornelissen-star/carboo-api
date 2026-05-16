@@ -6,6 +6,12 @@ from typing import Optional, List
 import os
 import httpx
 from supabase import create_client, Client
+from mollie.api.client import Client as MollieClient
+
+mollie_client = MollieClient()
+mollie_client.set_api_key(os.getenv("MOLLIE_API_KEY", ""))
+APP_URL = os.getenv("APP_URL", "https://carboo.app")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://carboo-api.onrender.com/api/mollie/webhook")
 
 app = FastAPI(title="Carboo API", version="2.0.0")
 
@@ -1961,6 +1967,170 @@ async def markeer_alles_gelezen(user=Depends(get_current_user), supabase: Client
             supabase.table("carboo_notificatie_gelezen").insert({"user_id": user.id, "notificatie_key": n["key"]}).execute()
         except: pass
     return {"ok": True, "aantal": huidige["ongelezen"]}
+
+
+
+@app.post("/api/auth/trial-starten")
+async def start_trial(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Geeft een 7-daags 'alles' trial abo aan een nieuwe user. Eénmalig per user_id."""
+    from datetime import date, timedelta
+    # Check of user al ooit een abo had
+    bestaand = supabase.table("carboo_abonnementen").select("id").eq("user_id", user.id).execute()
+    if bestaand.data:
+        return {"ok": False, "reden": "Al abonnement gehad"}
+    verval = date.today() + timedelta(days=7)
+    supabase.table("carboo_abonnementen").insert({
+        "user_id": user.id,
+        "pakket": "alles",
+        "status": "actief",
+        "prijs": 0,
+        "start_datum": date.today().isoformat(),
+        "verval_datum": verval.isoformat(),
+        "mollie_payment_id": "trial_auto_7d",
+    }).execute()
+    return {"ok": True, "verval_datum": verval.isoformat()}
+
+
+
+# ─── MOLLIE BETALINGEN ────────────────────────────────────────────────────────
+
+# Extra credits pakketten
+EXTRA_CREDITS = {
+    "raceplan_1": {"label": "1 extra raceplan", "credits": 1, "prijs": "2.99"},
+    "raceplan_5": {"label": "5 extra raceplannen", "credits": 5, "prijs": "9.99"},
+}
+
+class BetalingAanmaken(BaseModel):
+    pakket_id: str  # 'fueling', 'race', 'gut', 'alles', 'coach', 'raceplan_1', 'raceplan_5'
+
+@app.get("/api/mollie/mijn-abonnement")
+async def mijn_abonnement(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haal actieve abonnementen + prijzen op voor de gebruiker."""
+    abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").gte("verval_datum", "today").execute()
+    prijzen_r = supabase.table("carboo_prijzen").select("*").eq("actief", True).execute()
+    prijzen_map = {}
+    for p in (prijzen_r.data or []):
+        prijzen_map[p["id"]] = {"prijs": str(p["prijs"]), "label": p["label"]}
+    # Credits ophalen
+    geb = supabase.table("carboo_gebruikers").select("credits").eq("id", user.id).single().execute()
+    credits = (geb.data or {}).get("credits", 0)
+    return {"abonnementen": abos.data or [], "prijzen": prijzen_map, "credits": credits, "extra_credits_pakketten": EXTRA_CREDITS}
+
+@app.post("/api/mollie/betaling-aanmaken")
+async def betaling_aanmaken(item: BetalingAanmaken, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Maak een Mollie payment aan. Werkt voor abos én extra credits."""
+    pakket_id = item.pakket_id
+    is_credits = pakket_id in EXTRA_CREDITS
+
+    if is_credits:
+        pakket_info = EXTRA_CREDITS[pakket_id]
+        bedrag = pakket_info["prijs"]
+        omschrijving = f"Carboo - {pakket_info['label']}"
+    else:
+        prijs_r = supabase.table("carboo_prijzen").select("*").eq("id", pakket_id).single().execute()
+        if not prijs_r.data:
+            raise HTTPException(404, f"Pakket '{pakket_id}' niet gevonden")
+        bedrag = f"{float(prijs_r.data['prijs']):.2f}"
+        omschrijving = f"Carboo - {prijs_r.data['label']} (1 maand)"
+
+    # Email opvragen
+    try:
+        users = supabase.auth.admin.list_users()
+        email = next((u.email for u in users if str(u.id) == str(user.id)), None)
+    except: email = None
+
+    try:
+        payment = mollie_client.payments.create({
+            "amount": {"currency": "EUR", "value": bedrag},
+            "description": omschrijving,
+            "redirectUrl": f"{APP_URL}/app/abonnement?betaling=ok&pakket={pakket_id}",
+            "webhookUrl": WEBHOOK_URL,
+            "metadata": {
+                "user_id": str(user.id),
+                "pakket_id": pakket_id,
+                "is_credits": is_credits,
+                "email": email or "",
+            }
+        })
+        return {"checkout_url": payment.checkout_url, "payment_id": payment.id}
+    except Exception as e:
+        raise HTTPException(500, f"Mollie fout: {str(e)}")
+
+@app.post("/api/mollie/webhook")
+async def mollie_webhook(request: Request, supabase: Client = Depends(get_supabase)):
+    """Mollie roept dit aan na elke status verandering."""
+    try:
+        form = await request.form()
+        payment_id = form.get("id")
+        if not payment_id:
+            return {"ok": False, "reden": "Geen id"}
+
+        payment = mollie_client.payments.get(payment_id)
+        if not payment.is_paid():
+            return {"ok": True, "status": str(payment.status)}
+
+        metadata = payment.metadata or {}
+        user_id = metadata.get("user_id")
+        pakket_id = metadata.get("pakket_id")
+        is_credits = metadata.get("is_credits", False)
+
+        if not user_id or not pakket_id:
+            return {"ok": False, "reden": "Geen user_id of pakket_id in metadata"}
+
+        # Check of we deze payment al verwerkt hebben (idempotentie)
+        bestaand = supabase.table("carboo_abonnementen").select("id").eq("mollie_payment_id", payment_id).execute()
+        if bestaand.data:
+            return {"ok": True, "reden": "Al verwerkt"}
+
+        from datetime import date, timedelta
+        if is_credits:
+            # Extra credits toevoegen
+            pakket_info = EXTRA_CREDITS.get(pakket_id, {})
+            credits_toe = pakket_info.get("credits", 0)
+            huidig = supabase.table("carboo_gebruikers").select("credits").eq("id", user_id).single().execute()
+            nieuwe_credits = (huidig.data.get("credits", 0) if huidig.data else 0) + credits_toe
+            supabase.table("carboo_gebruikers").update({"credits": nieuwe_credits}).eq("id", user_id).execute()
+            # Log transactie
+            try:
+                supabase.table("carboo_transacties").insert({
+                    "user_id": user_id, "credits": credits_toe,
+                    "omschrijving": pakket_info.get("label", "Extra credits"),
+                    "mollie_payment_id": payment_id,
+                    "bedrag": float(payment.amount["value"]),
+                }).execute()
+            except: pass
+        else:
+            # Abonnement aanmaken/verlengen — 30 dagen vanaf vandaag
+            verval = date.today() + timedelta(days=30)
+            # Check of er al een actief abo is van dit pakket → verleng vanaf vervaldatum
+            bestaand_abo = supabase.table("carboo_abonnementen").select("verval_datum").eq("user_id", user_id).eq("pakket", pakket_id).eq("status", "actief").execute()
+            if bestaand_abo.data:
+                huidig_verval = date.fromisoformat(bestaand_abo.data[0]["verval_datum"])
+                if huidig_verval > date.today():
+                    verval = huidig_verval + timedelta(days=30)
+
+            supabase.table("carboo_abonnementen").insert({
+                "user_id": user_id, "pakket": pakket_id, "status": "actief",
+                "prijs": float(payment.amount["value"]),
+                "start_datum": date.today().isoformat(),
+                "verval_datum": verval.isoformat(),
+                "mollie_payment_id": payment_id,
+            }).execute()
+
+            # Race of Alles abo → credits OVERRIDE naar 5
+            if pakket_id in ("race", "alles"):
+                supabase.table("carboo_gebruikers").update({"credits": 5}).eq("id", user_id).execute()
+
+        return {"ok": True}
+    except Exception as e:
+        print(f"Mollie webhook fout: {e}")
+        return {"ok": False, "error": str(e)}
+
+@app.delete("/api/mollie/abonnement/{pakket_id}")
+async def annuleer_abonnement(pakket_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Markeer abonnement als 'niet automatisch verlengen' — blijft actief tot vervaldatum."""
+    supabase.table("carboo_abonnementen").update({"auto_verleng": False}).eq("user_id", user.id).eq("pakket", pakket_id).eq("status", "actief").execute()
+    return {"ok": True, "bericht": "Automatische verlenging gestopt. Je abonnement blijft actief tot vervaldatum."}
 
 @app.get("/api/admin/forum/verborgen")
 async def admin_verborgen_posts(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
