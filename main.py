@@ -2194,6 +2194,240 @@ async def verwijder_sjabloon(sjabloon_id: str, user=Depends(get_current_user), s
     supabase.table("carboo_sjablonen").delete().eq("id", sjabloon_id).eq("user_id", user.id).execute()
     return {"ok": True}
 
+
+
+# ─── STRAVA INTEGRATIE ─────────────────────────────────────────────────────────
+
+STRAVA_CLIENT_ID = os.getenv("STRAVA_CLIENT_ID", "")
+STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET", "")
+STRAVA_OAUTH_URL = "https://www.strava.com/oauth/authorize"
+STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
+STRAVA_API_BASE = "https://www.strava.com/api/v3"
+
+SPORT_ACTIVITY_TYPES = {
+    "Ride", "VirtualRide", "EBikeRide", "MountainBikeRide", "GravelRide",
+    "Run", "VirtualRun", "TrailRun",
+    "Swim",
+    "Workout", "WeightTraining", "Crossfit", "Elliptical", "Rowing", "StairStepper",
+    "Hike",
+}
+
+SPORT_TYPE_NL = {
+    "Ride": "Fietsen", "VirtualRide": "Indoor fietsen", "EBikeRide": "E-bike",
+    "MountainBikeRide": "Mountainbiken", "GravelRide": "Gravel",
+    "Run": "Lopen", "VirtualRun": "Indoor lopen", "TrailRun": "Trail",
+    "Swim": "Zwemmen",
+    "Workout": "Workout", "WeightTraining": "Krachttraining",
+    "Crossfit": "Crossfit", "Elliptical": "Crosstrainer",
+    "Rowing": "Roeien", "StairStepper": "Stairs",
+    "Hike": "Wandeling",
+}
+
+@app.get("/api/strava/auth-url")
+async def strava_auth_url(user=Depends(get_current_user)):
+    """Geef de Strava OAuth URL terug om naartoe te redirecten."""
+    if not STRAVA_CLIENT_ID:
+        raise HTTPException(500, "Strava niet geconfigureerd")
+    redirect_uri = f"{APP_URL}/app/fueling"
+    scope = "read,activity:read"
+    state = str(user.id)  # zodat we user kunnen identificeren in callback
+    url = (
+        f"{STRAVA_OAUTH_URL}?client_id={STRAVA_CLIENT_ID}"
+        f"&response_type=code&redirect_uri={redirect_uri}"
+        f"&approval_prompt=auto&scope={scope}&state={state}"
+    )
+    return {"auth_url": url}
+
+class StravaCallback(BaseModel):
+    code: str
+
+@app.post("/api/strava/callback")
+async def strava_callback(item: StravaCallback, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Wissel de OAuth code uit voor een access token en bewaar."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(STRAVA_TOKEN_URL, data={
+            "client_id": STRAVA_CLIENT_ID,
+            "client_secret": STRAVA_CLIENT_SECRET,
+            "code": item.code,
+            "grant_type": "authorization_code",
+        })
+    if r.status_code != 200:
+        raise HTTPException(400, f"Strava OAuth fout: {r.text}")
+    data = r.json()
+    athlete = data.get("athlete", {})
+    from datetime import datetime, timezone
+    expires_at = datetime.fromtimestamp(data["expires_at"], tz=timezone.utc).isoformat()
+    record = {
+        "user_id": user.id,
+        "strava_athlete_id": athlete.get("id"),
+        "access_token": data["access_token"],
+        "refresh_token": data["refresh_token"],
+        "token_expires_at": expires_at,
+        "atleet_naam": f"{athlete.get('firstname', '')} {athlete.get('lastname', '')}".strip(),
+    }
+    # Upsert
+    try:
+        supabase.table("carboo_strava_koppelingen").upsert(record, on_conflict="user_id").execute()
+    except Exception as e:
+        raise HTTPException(500, f"Opslaan fout: {str(e)}")
+    return {"ok": True, "atleet_naam": record["atleet_naam"]}
+
+@app.get("/api/strava/status")
+async def strava_status(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_strava_koppelingen").select("atleet_naam,laatste_sync,gekoppeld_op").eq("user_id", user.id).execute()
+    if not r.data:
+        return {"gekoppeld": False}
+    d = r.data[0]
+    return {
+        "gekoppeld": True,
+        "atleet_naam": d.get("atleet_naam"),
+        "laatste_sync": d.get("laatste_sync"),
+        "gekoppeld_op": d.get("gekoppeld_op"),
+    }
+
+@app.delete("/api/strava/koppel")
+async def strava_ontkoppel(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_strava_koppelingen").delete().eq("user_id", user.id).execute()
+    return {"ok": True}
+
+async def _refresh_token_indien_nodig(koppeling: dict, supabase: Client):
+    """Refresh access token als die is verlopen."""
+    from datetime import datetime, timezone
+    exp = datetime.fromisoformat(koppeling["token_expires_at"].replace("Z", "+00:00"))
+    if exp > datetime.now(timezone.utc):
+        return koppeling["access_token"]
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(STRAVA_TOKEN_URL, data={
+            "client_id": STRAVA_CLIENT_ID,
+            "client_secret": STRAVA_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+            "refresh_token": koppeling["refresh_token"],
+        })
+    if r.status_code != 200:
+        raise HTTPException(401, "Strava refresh faalde - opnieuw koppelen vereist")
+    d = r.json()
+    expires_at = datetime.fromtimestamp(d["expires_at"], tz=timezone.utc).isoformat()
+    supabase.table("carboo_strava_koppelingen").update({
+        "access_token": d["access_token"],
+        "refresh_token": d["refresh_token"],
+        "token_expires_at": expires_at,
+    }).eq("user_id", koppeling["user_id"]).execute()
+    return d["access_token"]
+
+@app.post("/api/strava/sync")
+async def strava_sync(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haal nieuwe Strava activiteiten op sinds laatste sync. Return conflicten voor user beslissing."""
+    from datetime import datetime, timezone, timedelta
+    k_r = supabase.table("carboo_strava_koppelingen").select("*").eq("user_id", user.id).execute()
+    if not k_r.data:
+        raise HTTPException(404, "Strava niet gekoppeld")
+    k = k_r.data[0]
+    token = await _refresh_token_indien_nodig(k, supabase)
+    # Alleen activiteiten sinds koppeling-datum (afspraak: optie A)
+    if k.get("laatste_sync"):
+        sinds = datetime.fromisoformat(k["laatste_sync"].replace("Z", "+00:00"))
+    else:
+        sinds = datetime.fromisoformat(k["gekoppeld_op"].replace("Z", "+00:00"))
+    after_ts = int(sinds.timestamp())
+    # Strava activities ophalen
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.get(
+            f"{STRAVA_API_BASE}/athlete/activities",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"after": after_ts, "per_page": 50},
+        )
+    if r.status_code != 200:
+        raise HTTPException(500, f"Strava API fout: {r.text}")
+    activities = r.json()
+    # Filter alleen sport types
+    sport_activities = [a for a in activities if a.get("sport_type") in SPORT_ACTIVITY_TYPES or a.get("type") in SPORT_ACTIVITY_TYPES]
+
+    nieuwe_imports = []
+    conflicten = []
+
+    for a in sport_activities:
+        sport_type = a.get("sport_type") or a.get("type")
+        sport_nl = SPORT_TYPE_NL.get(sport_type, sport_type)
+        datum = a["start_date_local"][:10]
+        duur_min = round(a.get("moving_time", 0) / 60)
+        kcal = round(a.get("calories", 0)) if a.get("calories") else round(duur_min * 8)  # fallback schatting
+        naam = a.get("name", sport_nl)
+        strava_id = a["id"]
+        # Check of we deze al hebben (idempotentie)
+        bestaand = supabase.table("fuelc_trainingen").select("id").eq("user_id", user.id).eq("strava_activity_id", strava_id).execute()
+        if bestaand.data:
+            continue
+        # Check voor conflict op dezelfde datum
+        zelfde_dag = supabase.table("fuelc_trainingen").select("id,sport,duur_min,kcal_verbranding,bron").eq("user_id", user.id).eq("datum", datum).execute()
+        if zelfde_dag.data and any(t.get("bron", "manueel") == "manueel" for t in zelfde_dag.data):
+            # Conflict! Vraag aan user
+            conflicten.append({
+                "strava_activity_id": strava_id,
+                "datum": datum,
+                "strava": {"naam": naam, "sport": sport_nl, "duur_min": duur_min, "kcal": kcal},
+                "bestaand": [{"id": t["id"], "sport": t.get("sport"), "duur_min": t.get("duur_min"), "kcal_verbranding": t.get("kcal_verbranding")} for t in zelfde_dag.data if t.get("bron", "manueel") == "manueel"],
+            })
+        else:
+            # Geen conflict, gewoon importeren
+            try:
+                supabase.table("fuelc_trainingen").insert({
+                    "user_id": user.id, "datum": datum,
+                    "sport": sport_nl, "duur_min": duur_min,
+                    "kcal_verbranding": kcal, "bron": "strava",
+                    "strava_activity_id": strava_id,
+                    "naam": naam,
+                }).execute()
+                nieuwe_imports.append({"datum": datum, "naam": naam, "duur_min": duur_min, "kcal": kcal})
+            except Exception as e:
+                print(f"Strava import fout: {e}")
+
+    # Update laatste_sync
+    supabase.table("carboo_strava_koppelingen").update({
+        "laatste_sync": datetime.now(timezone.utc).isoformat(),
+    }).eq("user_id", user.id).execute()
+
+    return {
+        "ok": True,
+        "geimporteerd": len(nieuwe_imports),
+        "imports": nieuwe_imports,
+        "conflicten": conflicten,
+    }
+
+class StravaConflictResolve(BaseModel):
+    strava_activity_id: int
+    datum: str
+    naam: str
+    sport: str
+    duur_min: int
+    kcal: int
+    keuze: str  # 'strava' = vervang bestaande, 'behoud' = negeer strava, 'beide' = beide laten staan
+    bestaand_id: Optional[str] = None
+
+@app.post("/api/strava/conflict-oplos")
+async def strava_conflict_oplos(item: StravaConflictResolve, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """User koos hoe conflict op te lossen."""
+    if item.keuze == "behoud":
+        # Strava negeren, niets doen (markeer dat we deze gezien hebben - voeg een geblokkeerd record toe is overkill)
+        return {"ok": True, "actie": "Strava genegeerd"}
+
+    if item.keuze == "strava":
+        # Verwijder de bestaande manuele training en importeer Strava
+        if item.bestaand_id:
+            supabase.table("fuelc_trainingen").delete().eq("id", item.bestaand_id).eq("user_id", user.id).execute()
+
+    # Voor 'strava' en 'beide': importeer Strava
+    try:
+        supabase.table("fuelc_trainingen").insert({
+            "user_id": user.id, "datum": item.datum,
+            "sport": item.sport, "duur_min": item.duur_min,
+            "kcal_verbranding": item.kcal, "bron": "strava",
+            "strava_activity_id": item.strava_activity_id,
+            "naam": item.naam,
+        }).execute()
+        return {"ok": True, "actie": "Strava geïmporteerd"}
+    except Exception as e:
+        raise HTTPException(500, f"Import fout: {str(e)}")
+
 @app.get("/api/admin/forum/verborgen")
 async def admin_verborgen_posts(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Admin: lijst verborgen posts om eventueel te herstellen."""
