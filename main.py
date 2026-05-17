@@ -2435,6 +2435,118 @@ async def strava_conflict_oplos(item: StravaConflictResolve, user=Depends(get_cu
     except Exception as e:
         raise HTTPException(500, f"Import fout: {str(e)}")
 
+
+# ─── GARMIN INTEGRATIE ─────────────────────────────────────────────────────────
+
+import random
+
+def _gen_pairing_code() -> str:
+    """Genereer 6-cijferige pairing code."""
+    return str(random.randint(100000, 999999))
+
+@app.get("/api/garmin/pairing-code")
+async def garmin_pairing_code(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Genereer of haal bestaande pairing code op voor user."""
+    r = supabase.table("carboo_garmin_pairing").select("*").eq("user_id", user.id).execute()
+    if r.data:
+        d = r.data[0]
+        return {
+            "code": d["pairing_code"],
+            "gekoppeld": d.get("gekoppeld", False),
+            "gekoppeld_op": d.get("gekoppeld_op"),
+        }
+    # Genereer nieuwe code (uniek)
+    for _ in range(20):
+        code = _gen_pairing_code()
+        bestaand = supabase.table("carboo_garmin_pairing").select("id").eq("pairing_code", code).execute()
+        if not bestaand.data:
+            supabase.table("carboo_garmin_pairing").insert({
+                "user_id": user.id,
+                "pairing_code": code,
+            }).execute()
+            return {"code": code, "gekoppeld": False, "gekoppeld_op": None}
+    raise HTTPException(500, "Kon geen unieke code genereren")
+
+@app.post("/api/garmin/reset-code")
+async def garmin_reset_code(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Reset pairing code (bv. als verloren of nieuwe Garmin)."""
+    supabase.table("carboo_garmin_pairing").delete().eq("user_id", user.id).execute()
+    return await garmin_pairing_code(user, supabase)
+
+class GarminActiefPlan(BaseModel):
+    rapport_id: str
+
+@app.post("/api/garmin/zet-actief")
+async def garmin_zet_actief(item: GarminActiefPlan, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Markeer een rapport als 'actief voor Garmin'. Zet alle andere op false."""
+    supabase.table("carboo_rapporten").update({"actief_voor_garmin": False}).eq("user_id", user.id).execute()
+    r = supabase.table("carboo_rapporten").update({"actief_voor_garmin": True}).eq("id", item.rapport_id).eq("user_id", user.id).execute()
+    if not r.data:
+        raise HTTPException(404, "Rapport niet gevonden")
+    return {"ok": True}
+
+@app.get("/api/garmin/actief-plan/{pairing_code}")
+async def garmin_actief_plan(pairing_code: str, supabase: Client = Depends(get_supabase)):
+    """
+    Public endpoint - geen auth nodig. Garmin device roept dit aan met de pairing code.
+    Returns compact JSON met het actieve raceplan voor Garmin display.
+    """
+    # Vind user via pairing code
+    p_r = supabase.table("carboo_garmin_pairing").select("user_id,gekoppeld").eq("pairing_code", pairing_code).execute()
+    if not p_r.data:
+        raise HTTPException(404, "Ongeldige pairing code")
+    user_id = p_r.data[0]["user_id"]
+    # Markeer als gekoppeld bij eerste call
+    if not p_r.data[0].get("gekoppeld"):
+        from datetime import datetime, timezone
+        supabase.table("carboo_garmin_pairing").update({
+            "gekoppeld": True,
+            "gekoppeld_op": datetime.now(timezone.utc).isoformat(),
+        }).eq("pairing_code", pairing_code).execute()
+    # Haal actief raceplan op
+    r_r = supabase.table("carboo_rapporten").select("id,naam,meta,html").eq("user_id", user_id).eq("actief_voor_garmin", True).eq("type", "race_html").order("datum", desc=True).limit(1).execute()
+    if not r_r.data:
+        return {"ok": False, "fout": "Geen actief raceplan gekozen"}
+    rapport = r_r.data[0]
+    # Parse plan uit meta (race_data zit daar)
+    meta = rapport.get("meta", {}) or {}
+    # Probeer plan items op te halen uit de HTML of meta
+    # Voor nu: gebruik dummy items uit meta indien beschikbaar
+    plan_items = meta.get("plan_items", [])
+    # Fallback: parse uit HTML als plan_items leeg
+    if not plan_items:
+        plan_items = _parse_plan_uit_html(rapport.get("html", ""))
+    return {
+        "ok": True,
+        "naam": rapport.get("naam", "Raceplan"),
+        "sport": meta.get("sport", "Fietsen"),
+        "totale_min": meta.get("totale_min", 180),
+        "items": plan_items[:30],  # Max 30 items voor Garmin memory
+    }
+
+def _parse_plan_uit_html(html: str) -> list:
+    """Eenvoudige parser - zoekt voedingsmomenten in racemap HTML."""
+    import re
+    items = []
+    # Match patroon: tijd (XX:YY) + type (GEL/SD/VAST/CAF) + label
+    # Voorbeeld: "09:20 GEL 6D groot +200ml"
+    # Parse vanuit racemap rows in HTML
+    pattern = r'(\d{1,3}):(\d{2})\s*</[^>]+>\s*<[^>]+>\s*(SD|GEL|VAST|CAF|H2O)\s*</[^>]+>\s*([^<]+)'
+    matches = re.findall(pattern, html)
+    for m in matches:
+        try:
+            uren, mins, type_, label = m
+            tijd_sec = (int(uren) * 60 + int(mins)) * 60
+            items.append({
+                "tijd": tijd_sec,
+                "type": type_,
+                "label": label.strip()[:30],
+            })
+        except:
+            continue
+    return items
+
+
 @app.get("/api/admin/forum/verborgen")
 async def admin_verborgen_posts(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Admin: lijst verborgen posts om eventueel te herstellen."""
