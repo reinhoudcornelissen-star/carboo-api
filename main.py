@@ -2315,20 +2315,23 @@ async def _refresh_token_indien_nodig(koppeling: dict, supabase: Client):
     return d["access_token"]
 
 @app.post("/api/strava/sync")
-async def strava_sync(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    """Haal nieuwe Strava activiteiten op sinds laatste sync. Return conflicten voor user beslissing."""
+async def strava_sync(historie: bool = False, dagen: int = 7, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haal nieuwe Strava activiteiten op. Met ?historie=true&dagen=N: laatste N dagen."""
     from datetime import datetime, timezone, timedelta
     k_r = supabase.table("carboo_strava_koppelingen").select("*").eq("user_id", user.id).execute()
     if not k_r.data:
         raise HTTPException(404, "Strava niet gekoppeld")
     k = k_r.data[0]
     token = await _refresh_token_indien_nodig(k, supabase)
-    # Alleen activiteiten sinds koppeling-datum (afspraak: optie A)
-    if k.get("laatste_sync"):
+    # Bepaal vanaf wanneer
+    if historie:
+        sinds = datetime.now(timezone.utc) - timedelta(days=max(1, min(dagen, 90)))
+    elif k.get("laatste_sync"):
         sinds = datetime.fromisoformat(k["laatste_sync"].replace("Z", "+00:00"))
     else:
         sinds = datetime.fromisoformat(k["gekoppeld_op"].replace("Z", "+00:00"))
     after_ts = int(sinds.timestamp())
+    print(f"[strava] sync voor user {user.id} sinds {sinds.isoformat()} (historie={historie})")
     # Strava activities ophalen
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.get(
@@ -2339,8 +2342,12 @@ async def strava_sync(user=Depends(get_current_user), supabase: Client = Depends
     if r.status_code != 200:
         raise HTTPException(500, f"Strava API fout: {r.text}")
     activities = r.json()
+    print(f"[strava] {len(activities)} activiteiten ontvangen van Strava")
+    for a in activities[:5]:
+        print(f"[strava]   - {a.get('start_date_local')} {a.get('type')} / {a.get('sport_type')} '{a.get('name')}'")
     # Filter alleen sport types
     sport_activities = [a for a in activities if a.get("sport_type") in SPORT_ACTIVITY_TYPES or a.get("type") in SPORT_ACTIVITY_TYPES]
+    print(f"[strava] {len(sport_activities)} sport activiteiten na filter")
 
     nieuwe_imports = []
     conflicten = []
