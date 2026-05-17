@@ -2512,16 +2512,48 @@ async def garmin_actief_plan(pairing_code: str, supabase: Client = Depends(get_s
     meta = rapport.get("meta", {}) or {}
     # Probeer plan items op te halen uit de HTML of meta
     # Voor nu: gebruik dummy items uit meta indien beschikbaar
-    plan_items = meta.get("plan_items", [])
-    # Fallback: parse uit HTML als plan_items leeg
-    if not plan_items:
-        plan_items = _parse_plan_uit_html(rapport.get("html", ""))
+    plan_items_raw = meta.get("plan_items", [])
+    # plan_items kan een dict zijn (per uur), normaliseer naar list
+    items_list = []
+    if isinstance(plan_items_raw, dict):
+        # Per uur dict: {0: [{...}, ...], 1: [{...}, ...]}
+        for uur_key in sorted(plan_items_raw.keys(), key=lambda k: int(k) if str(k).isdigit() else 0):
+            uur_items = plan_items_raw[uur_key]
+            if not isinstance(uur_items, list):
+                continue
+            try:
+                uur_int = int(uur_key)
+            except:
+                uur_int = 0
+            for it in uur_items:
+                if not isinstance(it, dict):
+                    continue
+                try:
+                    # min binnen het uur
+                    min_offset = int(str(it.get("min", "0")).replace("min", "").strip())
+                    tijd_sec = (uur_int * 60 + min_offset) * 60
+                    emoji_to_type = {"⚡": "GEL", "🥤": "SD", "🍌": "VAST", "☕": "CAF", "🍫": "VAST", "🍪": "VAST", "🌾": "VAST"}
+                    type_short = emoji_to_type.get(it.get("emoji", ""), "GEL")
+                    items_list.append({
+                        "tijd": tijd_sec,
+                        "type": type_short,
+                        "label": str(it.get("naam", ""))[:30],
+                    })
+                except Exception as ex:
+                    print(f"[garmin] item parse fout: {ex}")
+                    continue
+    elif isinstance(plan_items_raw, list):
+        items_list = plan_items_raw
+    # Fallback: parse uit HTML als nog steeds leeg
+    if not items_list:
+        items_list = _parse_plan_uit_html(rapport.get("html", ""))
+    print(f"[garmin] returned {len(items_list)} items voor pairing {pairing_code}")
     return {
         "ok": True,
         "naam": rapport.get("naam", "Raceplan"),
         "sport": meta.get("sport", "Fietsen"),
         "totale_min": meta.get("totale_min", 180),
-        "items": plan_items[:30],  # Max 30 items voor Garmin memory
+        "items": items_list[:30],
     }
 
 def _parse_plan_uit_html(html: str) -> list:
