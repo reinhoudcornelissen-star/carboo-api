@@ -2229,7 +2229,7 @@ async def strava_auth_url(user=Depends(get_current_user)):
     if not STRAVA_CLIENT_ID:
         raise HTTPException(500, "Strava niet geconfigureerd")
     redirect_uri = f"{APP_URL}/app/fueling"
-    scope = "read,activity:read"
+    scope = "read,activity:read_all"
     state = str(user.id)  # zodat we user kunnen identificeren in callback
     url = (
         f"{STRAVA_OAUTH_URL}?client_id={STRAVA_CLIENT_ID}"
