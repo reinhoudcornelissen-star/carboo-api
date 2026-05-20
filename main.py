@@ -29,12 +29,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Globale Supabase client - 1x aangemaakt, hergebruikt voor alle requests
+_supabase_singleton: Optional[Client] = None
+
 def get_supabase() -> Client:
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_KEY")
-    if not url or not key:
-        raise HTTPException(500, "Supabase niet geconfigureerd")
-    return create_client(url, key)
+    global _supabase_singleton
+    if _supabase_singleton is None:
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_SERVICE_KEY")
+        if not url or not key:
+            raise HTTPException(500, "Supabase niet geconfigureerd")
+        _supabase_singleton = create_client(url, key)
+    return _supabase_singleton
 
 async def get_current_user(request: Request, supabase: Client = Depends(get_supabase)):
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
