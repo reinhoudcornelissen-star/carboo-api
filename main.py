@@ -1,4 +1,10 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
+cd C:\Users\reinhoud\Documents\Carbs\carboo-api
+
+Write-Host "`n=== Laatste 5 commits ===" -ForegroundColor Cyan
+git log --oneline -5
+
+Write-Host "`n=== Singleton in laatste commit? ===" -ForegroundColor Cyan
+git show HEAD:main.py | Select-String "_supabase_singleton" | Select-Object -First 3from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -147,6 +153,7 @@ async def haal_plan_op(user=Depends(get_current_user), supabase: Client = Depend
 class FuelcProfiel(BaseModel):
     geslacht: str
     leeftijd: int
+    geboortedatum: Optional[date] = None
     gewicht_kg: float
     lengte_cm: int
     activiteit: str
@@ -221,6 +228,14 @@ async def get_fuelc_profiel(user=Depends(get_current_user), supabase: Client = D
 @app.post("/api/fuelc/profiel")
 async def sla_fuelc_profiel(profiel: FuelcProfiel, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     data = profiel.dict()
+    # Als geboortedatum is ingevuld, bereken leeftijd serverside (single source of truth)
+    if data.get("geboortedatum"):
+        from datetime import date as _date
+        gd = data["geboortedatum"]
+        if isinstance(gd, _date):
+            today = _date.today()
+            data["leeftijd"] = today.year - gd.year - ((today.month, today.day) < (gd.month, gd.day))
+            data["geboortedatum"] = gd.isoformat()
     data["user_id"] = user.id
     bestaand = supabase.table("fuelc_profiel").select("id").eq("user_id", user.id).execute()
     if bestaand.data:
