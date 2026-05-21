@@ -1339,7 +1339,7 @@ async def scan_etiket(request: Request, user=Depends(get_current_user)):
     try:
         client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
-            model="claude-opus-4-5",
+            model="claude-sonnet-4-5",
             max_tokens=1000,
             messages=[{
                 "role": "user",
