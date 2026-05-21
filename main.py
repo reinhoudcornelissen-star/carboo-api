@@ -1,10 +1,4 @@
-cd C:\Users\reinhoud\Documents\Carbs\carboo-api
-
-Write-Host "`n=== Laatste 5 commits ===" -ForegroundColor Cyan
-git log --oneline -5
-
-Write-Host "`n=== Singleton in laatste commit? ===" -ForegroundColor Cyan
-git show HEAD:main.py | Select-String "_supabase_singleton" | Select-Object -First 3from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
