@@ -153,7 +153,7 @@ async def haal_plan_op(user=Depends(get_current_user), supabase: Client = Depend
 class FuelcProfiel(BaseModel):
     geslacht: str
     leeftijd: int
-    geboortedatum: Optional[date] = None
+    geboortedatum: Optional[str] = None  # YYYY-MM-DD
     gewicht_kg: float
     lengte_cm: int
     activiteit: str
@@ -231,11 +231,15 @@ async def sla_fuelc_profiel(profiel: FuelcProfiel, user=Depends(get_current_user
     # Als geboortedatum is ingevuld, bereken leeftijd serverside (single source of truth)
     if data.get("geboortedatum"):
         from datetime import date as _date
-        gd = data["geboortedatum"]
-        if isinstance(gd, _date):
-            today = _date.today()
-            data["leeftijd"] = today.year - gd.year - ((today.month, today.day) < (gd.month, gd.day))
-            data["geboortedatum"] = gd.isoformat()
+        gd_raw = data["geboortedatum"]
+        try:
+            gd = _date.fromisoformat(gd_raw) if isinstance(gd_raw, str) else gd_raw
+            if isinstance(gd, _date):
+                today = _date.today()
+                data["leeftijd"] = today.year - gd.year - ((today.month, today.day) < (gd.month, gd.day))
+                data["geboortedatum"] = gd.isoformat()
+        except (ValueError, TypeError):
+            data["geboortedatum"] = None
     data["user_id"] = user.id
     bestaand = supabase.table("fuelc_profiel").select("id").eq("user_id", user.id).execute()
     if bestaand.data:
