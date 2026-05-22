@@ -1996,6 +1996,28 @@ async def markeer_alles_gelezen(user=Depends(get_current_user), supabase: Client
 
 
 
+class TurnstileVerify(BaseModel):
+    token: str
+
+@app.post("/api/auth/turnstile-verify")
+async def turnstile_verify(data: TurnstileVerify):
+    """Verifieer Cloudflare Turnstile token tegen Cloudflare's siteverify endpoint."""
+    secret = os.getenv("TURNSTILE_SECRET_KEY")
+    if not secret:
+        raise HTTPException(500, "Turnstile niet geconfigureerd op server")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+                data={"secret": secret, "response": data.token},
+            )
+        result = resp.json()
+        if not result.get("success"):
+            raise HTTPException(400, "Turnstile validatie mislukt")
+        return {"success": True}
+    except httpx.HTTPError as e:
+        raise HTTPException(500, f"Kon Turnstile niet bereiken: {e}")
+
 @app.post("/api/auth/trial-starten")
 async def start_trial(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Geeft een 7-daags 'alles' trial abo aan een nieuwe user. Eénmalig per user_id."""
