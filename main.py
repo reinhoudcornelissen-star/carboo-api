@@ -608,7 +608,7 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
     prof = supabase.table("fuelc_profiel").select("energie_doel,kh_doel_pct,eiwit_doel_pct,vet_doel_pct,gewicht_kg,lengte_cm").eq("user_id", klant_id).execute()
     result["profiel"] = prof.data[0] if prof.data else {}
     if privacy.get("dagschema"):
-        dag = supabase.table("fuelc_dagboek").select("datum,moment,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,suikers_g,natrium_mg,vitd_mcg,vitb12_mcg,omega3_g,calcium_mg,ijzer_mg,gi").eq("user_id", klant_id).order("datum", desc=True).limit(100).execute()
+        dag = supabase.table("fuelc_dagboek").select("datum,moment,naam,categorie,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,suikers_g,natrium_mg,kalium_mg,vitd_mcg,vitb12_mcg,omega3_g,calcium_mg,ijzer_mg,verz_g,gi").eq("user_id", klant_id).order("datum", desc=True).limit(100).execute()
         result["dagschema"] = dag.data or []
         tr = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
         result["trainingen"] = tr.data or []
