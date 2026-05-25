@@ -2662,6 +2662,7 @@ async def mollie_webhook(request: Request):
         if resp.status_code != 200:
             return {"status": "ok"}
         betaling = resp.json()
+    print(f"[WEBHOOK] raw body: http={resp.status_code} text={resp.text[:600]}")
     print(f"[WEBHOOK] mollie response: status={betaling.get(chr(34)+chr(115)+chr(116)+chr(97)+chr(116)+chr(117)+chr(115)+chr(34))} metadata={betaling.get(chr(34)+chr(109)+chr(101)+chr(116)+chr(97)+chr(100)+chr(97)+chr(116)+chr(97)+chr(34))}")
     if betaling.get("status") != "paid":
         return {"status": "ok"}
