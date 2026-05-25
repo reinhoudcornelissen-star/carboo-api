@@ -2668,7 +2668,7 @@ async def mollie_webhook(request: Request):
         return {"status": "ok"}
     metadata = betaling.get("metadata", {})
     user_id = metadata.get("user_id", "")
-    pakket = metadata.get("pakket", "")
+    pakket = metadata.get("pakket") or metadata.get("pakket_id") or ""
     print(f"[WEBHOOK] extract: user_id={user_id} pakket={pakket}")
     if not user_id or not pakket:
         return {"status": "ok"}
