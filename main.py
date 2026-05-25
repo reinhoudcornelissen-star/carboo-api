@@ -2651,7 +2651,6 @@ async def maak_betaling(item: BetalingRequest, user=Depends(get_current_user)):
 async def mollie_webhook(request: Request):
     body = await request.form()
     payment_id = body.get("id", "")
-    print(f"[WEBHOOK] payment_id={payment_id}")
     if not payment_id:
         return {"status": "ok"}
     async with httpx.AsyncClient() as client:
@@ -2662,14 +2661,11 @@ async def mollie_webhook(request: Request):
         if resp.status_code != 200:
             return {"status": "ok"}
         betaling = resp.json()
-    print(f"[WEBHOOK] raw body: http={resp.status_code} text={resp.text[:600]}")
-    print(f"[WEBHOOK] mollie response: status={betaling.get(chr(34)+chr(115)+chr(116)+chr(97)+chr(116)+chr(117)+chr(115)+chr(34))} metadata={betaling.get(chr(34)+chr(109)+chr(101)+chr(116)+chr(97)+chr(100)+chr(97)+chr(116)+chr(97)+chr(34))}")
     if betaling.get("status") != "paid":
         return {"status": "ok"}
     metadata = betaling.get("metadata", {})
     user_id = metadata.get("user_id", "")
     pakket = metadata.get("pakket") or metadata.get("pakket_id") or ""
-    print(f"[WEBHOOK] extract: user_id={user_id} pakket={pakket}")
     if not user_id or not pakket:
         return {"status": "ok"}
     from datetime import date, timedelta
