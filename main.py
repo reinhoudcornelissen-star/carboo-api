@@ -2076,7 +2076,14 @@ async def mijn_abonnement(user=Depends(get_current_user), supabase: Client = Dep
             "auto_verleng": False,
         }]
         return {"abonnementen": fake_abos, "prijzen": prijzen_map, "credits": credits, "extra_credits_pakketten": EXTRA_CREDITS, "is_admin": True}
-    abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").gte("verval_datum", "today").execute()
+    # Auto-verloop: markeer verlopen abos als status=verlopen voor we ze ophalen
+    from datetime import date as _dt_date
+    vandaag_str = _dt_date.today().isoformat()
+    try:
+        supabase.table("carboo_abonnementen").update({"status": "verlopen", "bijgewerkt": "now()"}).eq("user_id", user.id).eq("status", "actief").lt("verval_datum", vandaag_str).execute()
+    except Exception as e:
+        print(f"[AUTO-VERLOOP] fout bij update: {e}")
+    abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").gte("verval_datum", vandaag_str).execute()
     return {"abonnementen": abos.data or [], "prijzen": prijzen_map, "credits": credits, "extra_credits_pakketten": EXTRA_CREDITS, "is_admin": False}
 
 @app.post("/api/mollie/betaling-aanmaken")
