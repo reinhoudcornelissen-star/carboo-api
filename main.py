@@ -2054,15 +2054,30 @@ class BetalingAanmaken(BaseModel):
 @app.get("/api/mollie/mijn-abonnement")
 async def mijn_abonnement(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Haal actieve abonnementen + prijzen op voor de gebruiker."""
-    abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").gte("verval_datum", "today").execute()
     prijzen_r = supabase.table("carboo_prijzen").select("*").eq("actief", True).execute()
     prijzen_map = {}
     for p in (prijzen_r.data or []):
         prijzen_map[p["id"]] = {"prijs": str(p["prijs"]), "label": p["label"]}
-    # Credits ophalen
     geb = supabase.table("carboo_gebruikers").select("credits").eq("id", user.id).single().execute()
     credits = (geb.data or {}).get("credits", 0)
-    return {"abonnementen": abos.data or [], "prijzen": prijzen_map, "credits": credits, "extra_credits_pakketten": EXTRA_CREDITS}
+    # Admin-bypass: gebruik bestaande is_admin() functie (consistent met rest codebase)
+    if await is_admin(user, supabase):
+        from datetime import date
+        fake_abos = [{
+            "id": "admin-bypass",
+            "user_id": user.id,
+            "pakket": "alles",
+            "status": "actief",
+            "prijs": 0,
+            "start_datum": date.today().isoformat(),
+            "verval_datum": "2099-12-31",
+            "mollie_payment_id": "admin_role",
+            "mollie_subscription_id": None,
+            "auto_verleng": False,
+        }]
+        return {"abonnementen": fake_abos, "prijzen": prijzen_map, "credits": credits, "extra_credits_pakketten": EXTRA_CREDITS, "is_admin": True}
+    abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").gte("verval_datum", "today").execute()
+    return {"abonnementen": abos.data or [], "prijzen": prijzen_map, "credits": credits, "extra_credits_pakketten": EXTRA_CREDITS, "is_admin": False}
 
 @app.post("/api/mollie/betaling-aanmaken")
 async def betaling_aanmaken(item: BetalingAanmaken, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
