@@ -2682,6 +2682,7 @@ async def mollie_webhook(request: Request):
             "status": "actief",
             "verval_datum": verval.isoformat(),
             "mollie_payment_id": payment_id,
+            "prijs": prijs,
             "bijgewerkt": "now()"
         }).eq("user_id", user_id).eq("pakket", pakket).execute()
     else:
