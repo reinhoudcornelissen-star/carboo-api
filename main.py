@@ -2694,6 +2694,10 @@ async def mollie_webhook(request: Request):
             "prijs": prijs, "start_datum": date.today().isoformat(),
             "verval_datum": verval.isoformat(), "mollie_payment_id": payment_id,
         }).execute()
+
+    # Race of Alles pakket: credits OVERRIDE naar 5 race plannen credits
+    if pakket in ("race", "alles"):
+        supabase_admin.table("carboo_gebruikers").update({"credits": 5}).eq("id", user_id).execute()
     if betaling_type == "abonnement_eerste":
         klant_rec = supabase_admin.table("carboo_mollie_klanten").select("mollie_customer_id").eq("user_id", user_id).execute()
         if klant_rec.data:
