@@ -1,0 +1,70 @@
+﻿ 2155:         metadata = payment.metadata or {}
+ 2156:         user_id = metadata.get("user_id")
+ 2157:         pakket_id = metadata.get("pakket_id")
+ 2158:         is_credits = metadata.get("is_credits", False)
+ 2159: 
+ 2160:         if not user_id or not pakket_id:
+ 2161:             return {"ok": False, "reden": "Geen user_id of pakket_id in metadata"}
+ 2162: 
+ 2163:         # Check of we deze payment al verwerkt hebben (idempotentie)
+ 2164:         bestaand = supabase.table("carboo_abonnementen").select("id").eq("mollie_payment_id", payment_id).execute()
+ 2165:         if bestaand.data:
+ 2166:             return {"ok": True, "reden": "Al verwerkt"}
+ 2167: 
+ 2168:         from datetime import date, timedelta
+ 2169:         if is_credits:
+ 2170:             # Extra credits toevoegen
+ 2171:             pakket_info = EXTRA_CREDITS.get(pakket_id, {})
+ 2172:             credits_toe = pakket_info.get("credits", 0)
+ 2173:             huidig = supabase.table("carboo_gebruikers").select("credits").eq("id", user_id).single().execute()
+ 2174:             nieuwe_credits = (huidig.data.get("credits", 0) if huidig.data else 0) + credits_toe
+ 2175:             supabase.table("carboo_gebruikers").update({"credits": nieuwe_credits}).eq("id", user_id).execute()
+ 2176:             # Log transactie
+ 2177:             try:
+ 2178:                 supabase.table("carboo_transacties").insert({
+ 2179:                     "user_id": user_id, "credits": credits_toe,
+ 2180:                     "omschrijving": pakket_info.get("label", "Extra credits"),
+ 2181:                     "mollie_payment_id": payment_id,
+ 2182:                     "bedrag": float(payment.amount["value"]),
+ 2183:                 }).execute()
+ 2184:             except: pass
+ 2185:         else:
+ 2186:             # Abonnement aanmaken/verlengen — 30 dagen vanaf vandaag
+ 2187:             verval = date.today() + timedelta(days=30)
+ 2188:             # Check of er al een actief abo is van dit pakket → verleng vanaf vervaldatum
+ 2189:             bestaand_abo = supabase.table("carboo_abonnementen").select("verval_datum").eq("user_id", user_id).eq("pakket", pakket_id).eq("status", "actief").execute()
+ 2190:             if bestaand_abo.data:
+ 2191:                 huidig_verval = date.fromisoformat(bestaand_abo.data[0]["verval_datum"])
+ 2192:                 if huidig_verval > date.today():
+ 2193:                     verval = huidig_verval + timedelta(days=30)
+ 2194: 
+ 2195:             supabase.table("carboo_abonnementen").insert({
+ 2196:                 "user_id": user_id, "pakket": pakket_id, "status": "actief",
+ 2197:                 "prijs": float(payment.amount["value"]),
+ 2198:                 "start_datum": date.today().isoformat(),
+ 2199:                 "verval_datum": verval.isoformat(),
+ 2200:                 "mollie_payment_id": payment_id,
+ 2201:             }).execute()
+ 2202: 
+ 2203:             # Race of Alles abo → credits OVERRIDE naar 5
+ 2204:             if pakket_id in ("race", "alles"):
+ 2205:                 supabase.table("carboo_gebruikers").update({"credits": 5}).eq("id", user_id).execute()
+ 2206: 
+ 2207:         return {"ok": True}
+ 2208:     except Exception as e:
+ 2209:         print(f"Mollie webhook fout: {e}")
+ 2210:         # Belangrijk: 500 returnen zodat Mollie het opnieuw probeert (max 14 dagen retry)
+ 2211:         raise HTTPException(500, f"Webhook verwerking faalde: {str(e)}")
+ 2212: 
+ 2213: @app.delete("/api/mollie/abonnement/{pakket_id}")
+ 2214: async def annuleer_abonnement(pakket_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 2215:     """Markeer abonnement als 'niet automatisch verlengen' — blijft actief tot vervaldatum."""
+ 2216:     supabase.table("carboo_abonnementen").update({"auto_verleng": False}).eq("user_id", user.id).eq("pakket", pakket_id).eq("status", "actief").execute()
+ 2217:     return {"ok": True, "bericht": "Automatische verlenging gestopt. Je abonnement blijft actief tot vervaldatum."}
+ 2218: 
+ 2219: 
+ 2220: 
+ 2221: # ─── SJABLONEN ─────────────────────────────────────────────────────────────────
+ 2222: 
+ 2223: class SjabloonMaak(BaseModel):
+ 2224:     naam: str

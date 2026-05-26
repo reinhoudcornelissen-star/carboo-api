@@ -1,0 +1,60 @@
+﻿ 1296: # â•â•â• ETIKETSCAN â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+ 1297: 
+ 1298: @app.post("/api/fuelc/scan-etiket")
+ 1299: async def scan_etiket(request: Request, user=Depends(get_current_user)):
+ 1300:     import json, re
+ 1301:     try:
+ 1302:         import anthropic
+ 1303:     except ImportError:
+ 1304:         raise HTTPException(500, "anthropic pakket niet geinstalleerd")
+ 1305: 
+ 1306:     body = await request.json()
+ 1307:     image_data = body.get("image_data", "")
+ 1308:     media_type = body.get("media_type", "image/jpeg")
+ 1309: 
+ 1310:     if not image_data:
+ 1311:         raise HTTPException(400, "Geen afbeelding ontvangen")
+ 1312: 
+ 1313:     if media_type not in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
+ 1314:         media_type = "image/jpeg"
+ 1315: 
+ 1316:     api_key = os.getenv("ANTHROPIC_API_KEY")
+ 1317:     if not api_key:
+ 1318:         raise HTTPException(500, "ANTHROPIC_API_KEY niet ingesteld op Render")
+ 1319: 
+ 1320:     try:
+ 1321:         client = anthropic.Anthropic(api_key=api_key)
+ 1322:         msg = client.messages.create(
+ 1323:             model="claude-opus-4-5",
+ 1324:             max_tokens=1000,
+ 1325:             messages=[{
+ 1326:                 "role": "user",
+ 1327:                 "content": [
+ 1328:                     {
+ 1329:                         "type": "image",
+ 1330:                         "source": {"type": "base64", "media_type": media_type, "data": image_data}
+ 1331:                     },
+ 1332:                     {
+ 1333:                         "type": "text",
+ 1334:                         "text": 'Analyseer dit voedseletiket. Geef ALLEEN een JSON object terug, geen uitleg. BELANGRIJK: alle voedingswaarden (kcal, kh, suikers, vezels, eiwit, vet, verz, natrium, kalium, calcium, ijzer, magnesium, vitc, vitd, vitb12, omega3) moeten PER 100G zijn, niet per portie. De portie_g en portie_label zijn informatief. Gebruik dit formaat: {"naam":"","categorie":"Granen en brood","portie_g":100,"portie_label":"100g","kcal":0,"kh":0,"suikers":0,"vezels":0,"eiwit":0,"vet":0,"verz":0,"natrium":0,"kalium":0,"calcium":0,"ijzer":0,"magnesium":0,"vitc":0,"vitd":0,"vitb12":0,"omega3":0,"gi":0}'
+ 1335:                     }
+ 1336:                 ]
+ 1337:             }]
+ 1338:         )
+ 1339:         tekst = msg.content[0].text.strip()
+ 1340:         match = re.search(r'\{[\s\S]*\}', tekst)
+ 1341:         if not match:
+ 1342:             raise HTTPException(422, f"Claude antwoord: {tekst[:200]}")
+ 1343:         return json.loads(match.group())
+ 1344:     except HTTPException:
+ 1345:         raise
+ 1346:     except Exception as e:
+ 1347:         raise HTTPException(500, f"Claude fout: {type(e).__name__}: {str(e)[:200]}")
+ 1348: 
+ 1349: # â”€â”€â”€ COACH ZONE SOCIAAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ 1350: 
+ 1351: class CoachBericht(BaseModel):
+ 1352:     tekst: str
+ 1353:     type: Optional[str] = "bericht"
+ 1354: 
+ 1355: class PrikbordPost(BaseModel):

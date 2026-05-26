@@ -1,4 +1,10 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
+cd C:\Users\reinhoud\Documents\Carbs\carboo-api
+
+Write-Host "`n=== Laatste 5 commits ===" -ForegroundColor Cyan
+git log --oneline -5
+
+Write-Host "`n=== Singleton in laatste commit? ===" -ForegroundColor Cyan
+git show HEAD:main.py | Select-String "_supabase_singleton" | Select-Object -First 3from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -458,10 +464,6 @@ async def genereer_invite(data: dict, user=Depends(get_current_user), supabase: 
         raise HTTPException(400, "Maak eerst een coach profiel aan")
     if not coach.data[0].get("verified"):
         raise HTTPException(403, "Coach account nog niet goedgekeurd door admin")
-    # Check actief coach abonnement
-    abo = supabase.table("carboo_abonnementen").select("id").eq("user_id", user.id).eq("pakket", "coach").eq("status", "actief").execute()
-    if not abo.data:
-        raise HTTPException(403, "Geen actief Coach Zone abonnement. Activeer eerst via /app/abonnement")
     coach_id = coach.data[0]["id"]
 
     # Zoek klant in auth.users via Supabase admin API
@@ -612,7 +614,7 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
     prof = supabase.table("fuelc_profiel").select("energie_doel,kh_doel_pct,eiwit_doel_pct,vet_doel_pct,gewicht_kg,lengte_cm").eq("user_id", klant_id).execute()
     result["profiel"] = prof.data[0] if prof.data else {}
     if privacy.get("dagschema"):
-        dag = supabase.table("fuelc_dagboek").select("datum,moment,naam,categorie,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,suikers_g,natrium_mg,kalium_mg,vitd_mcg,vitb12_mcg,omega3_g,calcium_mg,ijzer_mg,verz_g,gi").eq("user_id", klant_id).order("datum", desc=True).limit(100).execute()
+        dag = supabase.table("fuelc_dagboek").select("datum,moment,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,suikers_g,natrium_mg,vitd_mcg,vitb12_mcg,omega3_g,calcium_mg,ijzer_mg,gi").eq("user_id", klant_id).order("datum", desc=True).limit(100).execute()
         result["dagschema"] = dag.data or []
         tr = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
         result["trainingen"] = tr.data or []
@@ -1343,7 +1345,7 @@ async def scan_etiket(request: Request, user=Depends(get_current_user)):
     try:
         client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-opus-4-5",
             max_tokens=1000,
             messages=[{
                 "role": "user",
@@ -2000,28 +2002,6 @@ async def markeer_alles_gelezen(user=Depends(get_current_user), supabase: Client
 
 
 
-class TurnstileVerify(BaseModel):
-    token: str
-
-@app.post("/api/auth/turnstile-verify")
-async def turnstile_verify(data: TurnstileVerify):
-    """Verifieer Cloudflare Turnstile token tegen Cloudflare's siteverify endpoint."""
-    secret = os.getenv("TURNSTILE_SECRET_KEY")
-    if not secret:
-        raise HTTPException(500, "Turnstile niet geconfigureerd op server")
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-                data={"secret": secret, "response": data.token},
-            )
-        result = resp.json()
-        if not result.get("success"):
-            raise HTTPException(400, "Turnstile validatie mislukt")
-        return {"success": True}
-    except httpx.HTTPError as e:
-        raise HTTPException(500, f"Kon Turnstile niet bereiken: {e}")
-
 @app.post("/api/auth/trial-starten")
 async def start_trial(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Geeft een 7-daags 'alles' trial abo aan een nieuwe user. Eénmalig per user_id."""
@@ -2058,37 +2038,15 @@ class BetalingAanmaken(BaseModel):
 @app.get("/api/mollie/mijn-abonnement")
 async def mijn_abonnement(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Haal actieve abonnementen + prijzen op voor de gebruiker."""
+    abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").gte("verval_datum", "today").execute()
     prijzen_r = supabase.table("carboo_prijzen").select("*").eq("actief", True).execute()
     prijzen_map = {}
     for p in (prijzen_r.data or []):
         prijzen_map[p["id"]] = {"prijs": str(p["prijs"]), "label": p["label"]}
+    # Credits ophalen
     geb = supabase.table("carboo_gebruikers").select("credits").eq("id", user.id).single().execute()
     credits = (geb.data or {}).get("credits", 0)
-    # Admin-bypass: gebruik bestaande is_admin() functie (consistent met rest codebase)
-    if await is_admin(user, supabase):
-        from datetime import date
-        fake_abos = [{
-            "id": "admin-bypass",
-            "user_id": user.id,
-            "pakket": "alles",
-            "status": "actief",
-            "prijs": 0,
-            "start_datum": date.today().isoformat(),
-            "verval_datum": "2099-12-31",
-            "mollie_payment_id": "admin_role",
-            "mollie_subscription_id": None,
-            "auto_verleng": False,
-        }]
-        return {"abonnementen": fake_abos, "prijzen": prijzen_map, "credits": credits, "extra_credits_pakketten": EXTRA_CREDITS, "is_admin": True}
-    # Auto-verloop: markeer verlopen abos als status=verlopen voor we ze ophalen
-    from datetime import date as _dt_date
-    vandaag_str = _dt_date.today().isoformat()
-    try:
-        supabase.table("carboo_abonnementen").update({"status": "verlopen", "bijgewerkt": "now()"}).eq("user_id", user.id).eq("status", "actief").lt("verval_datum", vandaag_str).execute()
-    except Exception as e:
-        print(f"[AUTO-VERLOOP] fout bij update: {e}")
-    abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").gte("verval_datum", vandaag_str).execute()
-    return {"abonnementen": abos.data or [], "prijzen": prijzen_map, "credits": credits, "extra_credits_pakketten": EXTRA_CREDITS, "is_admin": False}
+    return {"abonnementen": abos.data or [], "prijzen": prijzen_map, "credits": credits, "extra_credits_pakketten": EXTRA_CREDITS}
 
 @app.post("/api/mollie/betaling-aanmaken")
 async def betaling_aanmaken(item: BetalingAanmaken, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -2130,6 +2088,111 @@ async def betaling_aanmaken(item: BetalingAanmaken, user=Depends(get_current_use
     except Exception as e:
         raise HTTPException(500, f"Mollie fout: {str(e)}")
 
+@app.post("/api/mollie/webhook")
+async def mollie_webhook(request: Request, supabase: Client = Depends(get_supabase)):
+    """Mollie roept dit aan na elke status verandering."""
+    try:
+        form = await request.form()
+        payment_id = form.get("id")
+        if not payment_id:
+            return {"ok": False, "reden": "Geen id"}
+
+        # Probeer met SDK, fallback naar directe HTTP call bij SSL/connectie problemen
+        payment = None
+        last_err = None
+        for poging in range(3):
+            try:
+                payment = mollie_client.payments.get(payment_id)
+                break
+            except Exception as err:
+                last_err = err
+                print(f"Mollie SDK poging {poging+1} faalde: {err}")
+                import time
+                time.sleep(0.5 * (poging + 1))
+        if payment is None:
+            # Fallback: direct HTTP call met httpx
+            try:
+                import asyncio
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(
+                        f"https://api.mollie.com/v2/payments/{payment_id}",
+                        headers={"Authorization": f"Bearer {os.getenv('MOLLIE_API_KEY')}"}
+                    )
+                    if resp.status_code != 200:
+                        raise Exception(f"Mollie HTTP {resp.status_code}: {resp.text}")
+                    pd = resp.json()
+                    class P:
+                        pass
+                    payment = P()
+                    payment.id = pd.get("id")
+                    payment.status = pd.get("status")
+                    payment.metadata = pd.get("metadata") or {}
+                    payment.amount = pd.get("amount") or {"value": "0", "currency": "EUR"}
+                    payment.is_paid = lambda: pd.get("status") == "paid"
+            except Exception as fallback_err:
+                print(f"Mollie fallback faalde: {fallback_err}")
+                raise Exception(f"Kan Mollie payment niet ophalen: {last_err or fallback_err}")
+
+        if not payment.is_paid():
+            return {"ok": True, "status": str(payment.status)}
+
+        metadata = payment.metadata or {}
+        user_id = metadata.get("user_id")
+        pakket_id = metadata.get("pakket_id")
+        is_credits = metadata.get("is_credits", False)
+
+        if not user_id or not pakket_id:
+            return {"ok": False, "reden": "Geen user_id of pakket_id in metadata"}
+
+        # Check of we deze payment al verwerkt hebben (idempotentie)
+        bestaand = supabase.table("carboo_abonnementen").select("id").eq("mollie_payment_id", payment_id).execute()
+        if bestaand.data:
+            return {"ok": True, "reden": "Al verwerkt"}
+
+        from datetime import date, timedelta
+        if is_credits:
+            # Extra credits toevoegen
+            pakket_info = EXTRA_CREDITS.get(pakket_id, {})
+            credits_toe = pakket_info.get("credits", 0)
+            huidig = supabase.table("carboo_gebruikers").select("credits").eq("id", user_id).single().execute()
+            nieuwe_credits = (huidig.data.get("credits", 0) if huidig.data else 0) + credits_toe
+            supabase.table("carboo_gebruikers").update({"credits": nieuwe_credits}).eq("id", user_id).execute()
+            # Log transactie
+            try:
+                supabase.table("carboo_transacties").insert({
+                    "user_id": user_id, "credits": credits_toe,
+                    "omschrijving": pakket_info.get("label", "Extra credits"),
+                    "mollie_payment_id": payment_id,
+                    "bedrag": float(payment.amount["value"]),
+                }).execute()
+            except: pass
+        else:
+            # Abonnement aanmaken/verlengen — 30 dagen vanaf vandaag
+            verval = date.today() + timedelta(days=30)
+            # Check of er al een actief abo is van dit pakket → verleng vanaf vervaldatum
+            bestaand_abo = supabase.table("carboo_abonnementen").select("verval_datum").eq("user_id", user_id).eq("pakket", pakket_id).eq("status", "actief").execute()
+            if bestaand_abo.data:
+                huidig_verval = date.fromisoformat(bestaand_abo.data[0]["verval_datum"])
+                if huidig_verval > date.today():
+                    verval = huidig_verval + timedelta(days=30)
+
+            supabase.table("carboo_abonnementen").insert({
+                "user_id": user_id, "pakket": pakket_id, "status": "actief",
+                "prijs": float(payment.amount["value"]),
+                "start_datum": date.today().isoformat(),
+                "verval_datum": verval.isoformat(),
+                "mollie_payment_id": payment_id,
+            }).execute()
+
+            # Race of Alles abo → credits OVERRIDE naar 5
+            if pakket_id in ("race", "alles"):
+                supabase.table("carboo_gebruikers").update({"credits": 5}).eq("id", user_id).execute()
+
+        return {"ok": True}
+    except Exception as e:
+        print(f"Mollie webhook fout: {e}")
+        # Belangrijk: 500 returnen zodat Mollie het opnieuw probeert (max 14 dagen retry)
+        raise HTTPException(500, f"Webhook verwerking faalde: {str(e)}")
 
 @app.delete("/api/mollie/abonnement/{pakket_id}")
 async def annuleer_abonnement(pakket_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -2676,7 +2739,7 @@ async def mollie_webhook(request: Request):
         return {"status": "ok"}
     metadata = betaling.get("metadata", {})
     user_id = metadata.get("user_id", "")
-    pakket = metadata.get("pakket") or metadata.get("pakket_id") or ""
+    pakket = metadata.get("pakket", "")
     if not user_id or not pakket:
         return {"status": "ok"}
     from datetime import date, timedelta
@@ -2689,7 +2752,6 @@ async def mollie_webhook(request: Request):
             "status": "actief",
             "verval_datum": verval.isoformat(),
             "mollie_payment_id": payment_id,
-            "prijs": prijs,
             "bijgewerkt": "now()"
         }).eq("user_id", user_id).eq("pakket", pakket).execute()
     else:
@@ -2698,10 +2760,6 @@ async def mollie_webhook(request: Request):
             "prijs": prijs, "start_datum": date.today().isoformat(),
             "verval_datum": verval.isoformat(), "mollie_payment_id": payment_id,
         }).execute()
-
-    # Race of Alles pakket: credits OVERRIDE naar 5 race plannen credits
-    if pakket in ("race", "alles"):
-        supabase_admin.table("carboo_gebruikers").update({"credits": 5}).eq("id", user_id).execute()
     if betaling_type == "abonnement_eerste":
         klant_rec = supabase_admin.table("carboo_mollie_klanten").select("mollie_customer_id").eq("user_id", user_id).execute()
         if klant_rec.data:

@@ -1,0 +1,25 @@
+﻿ 2606: MOLLIE_API_KEY = os.environ.get("MOLLIE_API_KEY", "")
+ 2607: APP_URL = os.environ.get("APP_URL", "https://carboo.app")
+ 2608: WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://carboo-api.onrender.com/api/mollie/webhook")
+ 2609: 
+ 2610: # Service-role client voor admin operaties
+ 2611: def _get_admin_client():
+ 2612:     url = os.getenv("SUPABASE_URL")
+ 2613:     key = os.getenv("SUPABASE_SERVICE_KEY")
+ 2614:     if not url or not key:
+ 2615:         return None
+ 2616:     return create_client(url, key)
+ 2617: 
+ 2618: supabase_admin = _get_admin_client()
+ 2619: 
+ 2620: PAKKETTEN = {
+ 2621:     "fueling": {"label": "Fueling",            "module": "fueling"},
+ 2622:     "race":    {"label": "Race Nutrition Plan", "module": "race"},
+ 2623:     "gut":     {"label": "Train the Gut",       "module": "gut"},
+ 2624:     "alles":   {"label": "Alles-in-Ã©Ã©n",        "module": "alles"},
+ 2625:     "coach":   {"label": "Coach Zone",          "module": "coach"},
+ 2626: }
+ 2627: 
+ 2628: def get_prijs(pakket_id: str) -> float:
+ 2629:     try:
+ 2630:         r = supabase_admin.table("carboo_prijzen").select("prijs").eq("id", pakket_id).single().execute()

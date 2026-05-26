@@ -1,0 +1,75 @@
+﻿ 2740:         },
+ 2741:         "locale": "nl_BE",
+ 2742:     }
+ 2743:     async with httpx.AsyncClient() as client:
+ 2744:         resp = await client.post(
+ 2745:             "https://api.mollie.com/v2/payments",
+ 2746:             headers={"Authorization": f"Bearer {MOLLIE_API_KEY}", "Content-Type": "application/json"},
+ 2747:             json=payload, timeout=10
+ 2748:         )
+ 2749:         data = resp.json()
+ 2750:         if resp.status_code == 201:
+ 2751:             return {"checkout_url": data["_links"]["checkout"]["href"], "payment_id": data["id"]}
+ 2752:         raise HTTPException(500, f"Mollie fout: {data.get('detail', 'Onbekende fout')}")
+ 2753: 
+ 2754: 
+ 2755: @app.post("/api/mollie/webhook")
+ 2756: async def mollie_webhook(request: Request):
+ 2757:     body = await request.form()
+ 2758:     payment_id = body.get("id", "")
+ 2759:     if not payment_id:
+ 2760:         return {"status": "ok"}
+ 2761:     async with httpx.AsyncClient() as client:
+ 2762:         resp = await client.get(
+ 2763:             f"https://api.mollie.com/v2/payments/{payment_id}",
+ 2764:             headers={"Authorization": f"Bearer {MOLLIE_API_KEY}"}, timeout=10
+ 2765:         )
+ 2766:         if resp.status_code != 200:
+ 2767:             return {"status": "ok"}
+ 2768:         betaling = resp.json()
+ 2769:     if betaling.get("status") != "paid":
+ 2770:         return {"status": "ok"}
+ 2771:     metadata = betaling.get("metadata", {})
+ 2772:     user_id = metadata.get("user_id", "")
+ 2773:     pakket = metadata.get("pakket", "")
+ 2774:     if not user_id or not pakket:
+ 2775:         return {"status": "ok"}
+ 2776:     from datetime import date, timedelta
+ 2777:     verval = (date.today().replace(day=1) + timedelta(days=32)).replace(day=date.today().day)
+ 2778:     bestaand = supabase_admin.table("carboo_abonnementen").select("id").eq("user_id", user_id).eq("pakket", pakket).execute()
+ 2779:     betaling_type = metadata.get("type", "abonnement")
+ 2780:     prijs = get_prijs(pakket)
+ 2781:     if bestaand.data:
+ 2782:         supabase_admin.table("carboo_abonnementen").update({
+ 2783:             "status": "actief",
+ 2784:             "verval_datum": verval.isoformat(),
+ 2785:             "mollie_payment_id": payment_id,
+ 2786:             "bijgewerkt": "now()"
+ 2787:         }).eq("user_id", user_id).eq("pakket", pakket).execute()
+ 2788:     else:
+ 2789:         supabase_admin.table("carboo_abonnementen").insert({
+ 2790:             "user_id": user_id, "pakket": pakket, "status": "actief",
+ 2791:             "prijs": prijs, "start_datum": date.today().isoformat(),
+ 2792:             "verval_datum": verval.isoformat(), "mollie_payment_id": payment_id,
+ 2793:         }).execute()
+ 2794:     if betaling_type == "abonnement_eerste":
+ 2795:         klant_rec = supabase_admin.table("carboo_mollie_klanten").select("mollie_customer_id").eq("user_id", user_id).execute()
+ 2796:         if klant_rec.data:
+ 2797:             customer_id = klant_rec.data[0]["mollie_customer_id"]
+ 2798:             async with httpx.AsyncClient() as client:
+ 2799:                 import asyncio
+ 2800:                 await asyncio.sleep(2)
+ 2801:                 sub_resp = await client.post(
+ 2802:                     f"https://api.mollie.com/v2/customers/{customer_id}/subscriptions",
+ 2803:                     headers={"Authorization": f"Bearer {MOLLIE_API_KEY}", "Content-Type": "application/json"},
+ 2804:                     json={
+ 2805:                         "amount": {"currency": "EUR", "value": f"{prijs:.2f}"},
+ 2806:                         "interval": "1 month",
+ 2807:                         "description": f"Carboo — {PAKKETTEN.get(pakket, {}).get('label', pakket)} (maandelijks)",
+ 2808:                         "webhookUrl": WEBHOOK_URL,
+ 2809:                         "metadata": {"user_id": user_id, "pakket": pakket, "type": "abonnement_verlenging"},
+ 2810:                     },
+ 2811:                     timeout=15
+ 2812:                 )
+ 2813:                 if sub_resp.status_code == 201:
+ 2814:                     sub_data = sub_resp.json()

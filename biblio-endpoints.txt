@@ -1,0 +1,8 @@
+﻿ 1168: @app.get("/api/fuelc/bibliotheek")
+ 1170: r = supabase.table("fuelc_bibliotheek").select("*").eq("user_id", user.id).order("naam").execute()
+ 1173: @app.post("/api/fuelc/bibliotheek")
+ 1176: supabase.table("fuelc_bibliotheek").insert(product).execute()
+ 1179: @app.patch("/api/fuelc/bibliotheek/{product_id}")
+ 1181: supabase.table("fuelc_bibliotheek").update(update).eq("id", product_id).eq("user_id", user.id).execute()
+ 1184: @app.delete("/api/fuelc/bibliotheek/{product_id}")
+ 1187: supabase.table("fuelc_bibliotheek").delete().eq("id", product_id).eq("user_id", user.id).execute()

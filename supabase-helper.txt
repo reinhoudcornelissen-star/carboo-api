@@ -1,0 +1,25 @@
+﻿   26:     ],
+   27:     allow_credentials=True,
+   28:     allow_methods=["*"],
+   29:     allow_headers=["*"],
+   30: )
+   31: 
+   32: def get_supabase() -> Client:
+   33:     url = os.getenv("SUPABASE_URL")
+   34:     key = os.getenv("SUPABASE_SERVICE_KEY")
+   35:     if not url or not key:
+   36:         raise HTTPException(500, "Supabase niet geconfigureerd")
+   37:     return create_client(url, key)
+   38: 
+   39: async def get_current_user(request: Request, supabase: Client = Depends(get_supabase)):
+   40:     token = request.headers.get("Authorization", "").replace("Bearer ", "")
+   41:     if not token:
+   42:         raise HTTPException(401, "Niet ingelogd")
+   43:     try:
+   44:         user = supabase.auth.get_user(token)
+   45:         return user.user
+   46:     except Exception:
+   47:         raise HTTPException(401, "Ongeldige token")
+   48: 
+   49: @app.get("/health")
+   50: def health():

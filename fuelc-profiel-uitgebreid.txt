@@ -1,0 +1,100 @@
+﻿  141:         "coach_data": req.coach_data.dict(),
+  142:     }, on_conflict="user_id").execute()
+  143:     return {"status": "opgeslagen"}
+  144: 
+  145: @app.get("/api/coach/haal-plan-op")
+  146: async def haal_plan_op(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+  147:     r = supabase.table("carboo_plannen").select("coach_data").eq("user_id", user.id).limit(1).execute()
+  148:     return {"plan": r.data[0]["coach_data"] if r.data else None}
+  149: 
+  150: 
+  151: # â•â•â• MODULE 2 â€” FUELC â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  152: 
+  153: class FuelcProfiel(BaseModel):
+  154:     geslacht: str
+  155:     leeftijd: int
+  156:     gewicht_kg: float
+  157:     lengte_cm: int
+  158:     activiteit: str
+  159:     doelstelling: str
+  160:     bmr: Optional[int] = None
+  161:     tdee_basis: Optional[int] = None
+  162:     energie_doel: Optional[int] = None
+  163:     kh_doel_pct: Optional[int] = 50
+  164:     eiwit_doel_pct: Optional[int] = 25
+  165:     vet_doel_pct: Optional[int] = 25
+  166:     eet_patroon: Optional[str] = "Klassiek (3 maaltijden)"
+  167:     momenten_tijden: Optional[str] = None
+  168:     td_0: Optional[bool] = False
+  169:     td_1: Optional[bool] = False
+  170:     td_2: Optional[bool] = False
+  171: 
+  172: class TrainingData(BaseModel):
+  173:     datum: str
+  174:     sport: str
+  175:     duur_min: int
+  176:     afstand_km: Optional[float] = 0
+  177:     kcal_verbranding: Optional[int] = 0
+  178:     zone_verdeling: Optional[str] = None
+  179:     notitie: Optional[str] = None
+  180:     starttijd: Optional[str] = "07:00"
+  181: 
+  182: class DagboekItem(BaseModel):
+  183:     datum: str
+  184:     moment: int
+  185:     naam: str
+  186:     hoeveelheid_g: float
+  187:     kcal: float
+  188:     kh_g: float
+  189:     eiwit_g: float
+  190:     vet_g: float
+  191:     vezels_g: Optional[float] = 0
+  192:     suikers_g: Optional[float] = 0
+  193:     verz_g: Optional[float] = 0
+  194:     natrium_mg: Optional[float] = 0
+  195:     kalium_mg: Optional[float] = 0
+  196:     calcium_mg: Optional[float] = 0
+  197:     ijzer_mg: Optional[float] = 0
+  198:     vitd_mcg: Optional[float] = 0
+  199:     vitb12_mcg: Optional[float] = 0
+  200:     omega3_g: Optional[float] = 0
+  201:     gi: Optional[int] = None
+  202:     categorie: Optional[str] = None
+  203:     product_id: Optional[str] = None
+  204: 
+  205: class WelzijnData(BaseModel):
+  206:     datum: str
+  207:     energie_score: Optional[int] = None
+  208:     stemming: Optional[int] = None
+  209:     stress: Optional[int] = None
+  210:     slaap_uur: Optional[float] = None
+  211:     slaap_kwaliteit: Optional[int] = None
+  212:     spierpijn: Optional[int] = None
+  213:     hf_rust: Optional[int] = None
+  214:     hrv: Optional[int] = None
+  215:     honger: Optional[int] = None
+  216:     gi_klachten: Optional[bool] = False
+  217:     gehydrateerd: Optional[bool] = True
+  218:     rpe: Optional[int] = None
+  219:     energiek_training: Optional[bool] = None
+  220:     gewicht_kg: Optional[float] = None
+  221: 
+  222: @app.get("/api/fuelc/profiel")
+  223: async def get_fuelc_profiel(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+  224:     r = supabase.table("fuelc_profiel").select("*").eq("user_id", user.id).execute()
+  225:     return {"profiel": r.data[0] if r.data else None}
+  226: 
+  227: @app.post("/api/fuelc/profiel")
+  228: async def sla_fuelc_profiel(profiel: FuelcProfiel, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+  229:     data = profiel.dict()
+  230:     data["user_id"] = user.id
+  231:     bestaand = supabase.table("fuelc_profiel").select("id").eq("user_id", user.id).execute()
+  232:     if bestaand.data:
+  233:         supabase.table("fuelc_profiel").update(data).eq("user_id", user.id).execute()
+  234:     else:
+  235:         supabase.table("fuelc_profiel").insert(data).execute()
+  236:     return {"status": "opgeslagen"}
+  237: 
+  238: @app.get("/api/fuelc/trainingen")
+  239: async def get_trainingen(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+  240:     r = supabase.table("fuelc_trainingen").select("*").eq("user_id", user.id).order("datum", desc=True).limit(60).execute()

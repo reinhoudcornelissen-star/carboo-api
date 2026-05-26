@@ -1,0 +1,60 @@
+﻿ 2755:         return {"status": "ok"}
+ 2756:     metadata = betaling.get("metadata", {})
+ 2757:     user_id = metadata.get("user_id", "")
+ 2758:     pakket = metadata.get("pakket", "")
+ 2759:     if not user_id or not pakket:
+ 2760:         return {"status": "ok"}
+ 2761:     from datetime import date, timedelta
+ 2762:     verval = (date.today().replace(day=1) + timedelta(days=32)).replace(day=date.today().day)
+ 2763:     bestaand = supabase_admin.table("carboo_abonnementen").select("id").eq("user_id", user_id).eq("pakket", pakket).execute()
+ 2764:     betaling_type = metadata.get("type", "abonnement")
+ 2765:     prijs = get_prijs(pakket)
+ 2766:     if bestaand.data:
+ 2767:         supabase_admin.table("carboo_abonnementen").update({
+ 2768:             "status": "actief",
+ 2769:             "verval_datum": verval.isoformat(),
+ 2770:             "mollie_payment_id": payment_id,
+ 2771:             "bijgewerkt": "now()"
+ 2772:         }).eq("user_id", user_id).eq("pakket", pakket).execute()
+ 2773:     else:
+ 2774:         supabase_admin.table("carboo_abonnementen").insert({
+ 2775:             "user_id": user_id, "pakket": pakket, "status": "actief",
+ 2776:             "prijs": prijs, "start_datum": date.today().isoformat(),
+ 2777:             "verval_datum": verval.isoformat(), "mollie_payment_id": payment_id,
+ 2778:         }).execute()
+ 2779:     if betaling_type == "abonnement_eerste":
+ 2780:         klant_rec = supabase_admin.table("carboo_mollie_klanten").select("mollie_customer_id").eq("user_id", user_id).execute()
+ 2781:         if klant_rec.data:
+ 2782:             customer_id = klant_rec.data[0]["mollie_customer_id"]
+ 2783:             async with httpx.AsyncClient() as client:
+ 2784:                 import asyncio
+ 2785:                 await asyncio.sleep(2)
+ 2786:                 sub_resp = await client.post(
+ 2787:                     f"https://api.mollie.com/v2/customers/{customer_id}/subscriptions",
+ 2788:                     headers={"Authorization": f"Bearer {MOLLIE_API_KEY}", "Content-Type": "application/json"},
+ 2789:                     json={
+ 2790:                         "amount": {"currency": "EUR", "value": f"{prijs:.2f}"},
+ 2791:                         "interval": "1 month",
+ 2792:                         "description": f"Carboo — {PAKKETTEN.get(pakket, {}).get('label', pakket)} (maandelijks)",
+ 2793:                         "webhookUrl": WEBHOOK_URL,
+ 2794:                         "metadata": {"user_id": user_id, "pakket": pakket, "type": "abonnement_verlenging"},
+ 2795:                     },
+ 2796:                     timeout=15
+ 2797:                 )
+ 2798:                 if sub_resp.status_code == 201:
+ 2799:                     sub_data = sub_resp.json()
+ 2800:                     supabase_admin.table("carboo_abonnementen").update({
+ 2801:                         "mollie_subscription_id": sub_data["id"]
+ 2802:                     }).eq("user_id", user_id).eq("pakket", pakket).execute()
+ 2803:                     supabase_admin.table("carboo_mollie_klanten").update({
+ 2804:                         "mollie_mandate_id": sub_data.get("mandateId", "")
+ 2805:                     }).eq("user_id", user_id).execute()
+ 2806:     return {"status": "ok"}
+ 2807: 
+ 2808: 
+ 2809: @app.get("/api/mollie/mijn-abonnement")
+ 2810: async def mijn_abonnement(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 2811:     abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").execute()
+ 2812:     prijzen = supabase.table("carboo_prijzen").select("*").execute()
+ 2813:     return {
+ 2814:         "abonnementen": abos.data or [],

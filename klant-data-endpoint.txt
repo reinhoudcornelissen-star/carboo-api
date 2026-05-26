@@ -1,0 +1,70 @@
+﻿  595: @app.get("/api/coach/klant/{klant_id}/data")
+  596: async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+  597:     coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+  598:     if not coach.data:
+  599:         raise HTTPException(403, "Geen coach account")
+  600:     coach_id = coach.data[0]["id"]
+  601:     relatie = supabase.table("carboo_coach_klanten").select("*, carboo_coach_privacy(*)").eq("coach_id", coach_id).eq("klant_id", klant_id).eq("status", "actief").execute()
+  602:     if not relatie.data:
+  603:         raise HTTPException(403, "Geen toegang tot deze klant")
+  604:     privacy = relatie.data[0].get("carboo_coach_privacy") or {}
+  605:     if isinstance(privacy, list) and privacy:
+  606:         privacy = privacy[0]
+  607:     result: dict = {"relatie_id": relatie.data[0]["id"], "privacy": privacy}
+  608:     prof = supabase.table("fuelc_profiel").select("energie_doel,kh_doel_pct,eiwit_doel_pct,vet_doel_pct,gewicht_kg,lengte_cm").eq("user_id", klant_id).execute()
+  609:     result["profiel"] = prof.data[0] if prof.data else {}
+  610:     if privacy.get("dagschema"):
+  611:         dag = supabase.table("fuelc_dagboek").select("datum,moment,naam,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,suikers_g,natrium_mg,vitd_mcg,vitb12_mcg,omega3_g,calcium_mg,ijzer_mg,gi").eq("user_id", klant_id).order("datum", desc=True).limit(100).execute()
+  612:         result["dagschema"] = dag.data or []
+  613:         tr = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
+  614:         result["trainingen"] = tr.data or []
+  615:         wz = supabase.table("fuelc_dagboek_welzijn").select("datum,energie_score,stemming,stress,slaap_uur,gewicht_kg,hf_rust,rpe").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
+  616:         result["welzijn"] = wz.data or []
+  617:     if privacy.get("race_plannen"):
+  618:         rap = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
+  619:         result["race_plannen"] = rap.data or []
+  620:     if privacy.get("train_gut"):
+  621:         gut = supabase.table("carboo_gut_sessies").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
+  622:         sessie_list = gut.data or []
+  623:         # Producten per sessie nested
+  624:         if sessie_list:
+  625:             sessie_ids = [s["id"] for s in sessie_list]
+  626:             prod = supabase.table("carboo_gut_producten").select("*").in_("sessie_id", sessie_ids).order("tijdstip_min").execute()
+  627:             prod_map: dict = {}
+  628:             for p in (prod.data or []):
+  629:                 sid = p["sessie_id"]
+  630:                 if sid not in prod_map: prod_map[sid] = []
+  631:                 prod_map[sid].append(p)
+  632:             for s in sessie_list:
+  633:                 s["producten"] = prod_map.get(s["id"], [])
+  634:         result["gut_sessies"] = sessie_list
+  635:         wm = supabase.table("carboo_gut_winkelmandje").select("*").eq("user_id", klant_id).order("aantal_sessies", desc=True).execute()
+  636:         result["gut_winkelmandje"] = wm.data or []
+  637:         prot = supabase.table("carboo_gut_protocol").select("*").eq("user_id", klant_id).eq("actief", True).execute()
+  638:         result["gut_protocol"] = prot.data[0] if prot.data else None
+  639:     if privacy.get("dossier"):
+  640:         dos = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
+  641:         result["dossier"] = dos.data or []
+  642:     if privacy.get("voedingskwaliteit") or privacy.get("performance") or privacy.get("macros"):
+  643:         if "dagschema" not in result:
+  644:             # Voor coach analyses: volledige velden inclusief micronutrienten
+  645:             dag = supabase.table("fuelc_dagboek").select("datum,moment,naam,categorie,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,suikers_g,natrium_mg,kalium_mg,calcium_mg,ijzer_mg,vitd_mcg,vitb12_mcg,omega3_g,verz_g,gi").eq("user_id", klant_id).order("datum", desc=True).limit(200).execute()
+  646:             dag_items = dag.data or []
+  647:             # Stuur ook mee in result voor frontend berekening
+  648:             result["dagschema_full"] = dag_items
+  649:             # Trainingen ook nodig voor de berekening
+  650:             tr_full = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(60).execute()
+  651:             result["trainingen_full"] = tr_full.data or []
+  652:         else:
+  653:             dag_items = result["dagschema"]
+  654:             result["dagschema_full"] = dag_items
+  655:             tr_full = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(60).execute()
+  656:             result["trainingen_full"] = tr_full.data or []
+  657: 
+  658:     if privacy.get("macros"):
+  659:         items = dag_items if "dag_items" in dir() else []
+  660:         per_dag: dict = {}
+  661:         for item in items:
+  662:             d = item.get("datum", "")
+  663:             if d not in per_dag:
+  664:                 per_dag[d] = {"kcal": 0, "kh": 0, "eiwit": 0, "vet": 0}

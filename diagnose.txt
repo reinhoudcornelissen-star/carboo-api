@@ -1,0 +1,67 @@
+﻿=== SUPABASE HELPER (rond regel 37) ===
+
+   26:     ],
+   27:     allow_credentials=True,
+   28:     allow_methods=["*"],
+   29:     allow_headers=["*"],
+   30: )
+   31: 
+   32: def get_supabase() -> Client:
+   33:     url = os.getenv("SUPABASE_URL")
+   34:     key = os.getenv("SUPABASE_SERVICE_KEY")
+   35:     if not url or not key:
+   36:         raise HTTPException(500, "Supabase niet geconfigureerd")
+   37:     return create_client(url, key)
+   38: 
+   39: async def get_current_user(request: Request, supabase: Client = Depends(get_supabase)):
+   40:     token = request.headers.get("Authorization", "").replace("Bearer ", "")
+   41:     if not token:
+   42:         raise HTTPException(401, "Niet ingelogd")
+   43:     try:
+   44:         user = supabase.auth.get_user(token)
+   45:         return user.user
+   46:     except Exception:
+   47:         raise HTTPException(401, "Ongeldige token")
+   48: 
+   49: @app.get("/health")
+   50: def health():
+
+=== TWEEDE create_client (rond regel 2616) ===
+
+ 2606: MOLLIE_API_KEY = os.environ.get("MOLLIE_API_KEY", "")
+ 2607: APP_URL = os.environ.get("APP_URL", "https://carboo.app")
+ 2608: WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://carboo-api.onrender.com/api/mollie/webhook")
+ 2609: 
+ 2610: # Service-role client voor admin operaties
+ 2611: def _get_admin_client():
+ 2612:     url = os.getenv("SUPABASE_URL")
+ 2613:     key = os.getenv("SUPABASE_SERVICE_KEY")
+ 2614:     if not url or not key:
+ 2615:         return None
+ 2616:     return create_client(url, key)
+ 2617: 
+ 2618: supabase_admin = _get_admin_client()
+ 2619: 
+ 2620: PAKKETTEN = {
+ 2621:     "fueling": {"label": "Fueling",            "module": "fueling"},
+ 2622:     "race":    {"label": "Race Nutrition Plan", "module": "race"},
+ 2623:     "gut":     {"label": "Train the Gut",       "module": "gut"},
+ 2624:     "alles":   {"label": "Alles-in-Ã©Ã©n",        "module": "alles"},
+ 2625:     "coach":   {"label": "Coach Zone",          "module": "coach"},
+ 2626: }
+ 2627: 
+ 2628: def get_prijs(pakket_id: str) -> float:
+ 2629:     try:
+ 2630:         r = supabase_admin.table("carboo_prijzen").select("prijs").eq("id", pakket_id).single().execute()
+
+=== Wordt supabase globaal aangemaakt? ===
+
+   32: def get_supabase() -> Client:
+
+=== Eerste 5 functies die supabase.table() aanroepen ===
+
+  127: supabase.table("carboo_plannen").upsert({
+  135: r = supabase.table("carboo_plannen").select("coach_data").eq("user_id", user.id).limit(1).execute()
+  212: r = supabase.table("fuelc_profiel").select("*").eq("user_id", user.id).execute()
+  219: bestaand = supabase.table("fuelc_profiel").select("id").eq("user_id", user.id).execute()
+  221: supabase.table("fuelc_profiel").update(data).eq("user_id", user.id).execute()

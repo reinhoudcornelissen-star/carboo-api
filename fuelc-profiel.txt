@@ -1,0 +1,25 @@
+﻿  210:     slaap_uur: Optional[float] = None
+  211:     slaap_kwaliteit: Optional[int] = None
+  212:     spierpijn: Optional[int] = None
+  213:     hf_rust: Optional[int] = None
+  214:     hrv: Optional[int] = None
+  215:     honger: Optional[int] = None
+  216:     gi_klachten: Optional[bool] = False
+  217:     gehydrateerd: Optional[bool] = True
+  218:     rpe: Optional[int] = None
+  219:     energiek_training: Optional[bool] = None
+  220:     gewicht_kg: Optional[float] = None
+  221: 
+  222: @app.get("/api/fuelc/profiel")
+  223: async def get_fuelc_profiel(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+  224:     r = supabase.table("fuelc_profiel").select("*").eq("user_id", user.id).execute()
+  225:     return {"profiel": r.data[0] if r.data else None}
+  226: 
+  227: @app.post("/api/fuelc/profiel")
+  228: async def sla_fuelc_profiel(profiel: FuelcProfiel, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+  229:     data = profiel.dict()
+  230:     data["user_id"] = user.id
+  231:     bestaand = supabase.table("fuelc_profiel").select("id").eq("user_id", user.id).execute()
+  232:     if bestaand.data:
+  233:         supabase.table("fuelc_profiel").update(data).eq("user_id", user.id).execute()
+  234:     else:

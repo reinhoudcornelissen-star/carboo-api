@@ -1,0 +1,110 @@
+﻿ 2107:             "amount": {"currency": "EUR", "value": bedrag},
+ 2108:             "description": omschrijving,
+ 2109:             "redirectUrl": f"{APP_URL}/app/abonnement?betaling=ok&pakket={pakket_id}",
+ 2110:             "webhookUrl": WEBHOOK_URL,
+ 2111:             "metadata": {
+ 2112:                 "user_id": str(user.id),
+ 2113:                 "pakket_id": pakket_id,
+ 2114:                 "is_credits": is_credits,
+ 2115:                 "email": email or "",
+ 2116:             }
+ 2117:         })
+ 2118:         return {"checkout_url": payment.checkout_url, "payment_id": payment.id}
+ 2119:     except Exception as e:
+ 2120:         raise HTTPException(500, f"Mollie fout: {str(e)}")
+ 2121: 
+ 2122: @app.post("/api/mollie/webhook")
+ 2123: async def mollie_webhook(request: Request, supabase: Client = Depends(get_supabase)):
+ 2124:     """Mollie roept dit aan na elke status verandering."""
+ 2125:     try:
+ 2126:         form = await request.form()
+ 2127:         payment_id = form.get("id")
+ 2128:         if not payment_id:
+ 2129:             return {"ok": False, "reden": "Geen id"}
+ 2130: 
+ 2131:         # Probeer met SDK, fallback naar directe HTTP call bij SSL/connectie problemen
+ 2132:         payment = None
+ 2133:         last_err = None
+ 2134:         for poging in range(3):
+ 2135:             try:
+ 2136:                 payment = mollie_client.payments.get(payment_id)
+ 2137:                 break
+ 2138:             except Exception as err:
+ 2139:                 last_err = err
+ 2140:                 print(f"Mollie SDK poging {poging+1} faalde: {err}")
+ 2141:                 import time
+ 2142:                 time.sleep(0.5 * (poging + 1))
+ 2143:         if payment is None:
+ 2144:             # Fallback: direct HTTP call met httpx
+ 2145:             try:
+ 2146:                 import asyncio
+ 2147:                 async with httpx.AsyncClient(timeout=15.0) as client:
+ 2148:                     resp = await client.get(
+ 2149:                         f"https://api.mollie.com/v2/payments/{payment_id}",
+ 2150:                         headers={"Authorization": f"Bearer {os.getenv('MOLLIE_API_KEY')}"}
+ 2151:                     )
+ 2152:                     if resp.status_code != 200:
+ 2153:                         raise Exception(f"Mollie HTTP {resp.status_code}: {resp.text}")
+ 2154:                     pd = resp.json()
+ 2155:                     class P:
+ 2156:                         pass
+ 2157:                     payment = P()
+ 2158:                     payment.id = pd.get("id")
+ 2159:                     payment.status = pd.get("status")
+ 2160:                     payment.metadata = pd.get("metadata") or {}
+ 2161:                     payment.amount = pd.get("amount") or {"value": "0", "currency": "EUR"}
+ 2162:                     payment.is_paid = lambda: pd.get("status") == "paid"
+ 2163:             except Exception as fallback_err:
+ 2164:                 print(f"Mollie fallback faalde: {fallback_err}")
+ 2165:                 raise Exception(f"Kan Mollie payment niet ophalen: {last_err or fallback_err}")
+ 2166: 
+ 2167:         if not payment.is_paid():
+ 2168:             return {"ok": True, "status": str(payment.status)}
+ 2169: 
+ 2170:         metadata = payment.metadata or {}
+ 2171:         user_id = metadata.get("user_id")
+ 2172:         pakket_id = metadata.get("pakket_id")
+ 2173:         is_credits = metadata.get("is_credits", False)
+ 2174: 
+ 2175:         if not user_id or not pakket_id:
+ 2176:             return {"ok": False, "reden": "Geen user_id of pakket_id in metadata"}
+ 2177: 
+ 2178:         # Check of we deze payment al verwerkt hebben (idempotentie)
+ 2179:         bestaand = supabase.table("carboo_abonnementen").select("id").eq("mollie_payment_id", payment_id).execute()
+ 2180:         if bestaand.data:
+ 2181:             return {"ok": True, "reden": "Al verwerkt"}
+ 2182: 
+ 2183:         from datetime import date, timedelta
+ 2184:         if is_credits:
+ 2185:             # Extra credits toevoegen
+ 2186:             pakket_info = EXTRA_CREDITS.get(pakket_id, {})
+ 2187:             credits_toe = pakket_info.get("credits", 0)
+ 2188:             huidig = supabase.table("carboo_gebruikers").select("credits").eq("id", user_id).single().execute()
+ 2189:             nieuwe_credits = (huidig.data.get("credits", 0) if huidig.data else 0) + credits_toe
+ 2190:             supabase.table("carboo_gebruikers").update({"credits": nieuwe_credits}).eq("id", user_id).execute()
+ 2191:             # Log transactie
+ 2192:             try:
+ 2193:                 supabase.table("carboo_transacties").insert({
+ 2194:                     "user_id": user_id, "credits": credits_toe,
+ 2195:                     "omschrijving": pakket_info.get("label", "Extra credits"),
+ 2196:                     "mollie_payment_id": payment_id,
+ 2197:                     "bedrag": float(payment.amount["value"]),
+ 2198:                 }).execute()
+ 2199:             except: pass
+ 2200:         else:
+ 2201:             # Abonnement aanmaken/verlengen — 30 dagen vanaf vandaag
+ 2202:             verval = date.today() + timedelta(days=30)
+ 2203:             # Check of er al een actief abo is van dit pakket → verleng vanaf vervaldatum
+ 2204:             bestaand_abo = supabase.table("carboo_abonnementen").select("verval_datum").eq("user_id", user_id).eq("pakket", pakket_id).eq("status", "actief").execute()
+ 2205:             if bestaand_abo.data:
+ 2206:                 huidig_verval = date.fromisoformat(bestaand_abo.data[0]["verval_datum"])
+ 2207:                 if huidig_verval > date.today():
+ 2208:                     verval = huidig_verval + timedelta(days=30)
+ 2209: 
+ 2210:             supabase.table("carboo_abonnementen").insert({
+ 2211:                 "user_id": user_id, "pakket": pakket_id, "status": "actief",
+ 2212:                 "prijs": float(payment.amount["value"]),
+ 2213:                 "start_datum": date.today().isoformat(),
+ 2214:                 "verval_datum": verval.isoformat(),
+ 2215:                 "mollie_payment_id": payment_id,
+ 2216:             }).execute()

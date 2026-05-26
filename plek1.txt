@@ -1,0 +1,50 @@
+﻿ 2015:         if not result.get("success"):
+ 2016:             raise HTTPException(400, "Turnstile validatie mislukt")
+ 2017:         return {"success": True}
+ 2018:     except httpx.HTTPError as e:
+ 2019:         raise HTTPException(500, f"Kon Turnstile niet bereiken: {e}")
+ 2020: 
+ 2021: @app.post("/api/auth/trial-starten")
+ 2022: async def start_trial(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 2023:     """Geeft een 7-daags 'alles' trial abo aan een nieuwe user. Eénmalig per user_id."""
+ 2024:     from datetime import date, timedelta
+ 2025:     # Check of user al ooit een abo had
+ 2026:     bestaand = supabase.table("carboo_abonnementen").select("id").eq("user_id", user.id).execute()
+ 2027:     if bestaand.data:
+ 2028:         return {"ok": False, "reden": "Al abonnement gehad"}
+ 2029:     verval = date.today() + timedelta(days=7)
+ 2030:     supabase.table("carboo_abonnementen").insert({
+ 2031:         "user_id": user.id,
+ 2032:         "pakket": "alles",
+ 2033:         "status": "actief",
+ 2034:         "prijs": 0,
+ 2035:         "start_datum": date.today().isoformat(),
+ 2036:         "verval_datum": verval.isoformat(),
+ 2037:         "mollie_payment_id": "trial_auto_7d",
+ 2038:     }).execute()
+ 2039:     return {"ok": True, "verval_datum": verval.isoformat()}
+ 2040: 
+ 2041: 
+ 2042: 
+ 2043: # ─── MOLLIE BETALINGEN ────────────────────────────────────────────────────────
+ 2044: 
+ 2045: # Extra credits pakketten
+ 2046: EXTRA_CREDITS = {
+ 2047:     "raceplan_1": {"label": "1 extra raceplan", "credits": 1, "prijs": "2.99"},
+ 2048:     "raceplan_5": {"label": "5 extra raceplannen", "credits": 5, "prijs": "9.99"},
+ 2049: }
+ 2050: 
+ 2051: class BetalingAanmaken(BaseModel):
+ 2052:     pakket_id: str  # 'fueling', 'race', 'gut', 'alles', 'coach', 'raceplan_1', 'raceplan_5'
+ 2053: 
+ 2054: @app.get("/api/mollie/mijn-abonnement")
+ 2055: async def mijn_abonnement(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 2056:     """Haal actieve abonnementen + prijzen op voor de gebruiker."""
+ 2057:     abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").gte("verval_datum", "today").execute()
+ 2058:     prijzen_r = supabase.table("carboo_prijzen").select("*").eq("actief", True).execute()
+ 2059:     prijzen_map = {}
+ 2060:     for p in (prijzen_r.data or []):
+ 2061:         prijzen_map[p["id"]] = {"prijs": str(p["prijs"]), "label": p["label"]}
+ 2062:     # Credits ophalen
+ 2063:     geb = supabase.table("carboo_gebruikers").select("credits").eq("id", user.id).single().execute()
+ 2064:     credits = (geb.data or {}).get("credits", 0)

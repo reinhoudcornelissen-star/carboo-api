@@ -1,0 +1,9 @@
+﻿  646: # Voor coach analyses: volledige velden inclusief micronutrienten
+  742: gem_score = round(sum(dag_scores) / max(len(dag_scores), 1), 1) if dag_scores else 0
+  744: "score": gem_score,
+  746: {"label": "Energiebalans", "score": min(10, round(gem_score))},
+  747: {"label": "Koolhydraten", "score": min(10, round(gem_score * 0.9))},
+  748: {"label": "Eiwit", "score": min(10, round(gem_score * 1.1))},
+  749: {"label": "Vezels", "score": min(10, round(gem_score * 0.8))},
+ 1702: score += 10 if v >= 2000 else 7 if v >= 1500 else 4 if v >= 1000 else 2 if v >= 500 else 0
+ 1703: scores.append(min(100, score))
