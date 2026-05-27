@@ -1139,11 +1139,85 @@ async def get_dagboek(datum: str, user=Depends(get_current_user), supabase: Clie
     r = supabase.table("fuelc_dagboek").select("*").eq("user_id", user.id).eq("datum", datum).execute()
     return {"items": r.data or []}
 
+# === STREAK SYSTEEM ===
+def update_user_streak(user_id, datum, supabase):
+    """Wordt aangeroepen wanneer er een dagboek-item is toegevoegd.
+    Tel het aantal unieke maaltijdmomenten op die datum.
+    Als >=3 -> dag telt mee voor streak."""
+    from datetime import date, timedelta
+    try:
+        res = supabase.table("fuelc_dagboek").select("moment").eq("user_id", user_id).eq("datum", datum).execute()
+        momenten = set(it.get("moment") for it in (res.data or []) if it.get("moment") is not None)
+        if len(momenten) < 3:
+            return  # Nog niet voltooid
+        
+        geb = supabase.table("carboo_gebruikers").select("streak_count, streak_laatste_dag, streak_record, streak_freeze_beschikbaar, streak_freeze_laatste_maand").eq("id", user_id).single().execute()
+        if not geb.data:
+            return
+        
+        huidig = geb.data.get("streak_count") or 0
+        laatste_dag_str = geb.data.get("streak_laatste_dag")
+        record = geb.data.get("streak_record") or 0
+        freeze = geb.data.get("streak_freeze_beschikbaar") or 1
+        freeze_maand_str = geb.data.get("streak_freeze_laatste_maand")
+        
+        vandaag = date.fromisoformat(datum) if isinstance(datum, str) else datum
+        maand_begin = vandaag.replace(day=1)
+        
+        # Reset freeze indien nieuwe maand
+        if freeze_maand_str is None or date.fromisoformat(freeze_maand_str[:10]) < maand_begin:
+            freeze = 1
+            freeze_maand_str = maand_begin.isoformat()
+        
+        if laatste_dag_str == datum:
+            return  # Vandaag al geteld
+        
+        if laatste_dag_str is None:
+            nieuwe = 1
+        else:
+            verschil = (vandaag - date.fromisoformat(laatste_dag_str[:10])).days
+            if verschil <= 0:
+                return  # Backdating, niet behandelen hier
+            elif verschil == 1:
+                nieuwe = huidig + 1  # Aaneensluitend
+            elif verschil == 2:
+                nieuwe = huidig + 1  # Genadedag
+            elif verschil == 3 and freeze > 0:
+                nieuwe = huidig + 1  # Freeze gebruikt
+                freeze = 0
+            else:
+                nieuwe = 1  # Streak verloren
+        
+        record = max(record, nieuwe)
+        supabase.table("carboo_gebruikers").update({
+            "streak_count": nieuwe,
+            "streak_laatste_dag": datum,
+            "streak_record": record,
+            "streak_freeze_beschikbaar": freeze,
+            "streak_freeze_laatste_maand": freeze_maand_str
+        }).eq("id", user_id).execute()
+    except Exception as e:
+        print(f"streak update fout: {e}")
+
+@app.get("/api/streak")
+async def get_streak(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_gebruikers").select("streak_count, streak_laatste_dag, streak_record, streak_freeze_beschikbaar").eq("id", user.id).single().execute()
+    d = r.data or {}
+    return {
+        "count": d.get("streak_count") or 0,
+        "laatste_dag": d.get("streak_laatste_dag"),
+        "record": d.get("streak_record") or 0,
+        "freeze_beschikbaar": d.get("streak_freeze_beschikbaar") or 0,
+    }
+
 @app.post("/api/fuelc/dagboek")
 async def voeg_dagboek_toe(item: DagboekItem, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     data = item.dict()
     data["user_id"] = user.id
     supabase.table("fuelc_dagboek").insert(data).execute()
+    # Update streak na elke toevoeging
+    if data.get("datum"):
+        update_user_streak(user.id, data["datum"], supabase)
     return {"status": "opgeslagen"}
 
 @app.delete("/api/fuelc/dagboek/{item_id}")
