@@ -345,12 +345,13 @@ async def keur_goed(aanvraag_id: str, user=Depends(get_current_user), supabase: 
     return {"ok": True}
 
 @app.post("/api/admin/aanvragen/{aanvraag_id}/weiger")
-async def weiger_aanvraag(aanvraag_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+async def weiger_aanvraag(aanvraag_id: str, data: dict = None, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     if not await is_admin(user, supabase):
         raise HTTPException(403, "Geen toegang")
     from datetime import datetime
+    reden = (data or {}).get("reden", "").strip() if data else ""
     supabase.table("carboo_coach_aanvragen").update({
-        "status": "geweigerd", "behandeld": datetime.now().isoformat()
+        "status": "geweigerd", "behandeld": datetime.now().isoformat(), "weiger_reden": reden or None
     }).eq("id", aanvraag_id).execute()
     return {"ok": True}
 
