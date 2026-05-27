@@ -1871,7 +1871,10 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             checkdag = (today - timedelta(days=d)).isoformat()
             if checkdag not in dagen_ingevuld:
                 gemiste.append(checkdag)
-        if len(gemiste) >= 2:
+        # Check totaal aantal ingevulde dagen ooit (alleen tonen voor actieve gebruikers)
+        historiek = supabase.table("fuelc_dagboek").select("datum").eq("user_id", user.id).execute()
+        totaal_dagen = len(set((it["datum"] or "")[:10] for it in (historiek.data or [])))
+        if len(gemiste) >= 2 and totaal_dagen >= 3:
             add(f"dagschema_inactief_{today.isoformat()}", "📋", "Dagschema bijhouden",
                 f"Je hebt je dagschema {len(gemiste)} dagen niet ingevuld. Houd je voeding bij voor betere inzichten!",
                 "/app/fueling", "warning")
