@@ -2683,10 +2683,33 @@ async def _get_of_maak_mollie_klant(user_id: str, email: str, naam: str) -> str:
 
 @app.post("/api/mollie/betaling-aanmaken")
 async def maak_betaling(item: BetalingRequest, user=Depends(get_current_user)):
-    if item.pakket_id not in PAKKETTEN:
-        raise HTTPException(400, "Ongeldig pakket")
     if not MOLLIE_API_KEY:
         raise HTTPException(500, "Mollie niet geconfigureerd")
+    is_credits = item.pakket_id in EXTRA_CREDITS
+    if not is_credits and item.pakket_id not in PAKKETTEN:
+        raise HTTPException(400, "Ongeldig pakket")
+
+    # EXTRA CREDITS: eenmalige betaling, geen subscription
+    if is_credits:
+        info = EXTRA_CREDITS[item.pakket_id]
+        payload = {
+            "amount": {"currency": "EUR", "value": info["prijs"]},
+            "description": f"Carboo - {info['label']}",
+            "redirectUrl": f"{APP_URL}/app/abonnement?betaling=ok&pakket={item.pakket_id}",
+            "webhookUrl": WEBHOOK_URL,
+            "metadata": {"user_id": user.id, "user_email": user.email, "pakket": item.pakket_id, "type": "credits"},
+            "locale": "nl_BE",
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.mollie.com/v2/payments",
+                headers={"Authorization": f"Bearer {MOLLIE_API_KEY}", "Content-Type": "application/json"},
+                json=payload, timeout=10
+            )
+            data = resp.json()
+            if resp.status_code == 201:
+                return {"checkout_url": data["_links"]["checkout"]["href"], "payment_id": data["id"]}
+            raise HTTPException(500, f"Mollie fout: {data.get('detail', 'Onbekende fout')}")
 
     pakket = PAKKETTEN[item.pakket_id]
     prijs = get_prijs(item.pakket_id)
@@ -2743,6 +2766,17 @@ async def mollie_webhook(request: Request):
     verval = (date.today().replace(day=1) + timedelta(days=32)).replace(day=date.today().day)
     bestaand = supabase_admin.table("carboo_abonnementen").select("id").eq("user_id", user_id).eq("pakket", pakket).execute()
     betaling_type = metadata.get("type", "abonnement")
+
+    # EXTRA CREDITS: tel credits op en stop (geen abonnement)
+    if betaling_type == "credits" and pakket in EXTRA_CREDITS:
+        aantal = EXTRA_CREDITS[pakket]["credits"]
+        geb = supabase_admin.table("carboo_gebruikers").select("credits").eq("id", user_id).single().execute()
+        huidig = (geb.data or {}).get("credits", 0) or 0
+        supabase_admin.table("carboo_gebruikers").update({"credits": huidig + aantal}).eq("id", user_id).execute()
+        supabase_admin.table("carboo_credit_log").insert({"user_id": user_id, "omschrijving": EXTRA_CREDITS[pakket]["label"], "bedrag": aantal}).execute()
+        print(f"[CREDITS] +{aantal} voor {user_id} (was {huidig})")
+        return {"status": "ok"}
+
     prijs = get_prijs(pakket)
     if bestaand.data:
         supabase_admin.table("carboo_abonnementen").update({
