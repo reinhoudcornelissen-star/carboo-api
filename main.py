@@ -3005,10 +3005,10 @@ async def scan_koelkast(request: Request, user=Depends(get_current_user), supaba
         "Je bent een sportvoedingscoach. Analyseer de inhoud van deze koelkast of voorraadkast "
         "en stel 2 tot 3 concrete, gezonde maaltijdsuggesties voor op basis van wat je ziet, gericht op een sporter."
         + doel_tekst +
-        " Voor elk ingredient schat je realistische voedingswaarden voor de gebruikte hoeveelheid (niet per 100g, maar voor de portie in het recept). "
+        " BELANGRIJK: voor ELK ingredient MOET je realistische, ingevulde voedingswaarden geven voor de gebruikte hoeveelheid in het recept (niet per 100g). Gebruik NOOIT 0 als waarde tenzij dat echt klopt (bv vezels in olie). Schat op basis van je voedingskennis. "
         "Geef per suggestie ook een korte bereiding en het maaltijdtype (Ontbijt, Lunch, Avondmaal of Snack). "
-        "Geef ALLEEN een JSON object terug, geen uitleg eromheen, exact in dit formaat: "
-        '{"herkende_ingredienten":["..."],"suggesties":[{"naam":"...","type":"Ontbijt","beschrijving":"...","bereiding":"...","sportvoordeel":"...","ingredienten":[{"naam":"...","hoeveelheid_g":100,"kcal":0,"kh":0,"eiwit":0,"vet":0,"vezels":0}]}]}'
+        "Geef ALLEEN een JSON object terug, geen uitleg eromheen, exact in dit formaat (de getallen hieronder zijn slechts een VOORBEELD van het detailniveau, vul je eigen realistische schattingen in): "
+        '{"herkende_ingredienten":["eieren","spinazie","volkoren brood"],"suggesties":[{"naam":"Omelet met spinazie","type":"Ontbijt","beschrijving":"Eiwitrijke start van de dag","bereiding":"Klop de eieren los, bak met spinazie in een pan, serveer met brood.","sportvoordeel":"Hoog in eiwit voor spierherstel na training","ingredienten":[{"naam":"eieren","hoeveelheid_g":120,"kcal":172,"kh":1,"eiwit":15,"vet":12,"vezels":0},{"naam":"spinazie","hoeveelheid_g":80,"kcal":18,"kh":1,"eiwit":2,"vet":0,"vezels":2},{"naam":"volkoren brood","hoeveelheid_g":60,"kcal":147,"kh":26,"eiwit":6,"vet":2,"vezels":4}]}]}'
     )
 
     try:
