@@ -1202,13 +1202,30 @@ def update_user_streak(user_id, datum, supabase):
 
 @app.get("/api/streak")
 async def get_streak(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    from datetime import date
     r = supabase.table("carboo_gebruikers").select("streak_count, streak_laatste_dag, streak_record, streak_freeze_beschikbaar").eq("id", user.id).single().execute()
     d = r.data or {}
+    count = d.get("streak_count") or 0
+    laatste = d.get("streak_laatste_dag")
+    freeze = d.get("streak_freeze_beschikbaar") or 0
+    # Lazy reset: als laatste invuldag te lang geleden is, streak naar 0
+    if count > 0 and laatste:
+        try:
+            vandaag = date.today()
+            laatste_d = date.fromisoformat(laatste[:10])
+            verschil = (vandaag - laatste_d).days
+            # >2 dagen geleden = verloren (1 dag genade), >3 met freeze = verloren
+            grens = 3 if freeze > 0 else 2
+            if verschil > grens:
+                supabase.table("carboo_gebruikers").update({"streak_count": 0}).eq("id", user.id).execute()
+                count = 0
+        except Exception as e:
+            print(f"streak lazy reset fout: {e}")
     return {
-        "count": d.get("streak_count") or 0,
-        "laatste_dag": d.get("streak_laatste_dag"),
+        "count": count,
+        "laatste_dag": laatste,
         "record": d.get("streak_record") or 0,
-        "freeze_beschikbaar": d.get("streak_freeze_beschikbaar") or 0,
+        "freeze_beschikbaar": freeze,
     }
 
 @app.post("/api/fuelc/dagboek")
