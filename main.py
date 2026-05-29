@@ -2147,9 +2147,20 @@ async def mijn_abonnement(user=Depends(get_current_user), supabase: Client = Dep
     if await is_admin(user, supabase):
         from datetime import date
         fake_abos = [{
-            "id": "admin-bypass",
+            "id": "admin-bypass-alles",
             "user_id": user.id,
             "pakket": "alles",
+            "status": "actief",
+            "prijs": 0,
+            "start_datum": date.today().isoformat(),
+            "verval_datum": "2099-12-31",
+            "mollie_payment_id": "admin_role",
+            "mollie_subscription_id": None,
+            "auto_verleng": False,
+        }, {
+            "id": "admin-bypass-coach",
+            "user_id": user.id,
+            "pakket": "coach",
             "status": "actief",
             "prijs": 0,
             "start_datum": date.today().isoformat(),
