@@ -1073,7 +1073,7 @@ async def get_advies(user=Depends(get_current_user), supabase: Client = Depends(
 
 @app.get("/api/dossier/rapporten")
 async def get_rapporten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    r = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", user.id).order("datum", desc=True).execute()
+    r = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", user.id).is_("verwijderd_op", "null").order("datum", desc=True).execute()
     return {"rapporten": r.data or []}
 
 @app.get("/api/dossier/rapporten/{rapport_id}")
@@ -1103,7 +1103,8 @@ async def sla_rapport_op(item: RapportItem, user=Depends(get_current_user), supa
 
 @app.delete("/api/dossier/rapporten/{rapport_id}")
 async def verwijder_rapport(rapport_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    supabase.table("carboo_rapporten").delete().eq("user_id", user.id).eq("id", rapport_id).execute()
+    from datetime import datetime
+    supabase.table("carboo_rapporten").update({"verwijderd_op": datetime.now().isoformat()}).eq("user_id", user.id).eq("id", rapport_id).execute()
     return {"ok": True}
 
 @app.get("/api/fuelc/off-zoek")
