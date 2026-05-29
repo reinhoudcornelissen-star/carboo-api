@@ -3005,8 +3005,10 @@ async def scan_koelkast(request: Request, user=Depends(get_current_user), supaba
         "Je bent een sportvoedingscoach. Analyseer de inhoud van deze koelkast of voorraadkast "
         "en stel 2 tot 3 concrete, gezonde maaltijdsuggesties voor op basis van wat je ziet, gericht op een sporter."
         + doel_tekst +
-        " Geef ALLEEN een JSON object terug, geen uitleg eromheen, in dit formaat: "
-        '{"herkende_ingredienten":["..."],"suggesties":[{"naam":"...","beschrijving":"...","ingredienten":["..."],"moment":"ontbijt/lunch/diner/snack","sportvoordeel":"..."}]}'
+        " Voor elk ingredient schat je realistische voedingswaarden voor de gebruikte hoeveelheid (niet per 100g, maar voor de portie in het recept). "
+        "Geef per suggestie ook een korte bereiding en het maaltijdtype (Ontbijt, Lunch, Avondmaal of Snack). "
+        "Geef ALLEEN een JSON object terug, geen uitleg eromheen, exact in dit formaat: "
+        '{"herkende_ingredienten":["..."],"suggesties":[{"naam":"...","type":"Ontbijt","beschrijving":"...","bereiding":"...","sportvoordeel":"...","ingredienten":[{"naam":"...","hoeveelheid_g":100,"kcal":0,"kh":0,"eiwit":0,"vet":0,"vezels":0}]}]}'
     )
 
     try:
