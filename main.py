@@ -2197,53 +2197,6 @@ async def mijn_abonnement(user=Depends(get_current_user), supabase: Client = Dep
     abos = supabase.table("carboo_abonnementen").select("*").eq("user_id", user.id).eq("status", "actief").gte("verval_datum", vandaag_str).execute()
     return {"abonnementen": abos.data or [], "prijzen": prijzen_map, "credits": credits, "extra_credits_pakketten": EXTRA_CREDITS, "is_admin": False}
 
-@app.post("/api/mollie/betaling-aanmaken")
-async def betaling_aanmaken(item: BetalingAanmaken, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    """Maak een Mollie payment aan. Werkt voor abos én extra credits."""
-    pakket_id = item.pakket_id
-    is_credits = pakket_id in EXTRA_CREDITS
-
-    if is_credits:
-        pakket_info = EXTRA_CREDITS[pakket_id]
-        bedrag = pakket_info["prijs"]
-        omschrijving = f"Carboo - {pakket_info['label']}"
-    else:
-        prijs_r = supabase.table("carboo_prijzen").select("*").eq("id", pakket_id).single().execute()
-        if not prijs_r.data:
-            raise HTTPException(404, f"Pakket '{pakket_id}' niet gevonden")
-        bedrag = f"{float(prijs_r.data['prijs']):.2f}"
-        omschrijving = f"Carboo - {prijs_r.data['label']} (1 maand)"
-
-    # Email opvragen
-    try:
-        users = supabase.auth.admin.list_users()
-        email = next((u.email for u in users if str(u.id) == str(user.id)), None)
-    except: email = None
-
-    try:
-        payment = mollie_client.payments.create({
-            "amount": {"currency": "EUR", "value": bedrag},
-            "description": omschrijving,
-            "redirectUrl": f"{APP_URL}/app/abonnement?betaling=ok&pakket={pakket_id}",
-            "webhookUrl": WEBHOOK_URL,
-            "metadata": {
-                "user_id": str(user.id),
-                "pakket_id": pakket_id,
-                "is_credits": is_credits,
-                "email": email or "",
-            }
-        })
-        return {"checkout_url": payment.checkout_url, "payment_id": payment.id}
-    except Exception as e:
-        raise HTTPException(500, f"Mollie fout: {str(e)}")
-
-
-@app.delete("/api/mollie/abonnement/{pakket_id}")
-async def annuleer_abonnement(pakket_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    """Markeer abonnement als 'niet automatisch verlengen' — blijft actief tot vervaldatum."""
-    supabase.table("carboo_abonnementen").update({"auto_verleng": False}).eq("user_id", user.id).eq("pakket", pakket_id).eq("status", "actief").execute()
-    return {"ok": True, "bericht": "Automatische verlenging gestopt. Je abonnement blijft actief tot vervaldatum."}
-
 
 
 # ─── SJABLONEN ─────────────────────────────────────────────────────────────────
@@ -2828,7 +2781,6 @@ async def mollie_webhook(request: Request):
                     },
                     timeout=15
                 )
-                print(f"[MOLLIE SUB] customer={customer_id} pakket={pakket} prijs={prijs:.2f} status={sub_resp.status_code} body={sub_resp.text[:500]}")
                 print(f"[MOLLIE SUB] customer={customer_id} pakket={pakket} prijs={prijs:.2f} status={sub_resp.status_code} body={sub_resp.text[:500]}")
                 if sub_resp.status_code == 201:
                     sub_data = sub_resp.json()
