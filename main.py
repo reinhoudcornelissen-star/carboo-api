@@ -2946,3 +2946,90 @@ async def annuleer_abonnement(pakket_id: str, user=Depends(get_current_user)):
         "mollie_subscription_id": None, "bijgewerkt": "now()"
     }).eq("user_id", user.id).eq("pakket", pakket_id).execute()
     return {"ok": True, "bericht": "Automatische verlenging geannuleerd. Abonnement loopt door tot vervaldatum."}
+
+
+# ─── KOELKASTSCAN (Blaze-vlam feature, 1x per maand vanaf 30 dagen streak) ───
+
+@app.get("/api/fuelc/koelkastscan-status")
+async def koelkastscan_status(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    from datetime import date
+    r = supabase.table("carboo_gebruikers").select("streak_count, koelkastscan_laatste_maand").eq("id", user.id).single().execute()
+    d = r.data or {}
+    streak = d.get("streak_count") or 0
+    maand = date.today().strftime("%Y-%m")
+    gebruikt = (d.get("koelkastscan_laatste_maand") == maand)
+    return {
+        "ontgrendeld": streak >= 30,
+        "streak_count": streak,
+        "gebruikt_deze_maand": gebruikt,
+        "dagen_tot_unlock": max(0, 30 - streak),
+    }
+
+@app.post("/api/fuelc/scan-koelkast")
+async def scan_koelkast(request: Request, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    import json, re
+    from datetime import date
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(500, "anthropic pakket niet geinstalleerd")
+
+    geb = supabase.table("carboo_gebruikers").select("streak_count, koelkastscan_laatste_maand").eq("id", user.id).single().execute()
+    gd = geb.data or {}
+    streak = gd.get("streak_count") or 0
+    if streak < 30:
+        raise HTTPException(403, "De koelkastscan ontgrendel je vanaf de Blaze-vlam (30 dagen streak)")
+    maand = date.today().strftime("%Y-%m")
+    if gd.get("koelkastscan_laatste_maand") == maand:
+        raise HTTPException(429, "Je hebt de koelkastscan deze maand al gebruikt. Volgende maand weer beschikbaar!")
+
+    body = await request.json()
+    image_data = body.get("image_data", "")
+    media_type = body.get("media_type", "image/jpeg")
+    if not image_data:
+        raise HTTPException(400, "Geen afbeelding ontvangen")
+    if media_type not in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
+        media_type = "image/jpeg"
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY niet ingesteld op Render")
+
+    prof = supabase.table("fuelc_profiel").select("energie_doel,doelstelling").eq("user_id", user.id).execute()
+    p = prof.data[0] if prof.data else {}
+    doel_tekst = ""
+    if p:
+        doel_tekst = f" Houd rekening met dit profiel: dagdoel ongeveer {p.get('energie_doel','onbekend')} kcal, doelstelling '{p.get('doelstelling','algemeen')}'."
+
+    prompt_tekst = (
+        "Je bent een sportvoedingscoach. Analyseer de inhoud van deze koelkast of voorraadkast "
+        "en stel 2 tot 3 concrete, gezonde maaltijdsuggesties voor op basis van wat je ziet, gericht op een sporter."
+        + doel_tekst +
+        " Geef ALLEEN een JSON object terug, geen uitleg eromheen, in dit formaat: "
+        '{"herkende_ingredienten":["..."],"suggesties":[{"naam":"...","beschrijving":"...","ingredienten":["..."],"moment":"ontbijt/lunch/diner/snack","sportvoordeel":"..."}]}'
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1500,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_data}},
+                    {"type": "text", "text": prompt_tekst}
+                ]
+            }]
+        )
+        tekst = msg.content[0].text.strip()
+        match = re.search(r'\{[\s\S]*\}', tekst)
+        if not match:
+            raise HTTPException(422, f"Kon geen suggestie genereren: {tekst[:200]}")
+        result = json.loads(match.group())
+        supabase.table("carboo_gebruikers").update({"koelkastscan_laatste_maand": maand}).eq("id", user.id).execute()
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Koelkastscan fout: {type(e).__name__}: {str(e)[:200]}")
