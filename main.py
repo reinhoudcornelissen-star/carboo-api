@@ -2828,6 +2828,8 @@ async def mollie_webhook(request: Request):
                     },
                     timeout=15
                 )
+                print(f"[MOLLIE SUB] customer={customer_id} pakket={pakket} prijs={prijs:.2f} status={sub_resp.status_code} body={sub_resp.text[:500]}")
+                print(f"[MOLLIE SUB] customer={customer_id} pakket={pakket} prijs={prijs:.2f} status={sub_resp.status_code} body={sub_resp.text[:500]}")
                 if sub_resp.status_code == 201:
                     sub_data = sub_resp.json()
                     supabase_admin.table("carboo_abonnementen").update({
@@ -2836,6 +2838,12 @@ async def mollie_webhook(request: Request):
                     supabase_admin.table("carboo_mollie_klanten").update({
                         "mollie_mandate_id": sub_data.get("mandateId", "")
                     }).eq("user_id", user_id).execute()
+                    print(f"[MOLLIE SUB] OK subscription_id={sub_data['id']}")
+                else:
+                    print(f"[MOLLIE SUB] FAIL status {sub_resp.status_code}: {sub_resp.text}")
+                    print(f"[MOLLIE SUB] OK subscription_id={sub_data['id']}")
+                else:
+                    print(f"[MOLLIE SUB] FAIL status {sub_resp.status_code}: {sub_resp.text}")
     return {"status": "ok"}
 
 
