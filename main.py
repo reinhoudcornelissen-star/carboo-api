@@ -2841,9 +2841,6 @@ async def mollie_webhook(request: Request):
                     print(f"[MOLLIE SUB] OK subscription_id={sub_data['id']}")
                 else:
                     print(f"[MOLLIE SUB] FAIL status {sub_resp.status_code}: {sub_resp.text}")
-                    print(f"[MOLLIE SUB] OK subscription_id={sub_data['id']}")
-                else:
-                    print(f"[MOLLIE SUB] FAIL status {sub_resp.status_code}: {sub_resp.text}")
     return {"status": "ok"}
 
 
