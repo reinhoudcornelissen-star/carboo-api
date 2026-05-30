@@ -1972,6 +1972,25 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
                 "/app/fueling", "warning")
     except Exception as e: print(f"notif dagboek fout: {e}")
 
+    # 1b. Streak in gevaar (genadedag) - waarschuw op de laatste kans, rekening houdend met freeze
+    try:
+        sr = supabase.table("carboo_gebruikers").select("streak_count, streak_laatste_dag, streak_freeze_beschikbaar").eq("id", user.id).single().execute()
+        sd = sr.data or {}
+        s_count = sd.get("streak_count") or 0
+        s_laatste = sd.get("streak_laatste_dag")
+        s_freeze = sd.get("streak_freeze_beschikbaar") or 0
+        if s_count > 0 and s_laatste:
+            laatste_d = date.fromisoformat(s_laatste[:10])
+            verschil = (today - laatste_d).days
+            # Laatste kans: zonder freeze op dag 2, met freeze op dag 3.
+            # (vandaag niet invullen -> morgen overschrijdt de grens -> reset)
+            laatste_kans = (verschil == 2 and s_freeze <= 0) or (verschil == 3 and s_freeze > 0)
+            if laatste_kans:
+                add(f"streak_gevaar_{today.isoformat()}", "🔥", "Je vlammetje dooft bijna...",
+                    f"Vul vandaag je fueling in om je streak van {s_count} dag{'en' if s_count != 1 else ''} brandend te houden!",
+                    "/app/fueling", "warning")
+    except Exception as e: print(f"notif streak fout: {e}")
+
     # 2. Gewicht 7 dagen niet — alleen bij doel = gewichtsverlies
     try:
         prof = supabase.table("fuelc_profiel").select("doel,energie_doel").eq("user_id", user.id).execute()
