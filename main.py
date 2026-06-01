@@ -2487,7 +2487,7 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
             r = await client.get(
                 f"{STRAVA_API_BASE}/athlete/activities",
                 headers={"Authorization": f"Bearer {token}"},
-                params={"after": after_ts, "per_page": 50, "page": 1},
+                params={"per_page": 50, "page": 1},  # after-param weggelaten (gaf 500 bij toekomstige timestamp)
             )
         print(f"[strava] API status {r.status_code} (poging {_poging})")
         if r.status_code == 200:
