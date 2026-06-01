@@ -2502,10 +2502,14 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
     for a in sport_activities:
         sport_type = a.get("sport_type") or a.get("type")
         sport_nl = SPORT_TYPE_NL.get(sport_type, sport_type)
+        # Veilig: sla activiteiten zonder datum of id over
+        if not a.get("start_date_local") or not a.get("id"):
+            print(f"[strava] activiteit overgeslagen (geen datum/id): {a.get('id')} {sport_type}")
+            continue
         datum = a["start_date_local"][:10]
-        duur_min = round(a.get("moving_time", 0) / 60)
-        kcal = round(a.get("calories", 0)) if a.get("calories") else round(duur_min * 8)  # fallback schatting
-        naam = a.get("name", sport_nl)
+        duur_min = round((a.get("moving_time") or 0) / 60)
+        kcal = round(a.get("calories") or 0) if a.get("calories") else round(duur_min * 8)  # fallback schatting
+        naam = a.get("name") or sport_nl
         strava_id = a["id"]
         # Check of we deze al hebben (idempotentie)
         bestaand = supabase.table("fuelc_trainingen").select("id").eq("user_id", user.id).eq("strava_activity_id", strava_id).execute()
