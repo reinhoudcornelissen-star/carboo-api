@@ -2480,16 +2480,27 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
     after_ts = int(sinds.timestamp())
     print(f"[strava] sync voor user {user.id} sinds {sinds.isoformat()} (historie={historie})")
     # Strava activities ophalen
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(
-            f"{STRAVA_API_BASE}/athlete/activities",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"after": after_ts, "per_page": 50},
-        )
-    print(f"[strava] API status {r.status_code} bij ophalen activiteiten")
-    if r.status_code != 200:
-        print(f"[strava] API FOUT body: {r.text[:500]}")
-        raise HTTPException(500, f"Strava API fout: {r.text}")
+    import asyncio as _asyncio
+    r = None
+    for _poging in range(1, 4):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get(
+                f"{STRAVA_API_BASE}/athlete/activities",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"after": after_ts, "per_page": 50, "page": 1},
+            )
+        print(f"[strava] API status {r.status_code} (poging {_poging})")
+        if r.status_code == 200:
+            break
+        if r.status_code in (500, 502, 503, 429):
+            print(f"[strava] retry poging {_poging}, body: {r.text[:200]}")
+            await _asyncio.sleep(2)
+            continue
+        break
+    if r is None or r.status_code != 200:
+        body = r.text[:300] if r is not None else "geen antwoord"
+        print(f"[strava] API DEFINITIEF FOUT: {body}")
+        raise HTTPException(502, "Strava is tijdelijk niet bereikbaar. Probeer over enkele minuten opnieuw.")
     activities = r.json()
     print(f"[strava] {len(activities)} activiteiten ontvangen van Strava")
     for a in activities[:5]:
