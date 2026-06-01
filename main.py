@@ -2453,6 +2453,17 @@ async def _refresh_token_indien_nodig(koppeling: dict, supabase: Client):
 @app.post("/api/strava/sync")
 async def strava_sync(historie: bool = False, dagen: int = 7, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Haal nieuwe Strava activiteiten op. Met ?historie=true&dagen=N: laatste N dagen."""
+    import traceback as _tb
+    try:
+        return await _strava_sync_impl(historie, dagen, user, supabase)
+    except HTTPException:
+        raise
+    except Exception as _e:
+        print(f"[strava] SYNC FOUT: {type(_e).__name__}: {_e}")
+        print(_tb.format_exc())
+        raise HTTPException(500, f"Strava sync fout: {type(_e).__name__}: {str(_e)[:200]}")
+
+async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
     from datetime import datetime, timezone, timedelta
     k_r = supabase.table("carboo_strava_koppelingen").select("*").eq("user_id", user.id).execute()
     if not k_r.data:
