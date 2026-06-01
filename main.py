@@ -507,6 +507,94 @@ async def genereer_invite(data: dict, user=Depends(get_current_user), supabase: 
 
     return {"token": token, "expires": expires, "link": f"/app/coach-zone/invite/{token}", "klant_email": klant_email}
 
+
+@app.post("/api/coach/klant-direct-toevoegen")
+async def klant_direct_toevoegen(data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach koppelt een klant direct (zonder invite-acceptatie), met coaching-termijn in maanden.
+    Maakt een nieuw account aan als de klant nog niet bestaat (wachtwoord vereist)."""
+    from datetime import date, timedelta
+    klant_email = (data.get("email") or "").strip().lower()
+    wachtwoord = (data.get("wachtwoord") or "").strip()
+    maanden = int(data.get("maanden", 3) or 3)
+    if not klant_email:
+        raise HTTPException(400, "Email van de klant is verplicht")
+
+    coach = supabase.table("carboo_coaches").select("id,verified").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(400, "Maak eerst een coach profiel aan")
+    if not coach.data[0].get("verified"):
+        raise HTTPException(403, "Coach account nog niet goedgekeurd door admin")
+    abo = supabase.table("carboo_abonnementen").select("id").eq("user_id", user.id).eq("pakket", "coach").eq("status", "actief").execute()
+    if not abo.data:
+        raise HTTPException(403, "Geen actief Coach Zone abonnement. Activeer eerst via /app/abonnement")
+    coach_id = coach.data[0]["id"]
+
+    # Zoek klant in auth.users
+    klant_id = None
+    nieuwe_gebruiker = False
+    try:
+        all_users = supabase.auth.admin.list_users()
+        for u in (all_users or []):
+            ue = getattr(u, 'email', None)
+            if ue and ue.lower() == klant_email:
+                klant_id = str(getattr(u, 'id', None))
+                break
+    except Exception as e:
+        raise HTTPException(500, f"Fout bij zoeken gebruiker: {e}")
+
+    # Niet gevonden -> aanmaken indien wachtwoord opgegeven
+    if not klant_id:
+        if not wachtwoord:
+            raise HTTPException(404, f"Geen Carboo-gebruiker met email {klant_email}. Geef ook een wachtwoord op om een nieuw account aan te maken.")
+        if len(wachtwoord) < 6:
+            raise HTTPException(400, "Wachtwoord moet minstens 6 karakters lang zijn")
+        try:
+            created = supabase.auth.admin.create_user({
+                "email": klant_email, "password": wachtwoord, "email_confirm": True
+            })
+            if created and created.user:
+                klant_id = str(created.user.id)
+                nieuwe_gebruiker = True
+            else:
+                raise HTTPException(500, "Kon gebruiker niet aanmaken")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Fout bij aanmaken account: {e}")
+
+    if klant_id == user.id:
+        raise HTTPException(400, "Je kan jezelf niet als klant toevoegen")
+
+    coaching_eind = (date.today() + timedelta(days=30 * maanden)).isoformat()
+
+    # Bestaande relatie?
+    bestaand = supabase.table("carboo_coach_klanten").select("id,status").eq("coach_id", coach_id).eq("klant_id", klant_id).execute()
+    if bestaand.data:
+        rel = bestaand.data[0]
+        supabase.table("carboo_coach_klanten").update({
+            "status": "actief", "coaching_eind": coaching_eind, "klant_email": klant_email, "bijgewerkt": "now()"
+        }).eq("id", rel["id"]).execute()
+        rel_id = rel["id"]
+    else:
+        ins = supabase.table("carboo_coach_klanten").insert({
+            "coach_id": coach_id, "klant_id": klant_id, "klant_email": klant_email,
+            "status": "actief", "coaching_eind": coaching_eind
+        }).execute()
+        rel_id = ins.data[0]["id"] if ins.data else None
+
+    # Privacy-instellingen aanmaken indien nog niet aanwezig
+    if rel_id:
+        bestaande_privacy = supabase.table("carboo_coach_privacy").select("id").eq("relatie_id", rel_id).execute()
+        if not bestaande_privacy.data:
+            supabase.table("carboo_coach_privacy").insert({
+                "relatie_id": rel_id, "klant_id": klant_id,
+                "dagschema": False, "gewicht": False, "macros": False,
+                "voedingskwaliteit": False, "performance": False,
+                "race_plannen": False, "train_gut": False, "dossier": False
+            }).execute()
+
+    return {"ok": True, "klant_id": klant_id, "nieuwe_gebruiker": nieuwe_gebruiker, "coaching_eind": coaching_eind, "relatie_id": rel_id}
+
 @app.get("/api/coach/invite/{token}")
 async def get_invite_info(token: str, supabase: Client = Depends(get_supabase)):
     from datetime import datetime
