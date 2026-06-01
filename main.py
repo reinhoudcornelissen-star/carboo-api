@@ -2486,7 +2486,9 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
             headers={"Authorization": f"Bearer {token}"},
             params={"after": after_ts, "per_page": 50},
         )
+    print(f"[strava] API status {r.status_code} bij ophalen activiteiten")
     if r.status_code != 200:
+        print(f"[strava] API FOUT body: {r.text[:500]}")
         raise HTTPException(500, f"Strava API fout: {r.text}")
     activities = r.json()
     print(f"[strava] {len(activities)} activiteiten ontvangen van Strava")
