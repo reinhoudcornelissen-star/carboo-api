@@ -2542,6 +2542,9 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
             print(f"[strava] activiteit overgeslagen (geen datum/id): {a.get('id')} {sport_type}")
             continue
         datum = a["start_date_local"][:10]
+        # Starttijd uit Strava (formaat: 2026-06-03T12:00:00) -> "12:00"
+        sd = a.get("start_date_local") or ""
+        starttijd = sd[11:16] if len(sd) >= 16 else "07:00"
         duur_min = round((a.get("moving_time") or 0) / 60)
         kcal = round(a.get("calories") or 0) if a.get("calories") else round(duur_min * 8)  # fallback schatting
         naam = a.get("name") or sport_nl
@@ -2568,7 +2571,7 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
                     "sport": sport_nl, "duur_min": duur_min,
                     "kcal_verbranding": kcal, "bron": "strava",
                     "strava_activity_id": strava_id,
-                    "naam": naam,
+                    "naam": naam, "starttijd": starttijd,
                 }).execute()
                 nieuwe_imports.append({"datum": datum, "naam": naam, "duur_min": duur_min, "kcal": kcal})
             except Exception as e:
