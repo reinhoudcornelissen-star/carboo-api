@@ -995,6 +995,55 @@ async def sla_klant_zones_op(klant_id: str, data: dict, user=Depends(get_current
     return {"ok": True}
 
 
+# ─── COACH: TRAININGEN PLANNEN VOOR KLANT ─────────────────────────────────────
+
+@app.get("/api/coach/klant/{klant_id}/trainingen")
+async def get_klant_trainingen(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Haal de trainingen van een klant op (voor coach-overzicht). Alleen gekoppelde coach."""
+    await _verifieer_coach_klant(user, klant_id, supabase)
+    r = supabase.table("fuelc_trainingen").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(60).execute()
+    return {"trainingen": r.data or []}
+
+@app.post("/api/coach/klant/{klant_id}/training")
+async def plan_klant_training(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach plant een training voor de klant. Slaat op met bron=coach + voedingsvelden."""
+    coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+    datum = (data.get("datum") or "").strip()
+    sport = (data.get("sport") or "").strip()
+    if not datum or not sport:
+        raise HTTPException(400, "Datum en sport zijn verplicht")
+    payload = {
+        "user_id": klant_id,
+        "datum": datum,
+        "sport": sport,
+        "bron": "coach",
+        "coach_id": coach_id,
+        "duur_min": int(data.get("duur_min") or 0),
+        "starttijd": (data.get("starttijd") or "07:00"),
+        "kcal_verbranding": int(data.get("kcal_verbranding") or 0),
+        "zone_verdeling": data.get("zone_verdeling"),
+        "naam": (data.get("naam") or sport),
+        "notitie": (data.get("notitie") or ""),
+        "coach_advies_tekst": (data.get("coach_advies_tekst") or ""),
+        "coach_kh_doel": (int(data["coach_kh_doel"]) if data.get("coach_kh_doel") not in (None, "") else None),
+        "coach_eiwit_doel": (int(data["coach_eiwit_doel"]) if data.get("coach_eiwit_doel") not in (None, "") else None),
+    }
+    training_id = data.get("training_id")
+    if training_id:
+        # Update bestaande coach-training (alleen als die van deze coach is)
+        supabase.table("fuelc_trainingen").update(payload).eq("id", training_id).eq("user_id", klant_id).eq("coach_id", coach_id).execute()
+        return {"ok": True, "id": training_id}
+    ins = supabase.table("fuelc_trainingen").insert(payload).execute()
+    return {"ok": True, "id": ins.data[0]["id"] if ins.data else None}
+
+@app.delete("/api/coach/klant/{klant_id}/training/{training_id}")
+async def verwijder_klant_training(klant_id: str, training_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach verwijdert een door hem geplande training. Alleen eigen coach-trainingen."""
+    coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+    supabase.table("fuelc_trainingen").delete().eq("id", training_id).eq("user_id", klant_id).eq("coach_id", coach_id).execute()
+    return {"ok": True}
+
+
 # ─── DOSSIER / RAPPORTEN ──────────────────────────────────────────────────────
 
 class RapportItem(BaseModel):
