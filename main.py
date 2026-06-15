@@ -1046,6 +1046,46 @@ async def verwijder_klant_training(klant_id: str, training_id: str, user=Depends
 
 # ─── DOSSIER / RAPPORTEN ──────────────────────────────────────────────────────
 
+# ─── COACH: VOEDINGSTIPS PER DAG ──────────────────────────────────────────────
+
+@app.get("/api/coach/klant/{klant_id}/voedingstips")
+async def get_klant_voedingstips(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach haalt de voedingstips op die hij voor een klant gaf."""
+    coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+    r = supabase.table("fuelc_coach_voedingstips").select("*").eq("user_id", klant_id).eq("coach_id", coach_id).order("datum", desc=True).limit(120).execute()
+    return {"tips": r.data or []}
+
+@app.post("/api/coach/klant/{klant_id}/voedingstip")
+async def plan_klant_voedingstip(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach voegt een voedingstip toe of werkt er een bij voor een bepaalde dag."""
+    coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+    datum = (data.get("datum") or "").strip()
+    tip = (data.get("tip") or "").strip()
+    dagdeel = (data.get("dagdeel") or "").strip()
+    if not datum:
+        raise HTTPException(400, "Datum is verplicht")
+    tip_id = data.get("tip_id")
+    if tip_id:
+        supabase.table("fuelc_coach_voedingstips").update({"datum": datum, "dagdeel": dagdeel, "tip": tip}).eq("id", tip_id).eq("user_id", klant_id).eq("coach_id", coach_id).execute()
+        return {"ok": True, "id": tip_id}
+    payload = {"user_id": klant_id, "coach_id": coach_id, "datum": datum, "dagdeel": dagdeel, "tip": tip}
+    ins = supabase.table("fuelc_coach_voedingstips").insert(payload).execute()
+    return {"ok": True, "id": ins.data[0]["id"] if ins.data else None}
+
+@app.delete("/api/coach/klant/{klant_id}/voedingstip/{tip_id}")
+async def verwijder_klant_voedingstip(klant_id: str, tip_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach verwijdert een eigen voedingstip."""
+    coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+    supabase.table("fuelc_coach_voedingstips").delete().eq("id", tip_id).eq("user_id", klant_id).eq("coach_id", coach_id).execute()
+    return {"ok": True}
+
+@app.get("/api/fuelc/coach-voedingstips")
+async def get_mijn_coach_voedingstips(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Klant haalt zijn coach-voedingstips op (voor weergave in het dagschema)."""
+    r = supabase.table("fuelc_coach_voedingstips").select("id,datum,dagdeel,tip,coach_id").eq("user_id", user.id).order("datum", desc=True).limit(180).execute()
+    return {"tips": r.data or []}
+
+
 class RapportItem(BaseModel):
     naam: str
     type: str
