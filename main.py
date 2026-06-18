@@ -890,7 +890,19 @@ async def get_opmerkingen_coach(user=Depends(get_current_user), supabase: Client
         return {"opmerkingen": []}
     coach_id = coach.data[0]["id"]
     r = supabase.table("carboo_coach_opmerkingen").select("*, carboo_coach_reacties(*)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute()
-    return {"opmerkingen": r.data or []}
+    rows = r.data or []
+    # tel klant-reacties die deze coach nog niet als gelezen markeerde
+    klant_reactie_ids = []
+    for o in rows:
+        for re in (o.get("carboo_coach_reacties") or []):
+            if re.get("auteur_type") == "klant" and re.get("id"):
+                klant_reactie_ids.append(re["id"])
+    ongelezen = 0
+    if klant_reactie_ids:
+        gel = supabase.table("carboo_coach_reactie_gelezen").select("reactie_id").eq("coach_id", coach_id).in_("reactie_id", klant_reactie_ids).execute()
+        gezien = set(g["reactie_id"] for g in (gel.data or []))
+        ongelezen = sum(1 for rid in klant_reactie_ids if rid not in gezien)
+    return {"opmerkingen": rows, "ongelezen": ongelezen}
 
 @app.get("/api/coach/opmerkingen/klant")
 async def get_opmerkingen_klant(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -924,6 +936,26 @@ async def plaats_reactie(item: CoachReactie, user=Depends(get_current_user), sup
         raise HTTPException(403, "Geen toegang")
     supabase.table("carboo_coach_reacties").insert({"opmerking_id": item.opmerking_id, "klant_id": user.id, "tekst": item.tekst, "auteur_type": "klant"}).execute()
     supabase.table("carboo_coach_opmerkingen").update({"gelezen": True}).eq("id", item.opmerking_id).execute()
+    return {"ok": True}
+
+@app.post("/api/coach/reacties/gelezen")
+async def markeer_reacties_gelezen(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Coach markeert alle huidige klant-reacties op zijn opmerkingen als gelezen."""
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        return {"ok": True}
+    coach_id = coach.data[0]["id"]
+    opm = supabase.table("carboo_coach_opmerkingen").select("id, carboo_coach_reacties(id, auteur_type)").eq("coach_id", coach_id).execute()
+    ids = []
+    for o in (opm.data or []):
+        for re in (o.get("carboo_coach_reacties") or []):
+            if re.get("auteur_type") == "klant" and re.get("id"):
+                ids.append(re["id"])
+    for rid in ids:
+        try:
+            supabase.table("carboo_coach_reactie_gelezen").insert({"reactie_id": rid, "coach_id": coach_id}).execute()
+        except Exception:
+            pass  # bestaat al (unique)
     return {"ok": True}
 
 # ── Privé notities ─────────────────────────────────────────────────────────────
