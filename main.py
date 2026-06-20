@@ -2596,15 +2596,26 @@ async def strava_callback(item: StravaCallback, user=Depends(get_current_user), 
 
 @app.get("/api/strava/status")
 async def strava_status(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    import os as _os
+    _max = int(_os.getenv("STRAVA_MAX_KOPPELINGEN", "10"))
+    try:
+        _cnt = supabase.table("carboo_strava_koppelingen").select("user_id", count="exact").execute()
+        _aantal = _cnt.count or 0
+    except Exception:
+        _aantal = 0
+    _vrije = max(0, _max - _aantal)
     r = supabase.table("carboo_strava_koppelingen").select("atleet_naam,laatste_sync,gekoppeld_op").eq("user_id", user.id).execute()
     if not r.data:
-        return {"gekoppeld": False}
+        return {"gekoppeld": False, "koppelingen_vol": _vrije <= 0, "vrije_plaatsen": _vrije, "max_koppelingen": _max}
     d = r.data[0]
     return {
         "gekoppeld": True,
         "atleet_naam": d.get("atleet_naam"),
         "laatste_sync": d.get("laatste_sync"),
         "gekoppeld_op": d.get("gekoppeld_op"),
+        "koppelingen_vol": _vrije <= 0,
+        "vrije_plaatsen": _vrije,
+        "max_koppelingen": _max,
     }
 
 @app.delete("/api/strava/koppel")
