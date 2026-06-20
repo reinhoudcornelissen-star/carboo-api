@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -2522,6 +2522,7 @@ async def verwijder_sjabloon(sjabloon_id: str, user=Depends(get_current_user), s
 
 STRAVA_CLIENT_ID = os.getenv("STRAVA_CLIENT_ID", "")
 STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET", "")
+STRAVA_VERIFY_TOKEN = os.getenv("STRAVA_VERIFY_TOKEN", "carboo_strava_verify")
 STRAVA_OAUTH_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
 STRAVA_API_BASE = "https://www.strava.com/api/v3"
@@ -2763,6 +2764,111 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
         "imports": nieuwe_imports,
         "conflicten": conflicten,
     }
+
+
+# ─── STRAVA WEBHOOK (push i.p.v. polling) ────────────────────────────────────
+@app.get("/api/strava/webhook")
+async def strava_webhook_verify(request: Request):
+    """Strava verificatie-handshake. Strava roept dit aan bij het aanmaken van de subscription."""
+    params = request.query_params
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+    if mode == "subscribe" and token == STRAVA_VERIFY_TOKEN:
+        return {"hub.challenge": challenge}
+    raise HTTPException(403, "Verificatie mislukt")
+
+
+async def _strava_webhook_verwerk(event: dict):
+    """Verwerk één Strava webhook-event op de achtergrond (gebruikt supabase_admin)."""
+    try:
+        object_type = event.get("object_type")
+        aspect_type = event.get("aspect_type")
+        object_id = event.get("object_id")
+        owner_id = event.get("owner_id")
+        updates = event.get("updates") or {}
+
+        # ── Deauthorisatie: atleet heeft de app ingetrokken ──
+        if object_type == "athlete" and str(updates.get("authorized", "")).lower() == "false":
+            supabase_admin.table("carboo_strava_koppelingen").delete().eq("strava_athlete_id", owner_id).execute()
+            print(f"[strava-webhook] deauth: koppeling gewist voor athlete {owner_id}")
+            return
+
+        if object_type != "activity":
+            return
+
+        # Vind de koppeling van deze atleet
+        k_r = supabase_admin.table("carboo_strava_koppelingen").select("*").eq("strava_athlete_id", owner_id).execute()
+        if not k_r.data:
+            print(f"[strava-webhook] geen koppeling voor athlete {owner_id}")
+            return
+        k = k_r.data[0]
+        user_id = k["user_id"]
+
+        # ── Activiteit verwijderd ──
+        if aspect_type == "delete":
+            supabase_admin.table("fuelc_trainingen").delete().eq("user_id", user_id).eq("strava_activity_id", object_id).execute()
+            print(f"[strava-webhook] activiteit {object_id} verwijderd voor user {user_id}")
+            return
+
+        # ── Activiteit aangemaakt of bijgewerkt: ophalen + opslaan ──
+        token = await _refresh_token_indien_nodig(k, supabase_admin)
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(
+                f"{STRAVA_API_BASE}/activities/{object_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if r.status_code != 200:
+            print(f"[strava-webhook] activiteit {object_id} ophalen mislukt: {r.status_code}")
+            return
+        a = r.json()
+        sport_type = a.get("sport_type") or a.get("type")
+        if sport_type not in SPORT_ACTIVITY_TYPES:
+            print(f"[strava-webhook] activiteit {object_id} genegeerd (sport_type {sport_type})")
+            return
+        if not a.get("start_date_local") or not a.get("id"):
+            return
+        sport_nl = SPORT_TYPE_NL.get(sport_type, sport_type)
+        datum = a["start_date_local"][:10]
+        sd = a.get("start_date_local") or ""
+        starttijd = sd[11:16] if len(sd) >= 16 else "07:00"
+        duur_min = round((a.get("moving_time") or 0) / 60)
+        kcal = round(a.get("calories") or 0) if a.get("calories") else round(duur_min * 8)
+        naam = a.get("name") or sport_nl
+
+        # Idempotent: bestaat deze activiteit al?
+        bestaand = supabase_admin.table("fuelc_trainingen").select("id").eq("user_id", user_id).eq("strava_activity_id", object_id).execute()
+        payload = {
+            "user_id": user_id, "datum": datum,
+            "sport": sport_nl, "duur_min": duur_min,
+            "kcal_verbranding": kcal, "bron": "strava",
+            "strava_activity_id": object_id,
+            "naam": naam, "starttijd": starttijd,
+        }
+        if bestaand.data:
+            # update (bv. naam/duur gewijzigd in Strava)
+            supabase_admin.table("fuelc_trainingen").update(payload).eq("id", bestaand.data[0]["id"]).execute()
+            print(f"[strava-webhook] activiteit {object_id} bijgewerkt voor user {user_id}")
+        else:
+            supabase_admin.table("fuelc_trainingen").insert(payload).execute()
+            print(f"[strava-webhook] activiteit {object_id} geimporteerd voor user {user_id}")
+    except Exception as _e:
+        import traceback as _tb
+        print(f"[strava-webhook] FOUT: {type(_e).__name__}: {_e}")
+        print(_tb.format_exc())
+
+
+@app.post("/api/strava/webhook")
+async def strava_webhook_event(request: Request, background_tasks: BackgroundTasks):
+    """Ontvangt Strava events. Antwoordt direct met 200 en verwerkt op de achtergrond."""
+    try:
+        event = await request.json()
+    except Exception:
+        return {"status": "ok"}
+    background_tasks.add_task(_strava_webhook_verwerk, event)
+    return {"status": "ok"}
+
+
 
 class StravaConflictResolve(BaseModel):
     strava_activity_id: int
