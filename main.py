@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 import os
 import httpx
+import jwt
 from supabase import create_client, Client
 from mollie.api.client import Client as MollieClient
 
@@ -42,10 +43,32 @@ def get_supabase() -> Client:
         _supabase_singleton = create_client(url, key)
     return _supabase_singleton
 
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
+
+
+class _LokaleUser:
+    """Lichtgewicht user-object met dezelfde .id als het Supabase user-object."""
+    def __init__(self, uid, email=None):
+        self.id = uid
+        self.email = email
+
 async def get_current_user(request: Request, supabase: Client = Depends(get_supabase)):
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         raise HTTPException(401, "Niet ingelogd")
+    # Snel pad: token lokaal decoderen (geen netwerk-call naar Supabase).
+    if SUPABASE_JWT_SECRET:
+        try:
+            payload = jwt.decode(
+                token, SUPABASE_JWT_SECRET,
+                algorithms=["HS256"], audience="authenticated",
+            )
+            uid = payload.get("sub")
+            if uid:
+                return _LokaleUser(uid, payload.get("email"))
+        except Exception:
+            pass  # val terug op de netwerk-check hieronder
+    # Fallback: originele (trage) check, zodat auth nooit volledig breekt.
     try:
         user = supabase.auth.get_user(token)
         return user.user
