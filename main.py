@@ -1441,7 +1441,7 @@ async def get_advies(user=Depends(get_current_user), supabase: Client = Depends(
 
 @app.get("/api/dossier/rapporten")
 async def get_rapporten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    r = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", user.id).is_("verwijderd_op", "null").order("datum", desc=True).execute()
+    r = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", user.id).eq("status", "actief").is_("verwijderd_op", "null").order("datum", desc=True).execute()
     return {"rapporten": r.data or []}
 
 @app.get("/api/dossier/rapporten/{rapport_id}")
@@ -1474,6 +1474,56 @@ async def verwijder_rapport(rapport_id: str, user=Depends(get_current_user), sup
     from datetime import datetime
     supabase.table("carboo_rapporten").update({"verwijderd_op": datetime.now().isoformat()}).eq("user_id", user.id).eq("id", rapport_id).execute()
     return {"ok": True}
+
+
+# === COACH-CONCEPTEN: RACEPLAN ===============================================
+# Coach maakt een raceplan-concept aan ONDER de klant z'n id (status 'concept').
+# Pas na goedkeuring door de klant wordt het 'actief' en verschijnt het in het dossier.
+@app.post("/api/coach/klant/{klant_id}/raceplan-concept")
+async def maak_raceplan_concept(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    from datetime import datetime
+    coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+    html = data.get("html") or ""
+    if not html:
+        raise HTTPException(400, "Geen raceplan-inhoud meegegeven")
+    naam = (data.get("naam") or "Raceplan van je coach").strip()
+    r = supabase.table("carboo_rapporten").insert({
+        "user_id": klant_id,
+        "naam": naam,
+        "type": data.get("type") or "race_html",
+        "html": html,
+        "meta": data.get("meta") or {},
+        "datum": datetime.now().isoformat(),
+        "status": "concept",
+        "door_coach": coach_id,
+    }).execute()
+    return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+
+
+# Klant: lijst van openstaande raceplan-concepten (voor de melding/goedkeuring).
+@app.get("/api/raceplan/concepten")
+async def get_raceplan_concepten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum,door_coach").eq("user_id", user.id).eq("status", "concept").is_("verwijderd_op", "null").order("datum", desc=True).execute()
+    return {"concepten": r.data or []}
+
+
+# Klant: keurt een concept goed -> wordt 'actief' en landt in het dossier.
+@app.post("/api/raceplan/concept/{rapport_id}/goedkeuren")
+async def keur_raceplan_concept_goed(rapport_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_rapporten").select("id").eq("id", rapport_id).eq("user_id", user.id).eq("status", "concept").execute()
+    if not r.data:
+        raise HTTPException(404, "Concept niet gevonden")
+    supabase.table("carboo_rapporten").update({"status": "actief"}).eq("id", rapport_id).eq("user_id", user.id).execute()
+    return {"ok": True}
+
+
+# Klant: weigert een concept -> soft delete, verdwijnt uit de meldingen.
+@app.post("/api/raceplan/concept/{rapport_id}/weigeren")
+async def weiger_raceplan_concept(rapport_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    from datetime import datetime
+    supabase.table("carboo_rapporten").update({"verwijderd_op": datetime.now().isoformat()}).eq("id", rapport_id).eq("user_id", user.id).eq("status", "concept").execute()
+    return {"ok": True}
+# === EINDE COACH-CONCEPTEN: RACEPLAN =========================================
 
 @app.get("/api/fuelc/off-zoek")
 async def off_zoek(q: str):
