@@ -2510,7 +2510,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
         for _c in (_concepten.data or []):
             _naam = _c.get("naam") or "Raceplan"
             add(f"raceplan_concept_{_c['id']}", "🏁", "Raceplan klaargezet door je coach",
-                f"{_naam} staat klaar - bekijk en keur goed.", "/app/raceplannen", "info")
+                f"{_naam} staat klaar - bekijk en keur goed.", "/app/dossier", "info")
     except Exception as e: print(f"notif raceplan concept fout: {e}")
 
     # Sorteer op niveau dan datum
