@@ -2504,6 +2504,15 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
                 "/app/account", "warning")
     except Exception as e: print(f"notif abo fout: {e}")
 
+    # 10. Coach heeft een raceplan-concept klaargezet voor deze klant
+    try:
+        _concepten = supabase.table("carboo_rapporten").select("id,naam").eq("user_id", user.id).eq("status", "concept").is_("verwijderd_op", "null").order("datum", desc=True).limit(5).execute()
+        for _c in (_concepten.data or []):
+            _naam = _c.get("naam") or "Raceplan"
+            add(f"raceplan_concept_{_c['id']}", "🏁", "Raceplan klaargezet door je coach",
+                f"{_naam} staat klaar - bekijk en keur goed.", "/app/raceplannen", "info")
+    except Exception as e: print(f"notif raceplan concept fout: {e}")
+
     # Sorteer op niveau dan datum
     niveau_orde = {"warning": 0, "info": 1}
     notifs.sort(key=lambda n: (niveau_orde.get(n["niveau"], 2), n["aangemaakt"]), reverse=False)
