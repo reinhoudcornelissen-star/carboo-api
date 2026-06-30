@@ -1278,7 +1278,7 @@ def bereken_startdosis(niveau: str, ervaring: str, sport: str) -> dict:
 
 @app.get("/api/gut/protocol")
 async def get_protocol(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    r = supabase.table("carboo_gut_protocol").select("*").eq("user_id", user.id).execute()
+    r = supabase.table("carboo_gut_protocol").select("*").eq("user_id", user.id).eq("status", "actief").execute()
     return {"protocol": r.data[0] if r.data else None}
 
 @app.post("/api/gut/protocol")
@@ -1297,9 +1297,9 @@ async def sla_protocol_op(item: GutProtocol, user=Depends(get_current_user), sup
         "week_huidig": 1,
         "bijgewerkt": "now()",
     }
-    bestaand = supabase.table("carboo_gut_protocol").select("id").eq("user_id", user.id).execute()
+    bestaand = supabase.table("carboo_gut_protocol").select("id").eq("user_id", user.id).eq("status", "actief").execute()
     if bestaand.data:
-        supabase.table("carboo_gut_protocol").update(data).eq("user_id", user.id).execute()
+        supabase.table("carboo_gut_protocol").update(data).eq("user_id", user.id).eq("status", "actief").execute()
     else:
         supabase.table("carboo_gut_protocol").insert(data).execute()
     return {"ok": True, "dosis": dosis}
@@ -1367,6 +1367,58 @@ async def verwijder_sessie(sessie_id: str, user=Depends(get_current_user), supab
     supabase.table("carboo_gut_sessies").delete().eq("user_id", user.id).eq("id", sessie_id).execute()
     return {"ok": True}
 
+
+# === COACH-CONCEPT: TRAIN THE GUT ===========================================
+# Coach stelt het start-protocol op voor de klant (status concept, niet actief).
+@app.post("/api/coach/klant/{klant_id}/gut-concept")
+async def maak_gut_concept(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+    sport = data.get("sport") or "Fietsen"
+    niveau = data.get("niveau") or "Recreant"
+    ervaring = data.get("ervaring") or "Beginner"
+    dosis = bereken_startdosis(niveau, ervaring, sport)
+    supabase.table("carboo_gut_protocol").delete().eq("user_id", klant_id).eq("status", "concept").execute()
+    supabase.table("carboo_gut_protocol").insert({
+        "user_id": klant_id,
+        "sport": sport,
+        "wedstrijd": data.get("wedstrijd") or "",
+        "niveau": niveau,
+        "ervaring": ervaring,
+        "wedstrijd_datum": data.get("wedstrijd_datum") or None,
+        "trainingen_per_week": data.get("trainingen_per_week") or 1,
+        "startdosis_g_uur": dosis["startdosis"],
+        "max_dosis_g_uur": dosis["max_dosis"],
+        "week_huidig": 1,
+        "actief": False,
+        "status": "concept",
+        "door_coach": coach_id,
+        "bijgewerkt": "now()",
+    }).execute()
+    return {"ok": True}
+
+
+@app.get("/api/gut/concept")
+async def get_gut_concept(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_gut_protocol").select("*").eq("user_id", user.id).eq("status", "concept").execute()
+    return {"concept": r.data[0] if r.data else None}
+
+
+@app.post("/api/gut/concept/goedkeuren")
+async def keur_gut_concept_goed(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    c = supabase.table("carboo_gut_protocol").select("id").eq("user_id", user.id).eq("status", "concept").execute()
+    if not c.data:
+        raise HTTPException(404, "Geen concept gevonden")
+    supabase.table("carboo_gut_protocol").delete().eq("user_id", user.id).eq("status", "actief").execute()
+    supabase.table("carboo_gut_protocol").update({"status": "actief", "actief": True, "week_huidig": 1, "bijgewerkt": "now()"}).eq("user_id", user.id).eq("status", "concept").execute()
+    return {"ok": True}
+
+
+@app.post("/api/gut/concept/weigeren")
+async def weiger_gut_concept(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_gut_protocol").delete().eq("user_id", user.id).eq("status", "concept").execute()
+    return {"ok": True}
+# === EINDE COACH-CONCEPT: TRAIN THE GUT =====================================
+
 @app.get("/api/gut/winkelmandje")
 async def get_winkelmandje(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     r = supabase.table("carboo_gut_winkelmandje").select("*").eq("user_id", user.id).order("goedgekeurd_op", desc=True).execute()
@@ -1400,7 +1452,7 @@ async def verwijder_winkelmandje(item_id: str, user=Depends(get_current_user), s
 
 @app.get("/api/gut/advies")
 async def get_advies(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    protocol = supabase.table("carboo_gut_protocol").select("*").eq("user_id", user.id).execute()
+    protocol = supabase.table("carboo_gut_protocol").select("*").eq("user_id", user.id).eq("status", "actief").execute()
     if not protocol.data:
         return {"advies": None}
     p = protocol.data[0]
@@ -2512,6 +2564,14 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             add(f"raceplan_concept_{_c['id']}", "🏁", "Raceplan klaargezet door je coach",
                 f"{_naam} staat klaar - bekijk en keur goed.", "/app/dossier", "info")
     except Exception as e: print(f"notif raceplan concept fout: {e}")
+
+    # 11. Coach heeft een gut-protocol-concept klaargezet
+    try:
+        _gc = supabase.table("carboo_gut_protocol").select("id").eq("user_id", user.id).eq("status", "concept").execute()
+        for _g in (_gc.data or []):
+            add(f"gut_concept_{_g['id']}", "🍽️", "Gut-protocol klaargezet door je coach",
+                "Je coach heeft een Train the Gut-protocol klaargezet - bekijk en keur goed.", "/app/gut", "info")
+    except Exception as e: print(f"notif gut concept fout: {e}")
 
     # Sorteer op niveau dan datum
     niveau_orde = {"warning": 0, "info": 1}
