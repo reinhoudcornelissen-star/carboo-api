@@ -555,7 +555,7 @@ async def genereer_invite(data: dict, user=Depends(get_current_user), supabase: 
         raise HTTPException(403, "Coach account nog niet goedgekeurd door admin")
     # Check actief coach abonnement
     abo = supabase.table("carboo_abonnementen").select("id").eq("user_id", user.id).eq("pakket", "coach").eq("status", "actief").execute()
-    if not abo.data:
+    if not abo.data and not await is_admin(user, supabase):
         raise HTTPException(403, "Geen actief Coach Zone abonnement. Activeer eerst via /app/abonnement")
     coach_id = coach.data[0]["id"]
 
@@ -619,7 +619,7 @@ async def klant_direct_toevoegen(data: dict, user=Depends(get_current_user), sup
     if not coach.data[0].get("verified"):
         raise HTTPException(403, "Coach account nog niet goedgekeurd door admin")
     abo = supabase.table("carboo_abonnementen").select("id").eq("user_id", user.id).eq("pakket", "coach").eq("status", "actief").execute()
-    if not abo.data:
+    if not abo.data and not await is_admin(user, supabase):
         raise HTTPException(403, "Geen actief Coach Zone abonnement. Activeer eerst via /app/abonnement")
     coach_id = coach.data[0]["id"]
 
