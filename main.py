@@ -1257,10 +1257,9 @@ def bereken_startdosis(niveau: str, ervaring: str, sport: str) -> dict:
     mult = {"Recreant": 1.0, "Competitief": 1.3, "Professioneel": 1.6}.get(niveau, 1.0)
     sport_factor = 0.8 if sport in ["Lopen"] else 1.0
     startdosis = max(20, round(basis * sport_factor / 5) * 5)
-    max_map = {"Recreant": 60, "Competitief": 90, "Professioneel": 120}
-    max_dosis = max_map.get(niveau, 60)
-    if sport == "Lopen":
-        max_dosis = round(max_dosis * 0.85 / 5) * 5
+    fiets_max_map = {"Recreant": 60, "Competitief": 90, "Professioneel": 120}
+    loop_max_map = {"Recreant": 60, "Competitief": 90, "Professioneel": 115}
+    max_dosis = (loop_max_map if sport == "Lopen" else fiets_max_map).get(niveau, 60)
     if startdosis < 60:
         ratio = "Geen vereiste — glucose/maltodextrine volstaat"
     elif startdosis < 90:
