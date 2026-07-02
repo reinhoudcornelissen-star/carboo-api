@@ -1339,6 +1339,43 @@ async def coach_sla_gut_protocol(klant_id: str, item: GutProtocol, user=Depends(
     return {"ok": True, "dosis": dosis}
 # === EINDE COACH BEHEERT GUT-PROFIEL ========================================
 
+
+# === TESTPLAN PER WEEK (coach zet opzet klaar, klant logt) ==================
+@app.get("/api/coach/klant/{klant_id}/gut-testplan")
+async def coach_get_gut_testplan(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_gut(user, klant_id, supabase)
+    r = supabase.table("carboo_gut_testplan").select("*").eq("user_id", klant_id).order("week_nummer").execute()
+    return {"testplan": r.data or []}
+
+
+@app.post("/api/coach/klant/{klant_id}/gut-testplan")
+async def coach_sla_gut_testplan(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_gut(user, klant_id, supabase)
+    week = int(data.get("week_nummer") or 0)
+    if week < 1 or week > 6:
+        raise HTTPException(400, "week_nummer moet 1 t/m 6 zijn")
+    rij = {
+        "user_id": klant_id,
+        "week_nummer": week,
+        "momenten": data.get("momenten") or [],
+        "sportdrank": data.get("sportdrank"),
+        "door_coach": coach_id,
+        "bijgewerkt": "now()",
+    }
+    bestaand = supabase.table("carboo_gut_testplan").select("id").eq("user_id", klant_id).eq("week_nummer", week).execute()
+    if bestaand.data:
+        supabase.table("carboo_gut_testplan").update(rij).eq("user_id", klant_id).eq("week_nummer", week).execute()
+    else:
+        supabase.table("carboo_gut_testplan").insert(rij).execute()
+    return {"ok": True}
+
+
+@app.get("/api/gut/testplan")
+async def get_gut_testplan(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_gut_testplan").select("*").eq("user_id", user.id).order("week_nummer").execute()
+    return {"testplan": r.data or []}
+# === EINDE TESTPLAN =========================================================
+
 @app.get("/api/gut/protocol")
 async def get_protocol(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     r = supabase.table("carboo_gut_protocol").select("*").eq("user_id", user.id).eq("status", "actief").execute()
