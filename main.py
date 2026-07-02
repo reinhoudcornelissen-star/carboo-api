@@ -1227,6 +1227,13 @@ class GutProtocol(BaseModel):
     ervaring: str
     wedstrijd_datum: Optional[str] = None
     trainingen_per_week: int = 1
+    gebruikte_producten: Optional[list] = []
+    combineert: Optional[bool] = None
+    combineert_wedstrijd: Optional[bool] = None
+    max_kh_per_uur: Optional[str] = None
+    heeft_last: Optional[bool] = None
+    last_met_welke: Optional[str] = None
+    last_omstandigheden: Optional[str] = None
 
 class GutSessie(BaseModel):
     datum: Optional[str] = None
@@ -1291,6 +1298,13 @@ async def sla_protocol_op(item: GutProtocol, user=Depends(get_current_user), sup
         "ervaring": item.ervaring,
         "wedstrijd_datum": item.wedstrijd_datum,
         "trainingen_per_week": item.trainingen_per_week,
+        "gebruikte_producten": item.gebruikte_producten or [],
+        "combineert": item.combineert,
+        "combineert_wedstrijd": item.combineert_wedstrijd,
+        "max_kh_per_uur": item.max_kh_per_uur,
+        "heeft_last": item.heeft_last,
+        "last_met_welke": item.last_met_welke,
+        "last_omstandigheden": item.last_omstandigheden,
         "startdosis_g_uur": dosis["startdosis"],
         "max_dosis_g_uur": dosis["max_dosis"],
         "week_huidig": 1,
