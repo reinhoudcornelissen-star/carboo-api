@@ -1282,6 +1282,63 @@ def bereken_startdosis(niveau: str, ervaring: str, sport: str) -> dict:
         "wk56_dosis": min(startdosis + 30, max_dosis),
     }
 
+
+# === COACH BEHEERT GUT-PROFIEL VAN KLANT ====================================
+async def _coach_mag_gut(user, klant_id, supabase):
+    # Coach moet gekoppeld zijn EN de klant moet train_gut-toestemming hebben gegeven.
+    await _verifieer_coach_klant(user, klant_id, supabase)
+    rel = supabase.table("carboo_coach_klanten").select("id, carboo_coach_privacy(train_gut)").eq("klant_id", klant_id).eq("status", "actief").execute()
+    toegestaan = False
+    for r in (rel.data or []):
+        priv = r.get("carboo_coach_privacy") or {}
+        if isinstance(priv, list):
+            priv = priv[0] if priv else {}
+        if priv.get("train_gut"):
+            toegestaan = True
+            break
+    if not toegestaan:
+        raise HTTPException(403, "Klant heeft Train the Gut niet gedeeld met de coach")
+
+
+@app.get("/api/coach/klant/{klant_id}/gut-protocol")
+async def coach_get_gut_protocol(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_gut(user, klant_id, supabase)
+    r = supabase.table("carboo_gut_protocol").select("*").eq("user_id", klant_id).eq("status", "actief").execute()
+    return {"protocol": r.data[0] if r.data else None}
+
+
+@app.post("/api/coach/klant/{klant_id}/gut-protocol")
+async def coach_sla_gut_protocol(klant_id: str, item: GutProtocol, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_gut(user, klant_id, supabase)
+    dosis = bereken_startdosis(item.niveau, item.ervaring, item.sport)
+    data = {
+        "user_id": klant_id,
+        "sport": item.sport,
+        "wedstrijd": item.wedstrijd or "",
+        "niveau": item.niveau,
+        "ervaring": item.ervaring,
+        "wedstrijd_datum": item.wedstrijd_datum,
+        "trainingen_per_week": item.trainingen_per_week,
+        "gebruikte_producten": item.gebruikte_producten or [],
+        "combineert": item.combineert,
+        "combineert_wedstrijd": item.combineert_wedstrijd,
+        "max_kh_per_uur": item.max_kh_per_uur,
+        "heeft_last": item.heeft_last,
+        "last_met_welke": item.last_met_welke,
+        "last_omstandigheden": item.last_omstandigheden,
+        "startdosis_g_uur": dosis["startdosis"],
+        "max_dosis_g_uur": dosis["max_dosis"],
+        "bijgewerkt": "now()",
+    }
+    bestaand = supabase.table("carboo_gut_protocol").select("id").eq("user_id", klant_id).eq("status", "actief").execute()
+    if bestaand.data:
+        supabase.table("carboo_gut_protocol").update(data).eq("user_id", klant_id).eq("status", "actief").execute()
+    else:
+        data["week_huidig"] = 1
+        supabase.table("carboo_gut_protocol").insert(data).execute()
+    return {"ok": True, "dosis": dosis}
+# === EINDE COACH BEHEERT GUT-PROFIEL ========================================
+
 @app.get("/api/gut/protocol")
 async def get_protocol(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     r = supabase.table("carboo_gut_protocol").select("*").eq("user_id", user.id).eq("status", "actief").execute()
