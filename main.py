@@ -2431,13 +2431,6 @@ async def maak_challenge(item: ChallengeMaak, user=Depends(get_current_user), su
     }
     r = supabase.table("carboo_challenges").insert(data).execute()
     new_id = r.data[0]["id"] if r.data else None
-    # Auto-toevoeg eigen klanten als coach
-    if coach_id and new_id:
-        klanten = supabase.table("carboo_coach_klanten").select("klant_id").eq("coach_id", coach_id).eq("status", "actief").execute()
-        for k in (klanten.data or []):
-            try:
-                supabase.table("carboo_challenge_deelnemers").insert({"challenge_id": new_id, "user_id": k["klant_id"]}).execute()
-            except: pass
     return {"ok": True, "id": new_id}
 
 @app.delete("/api/challenges/{ch_id}")
