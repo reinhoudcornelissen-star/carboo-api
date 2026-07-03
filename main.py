@@ -1259,14 +1259,31 @@ class WinkelmandjeItem(BaseModel):
     aantal_sessies: Optional[int] = 1
     sport: Optional[str] = ""
 
-def bereken_startdosis(niveau: str, ervaring: str, sport: str) -> dict:
-    basis = {"Beginner": 20, "Gevorderd": 40, "Ervaren": 60}.get(ervaring, 20)
-    mult = {"Recreant": 1.0, "Competitief": 1.3, "Professioneel": 1.6}.get(niveau, 1.0)
-    sport_factor = 0.8 if sport in ["Lopen"] else 1.0
-    startdosis = max(20, round(basis * sport_factor / 5) * 5)
+def bereken_startdosis(niveau: str, ervaring: str, sport: str, max_kh_per_uur=None) -> dict:
+    # Maxdosis (plafond) per niveau en sport.
     fiets_max_map = {"Recreant": 60, "Competitief": 90, "Professioneel": 120}
     loop_max_map = {"Recreant": 60, "Competitief": 90, "Professioneel": 115}
-    max_dosis = (loop_max_map if sport == "Lopen" else fiets_max_map).get(niveau, 60)
+    tri_max_map = {"Recreant": 60, "Competitief": 90, "Professioneel": 110}
+    if sport == "Lopen":
+        max_map = loop_max_map
+    elif sport in ["Triatlon", "Duatlon", "Crossduatlon"]:
+        max_map = tri_max_map
+    else:
+        max_map = fiets_max_map
+    max_dosis = max_map.get(niveau, 60)
+    # Startdosis: gebruik de ingevulde max-inname zonder klachten indien beschikbaar,
+    # anders een schatting op basis van ervaring (zoals voorheen).
+    try:
+        max_ing = int(float(max_kh_per_uur)) if max_kh_per_uur not in (None, "") else 0
+    except (ValueError, TypeError):
+        max_ing = 0
+    if max_ing > 0:
+        startdosis = round(min(max_ing, max_dosis) / 5) * 5
+    else:
+        basis = {"Beginner": 20, "Gevorderd": 40, "Ervaren": 60}.get(ervaring, 20)
+        sport_factor = 0.8 if sport == "Lopen" else 1.0
+        startdosis = round(basis * sport_factor / 5) * 5
+    startdosis = max(20, min(startdosis, max_dosis))
     if startdosis < 60:
         ratio = "Geen vereiste — glucose/maltodextrine volstaat"
     elif startdosis < 90:
@@ -1281,9 +1298,6 @@ def bereken_startdosis(niveau: str, ervaring: str, sport: str) -> dict:
         "wk34_dosis": min(startdosis + 15, max_dosis),
         "wk56_dosis": min(startdosis + 30, max_dosis),
     }
-
-
-# === COACH BEHEERT GUT-PROFIEL VAN KLANT ====================================
 async def _coach_mag_gut(user, klant_id, supabase):
     # Coach moet gekoppeld zijn EN de klant moet train_gut-toestemming hebben gegeven.
     await _verifieer_coach_klant(user, klant_id, supabase)
@@ -1310,7 +1324,7 @@ async def coach_get_gut_protocol(klant_id: str, user=Depends(get_current_user), 
 @app.post("/api/coach/klant/{klant_id}/gut-protocol")
 async def coach_sla_gut_protocol(klant_id: str, item: GutProtocol, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     await _coach_mag_gut(user, klant_id, supabase)
-    dosis = bereken_startdosis(item.niveau, item.ervaring, item.sport)
+    dosis = bereken_startdosis(item.niveau, item.ervaring, item.sport, item.max_kh_per_uur)
     data = {
         "user_id": klant_id,
         "sport": item.sport,
@@ -1383,7 +1397,7 @@ async def get_protocol(user=Depends(get_current_user), supabase: Client = Depend
 
 @app.post("/api/gut/protocol")
 async def sla_protocol_op(item: GutProtocol, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    dosis = bereken_startdosis(item.niveau, item.ervaring, item.sport)
+    dosis = bereken_startdosis(item.niveau, item.ervaring, item.sport, item.max_kh_per_uur)
     data = {
         "user_id": user.id,
         "sport": item.sport,
@@ -1483,7 +1497,7 @@ async def maak_gut_concept(klant_id: str, data: dict, user=Depends(get_current_u
     sport = data.get("sport") or "Fietsen"
     niveau = data.get("niveau") or "Recreant"
     ervaring = data.get("ervaring") or "Beginner"
-    dosis = bereken_startdosis(niveau, ervaring, sport)
+    dosis = bereken_startdosis(niveau, ervaring, sport, data.get("max_kh_per_uur"))
     supabase.table("carboo_gut_protocol").delete().eq("user_id", klant_id).eq("status", "concept").execute()
     supabase.table("carboo_gut_protocol").insert({
         "user_id": klant_id,
@@ -1587,7 +1601,7 @@ async def get_advies(user=Depends(get_current_user), supabase: Client = Depends(
             adviezen.append({"product": naam, "type": "neutraal", "bericht": f"{naam}: {n} sessie(s), gem GI {gem_gi:.1f}/10. Nog meer testen aanbevolen.", "gem_gi": round(gem_gi, 1), "n": n})
     week = p.get("week_huidig", 1)
     startdosis = p.get("startdosis_g_uur", 30)
-    wk_dosis = startdosis if week <= 2 else (startdosis + 15 if week <= 4 else min(startdosis + 30, p.get("max_dosis_g_uur", 90)))
+    wk_dosis = startdosis if week <= 2 else (min(startdosis + 15, p.get("max_dosis_g_uur", 90)) if week <= 4 else min(startdosis + 30, p.get("max_dosis_g_uur", 90)))
     ratio = "geen vereiste" if wk_dosis < 60 else ("2:1 glucose:fructose" if wk_dosis < 90 else "1:0.8 glucose:fructose")
     return {
         "week": week,
