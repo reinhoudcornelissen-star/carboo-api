@@ -2406,9 +2406,7 @@ async def lijst_challenges(user=Depends(get_current_user), supabase: Client = De
     alle = supabase.table("carboo_challenges").select("*").eq("actief", True).order("eind_datum", desc=True).execute()
     zichtbaar = []
     for ch in (alle.data or []):
-        if ch["maker_type"] == "admin":
-            zichtbaar.append(ch)
-        elif coach_id and ch["coach_id"] == coach_id:
+        if coach_id and ch["coach_id"] == coach_id:
             zichtbaar.append(ch)
         elif klant_coach_ids and ch["coach_id"] in klant_coach_ids:
             zichtbaar.append(ch)
@@ -2424,8 +2422,9 @@ async def maak_challenge(item: ChallengeMaak, user=Depends(get_current_user), su
     if item.type not in ["plantaardig", "performance", "vocht", "wedstrijd_tijd", "afstand", "vrije_score"]:
         raise HTTPException(400, "Ongeldig type")
     data = {
-        "maker_id": user.id, "maker_type": "admin" if is_adm else "coach",
-        "coach_id": coach_id if not is_adm else None,
+        # per-coach: coach wint van admin
+        "maker_id": user.id, "maker_type": "coach" if coach_id else "admin",
+        "coach_id": coach_id,
         "titel": item.titel, "omschrijving": item.omschrijving, "type": item.type,
         "hoger_beter": item.hoger_beter, "doel_waarde": item.doel_waarde, "eenheid": item.eenheid,
         "start_datum": item.start_datum, "eind_datum": item.eind_datum,
