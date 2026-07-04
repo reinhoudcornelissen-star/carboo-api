@@ -2303,6 +2303,7 @@ class ChallengeMaak(BaseModel):
     eenheid: Optional[str] = None
     start_datum: str
     eind_datum: str
+    deelnemer_ids: Optional[list] = []
 
 class ChallengeScore(BaseModel):
     manuele_score: float
@@ -2431,6 +2432,15 @@ async def maak_challenge(item: ChallengeMaak, user=Depends(get_current_user), su
     }
     r = supabase.table("carboo_challenges").insert(data).execute()
     new_id = r.data[0]["id"] if r.data else None
+    # Koppel enkel de door de coach gekozen (eigen, actieve) klanten.
+    if coach_id and new_id and item.deelnemer_ids:
+        eigen = supabase.table("carboo_coach_klanten").select("klant_id").eq("coach_id", coach_id).eq("status", "actief").execute()
+        eigen_ids = {k["klant_id"] for k in (eigen.data or [])}
+        for kid in item.deelnemer_ids:
+            if kid in eigen_ids:
+                try:
+                    supabase.table("carboo_challenge_deelnemers").insert({"challenge_id": new_id, "user_id": kid}).execute()
+                except Exception: pass
     return {"ok": True, "id": new_id}
 
 @app.delete("/api/challenges/{ch_id}")
@@ -2441,6 +2451,46 @@ async def verwijder_challenge(ch_id: str, user=Depends(get_current_user), supaba
     else:
         supabase.table("carboo_challenges").update({"actief": False}).eq("id", ch_id).eq("maker_id", user.id).execute()
     return {"ok": True}
+
+
+# === COACH BEHEERT CHALLENGE-DEELNEMERS =====================================
+async def _coach_van_challenge(user, ch_id, supabase):
+    # Geeft coach_id terug als de user de coach (maker) van deze challenge is.
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    coach_id = coach.data[0]["id"]
+    ch = supabase.table("carboo_challenges").select("coach_id").eq("id", ch_id).single().execute()
+    if not ch.data or ch.data.get("coach_id") != coach_id:
+        raise HTTPException(403, "Geen rechten op deze challenge")
+    return coach_id
+
+
+@app.get("/api/challenges/{ch_id}/deelnemers")
+async def challenge_deelnemers(ch_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_van_challenge(user, ch_id, supabase)
+    r = supabase.table("carboo_challenge_deelnemers").select("user_id").eq("challenge_id", ch_id).execute()
+    return {"deelnemer_ids": [d["user_id"] for d in (r.data or [])]}
+
+
+@app.post("/api/challenges/{ch_id}/deelnemer/{klant_id}")
+async def voeg_deelnemer_toe(ch_id: str, klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_van_challenge(user, ch_id, supabase)
+    rel = supabase.table("carboo_coach_klanten").select("id").eq("coach_id", coach_id).eq("klant_id", klant_id).eq("status", "actief").execute()
+    if not rel.data:
+        raise HTTPException(403, "Geen eigen klant")
+    try:
+        supabase.table("carboo_challenge_deelnemers").insert({"challenge_id": ch_id, "user_id": klant_id}).execute()
+    except Exception: pass
+    return {"ok": True}
+
+
+@app.delete("/api/challenges/{ch_id}/deelnemer/{klant_id}")
+async def verwijder_deelnemer(ch_id: str, klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_van_challenge(user, ch_id, supabase)
+    supabase.table("carboo_challenge_deelnemers").delete().eq("challenge_id", ch_id).eq("user_id", klant_id).execute()
+    return {"ok": True}
+# === EINDE COACH BEHEERT CHALLENGE-DEELNEMERS ===============================
 
 @app.post("/api/challenges/{ch_id}/deelnemen")
 async def deelnemen(ch_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
