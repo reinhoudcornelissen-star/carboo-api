@@ -1853,7 +1853,7 @@ async def sla_welzijn_op(welzijn: WelzijnData, user=Depends(get_current_user), s
 
 @app.get("/api/fuelc/bibliotheek")
 async def get_bibliotheek(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    r = supabase.table("fuelc_bibliotheek").select("*").eq("user_id", user.id).order("naam").execute()
+    r = supabase.table("fuelc_bibliotheek").select("*").or_(f"user_id.eq.{user.id},is_globaal.eq.true").order("naam").execute()
     return {"producten": r.data or []}
 
 @app.post("/api/fuelc/bibliotheek")
