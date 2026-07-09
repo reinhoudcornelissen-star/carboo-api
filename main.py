@@ -335,6 +335,18 @@ async def is_admin(user, supabase: Client) -> bool:
     r = supabase.table("carboo_admins").select("user_id").eq("user_id", user.id).execute()
     return bool(r.data)
 
+
+@app.get("/api/debug/db-latency")
+async def db_latency(supabase: Client = Depends(get_supabase)):
+    # Tijdelijk: meet hoe lang 3 simpele queries duren (netwerk naar de DB).
+    import time
+    tijden = []
+    for _ in range(3):
+        t0 = time.perf_counter()
+        supabase.table("carboo_prijzen").select("id").limit(1).execute()
+        tijden.append(round((time.perf_counter() - t0) * 1000))
+    return {"query_ms": tijden, "gemiddeld_ms": round(sum(tijden) / len(tijden))}
+
 @app.get("/api/admin/check")
 async def check_admin(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     return {"is_admin": await is_admin(user, supabase)}
