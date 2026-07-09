@@ -467,26 +467,35 @@ async def admin_verwijder_coach(coach_id: str, user=Depends(get_current_user), s
 
 @app.get("/api/coach/dashboard")
 async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    """Gebundeld: alle coach-zone data in EEN request (1 auth-check, queries parallel).
-    Geeft per onderdeel dezelfde structuur als de losse endpoints, zodat de frontend
-    enkel de bron hoeft te wijzigen. De losse endpoints blijven bestaan voor losse refreshes."""
+    """Gebundeld: alle coach-zone data in EEN request. DASHBOARD-PARALLEL: queries in golven.
+    De synchrone Supabase-client wordt in threads parallel uitgevoerd zodat de netwerklatentie
+    naar de database niet 13x na elkaar telt maar in enkele golven. Zelfde output-structuur."""
+    import asyncio
     uid = user.id
+    loop = asyncio.get_event_loop()
 
-    # Coach-rij 1x ophalen (veel sub-queries hebben dit nodig).
-    coach_data = supabase.table("carboo_coaches").select("*").eq("user_id", uid).execute().data
+    def q_coach():      return supabase.table("carboo_coaches").select("*").eq("user_id", uid).execute().data
+    def q_mijn_coaches():return supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email)").eq("klant_id", uid).eq("status", "actief").execute().data or []
+    def q_opm_klant():  return supabase.table("carboo_coach_opmerkingen").select("*, carboo_coaches(naam), carboo_coach_reacties(*)").eq("klant_id", uid).order("aangemaakt", desc=True).limit(50).execute().data or []
+    def q_aanv():       return supabase.table("carboo_coach_aanvragen").select("*").eq("user_id", uid).execute().data
+    def q_rapporten():  return supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", uid).is_("verwijderd_op", "null").order("datum", desc=True).execute().data or []
+    def q_klant_rels(): return supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", uid).eq("status", "actief").execute().data or []
+    def q_admin_posts():return supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(id,tekst,anoniem,aangemaakt,klant_id)").eq("is_admin_post", True).order("aangemaakt", desc=True).limit(30).execute().data or []
+
+    # GOLF 1 — onafhankelijke queries parallel (incl. is_admin).
+    (coach_data, is_adm, mijn_coaches, opm_klant, _aanv, rapporten, klant_rels, admin_posts) = await asyncio.gather(
+        loop.run_in_executor(None, q_coach),
+        is_admin(user, supabase),
+        loop.run_in_executor(None, q_mijn_coaches),
+        loop.run_in_executor(None, q_opm_klant),
+        loop.run_in_executor(None, q_aanv),
+        loop.run_in_executor(None, q_rapporten),
+        loop.run_in_executor(None, q_klant_rels),
+        loop.run_in_executor(None, q_admin_posts),
+    )
     coach_id = coach_data[0]["id"] if coach_data else None
-    profiel = coach_data[0] if coach_data else None
-
-    # Sequentiele queries via de gedeelde (niet thread-safe) Supabase-client.
-    is_adm = await is_admin(user, supabase)
-
-    mijn_coaches = supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email)").eq("klant_id", uid).eq("status", "actief").execute().data or []
-    opm_klant = supabase.table("carboo_coach_opmerkingen").select("*, carboo_coaches(naam), carboo_coach_reacties(*)").eq("klant_id", uid).order("aangemaakt", desc=True).limit(50).execute().data or []
-    _aanv = supabase.table("carboo_coach_aanvragen").select("*").eq("user_id", uid).execute().data
+    profiel  = coach_data[0] if coach_data else None
     aanvraag = _aanv[0] if _aanv else None
-    rapporten = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", uid).is_("verwijderd_op", "null").order("datum", desc=True).execute().data or []
-    klant_rels = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", uid).eq("status", "actief").execute().data or []
-    admin_posts = supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(id,tekst,anoniem,aangemaakt,klant_id)").eq("is_admin_post", True).order("aangemaakt", desc=True).limit(30).execute().data or []
 
     mijn_klanten = []
     opm_coach_rows = []
@@ -494,8 +503,17 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
     berichten = []
     coach_eigen_posts = []
     if coach_id:
-        mijn_klanten = supabase.table("carboo_coach_klanten").select("*, carboo_coach_privacy(*)").eq("coach_id", coach_id).eq("status", "actief").execute().data or []
-        opm_coach_rows = supabase.table("carboo_coach_opmerkingen").select("*, carboo_coach_reacties(*)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute().data or []
+        def q_mijn_klanten():  return supabase.table("carboo_coach_klanten").select("*, carboo_coach_privacy(*)").eq("coach_id", coach_id).eq("status", "actief").execute().data or []
+        def q_opm_coach():     return supabase.table("carboo_coach_opmerkingen").select("*, carboo_coach_reacties(*)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute().data or []
+        def q_berichten():     return supabase.table("carboo_coach_berichten").select("*, carboo_bericht_gelezen(klant_id)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute().data or []
+        def q_coach_posts():   return supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(*)").eq("coach_id", coach_id).eq("is_admin_post", False).order("aangemaakt", desc=True).limit(30).execute().data or []
+        # GOLF 2 — queries die coach_id nodig hebben, parallel.
+        (mijn_klanten, opm_coach_rows, berichten, coach_eigen_posts) = await asyncio.gather(
+            loop.run_in_executor(None, q_mijn_klanten),
+            loop.run_in_executor(None, q_opm_coach),
+            loop.run_in_executor(None, q_berichten),
+            loop.run_in_executor(None, q_coach_posts),
+        )
         klant_reactie_ids = []
         for o in opm_coach_rows:
             for re_ in (o.get("carboo_coach_reacties") or []):
@@ -505,13 +523,10 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
             gel = supabase.table("carboo_coach_reactie_gelezen").select("reactie_id").eq("coach_id", coach_id).in_("reactie_id", klant_reactie_ids).execute().data or []
             gezien = set(g["reactie_id"] for g in gel)
             ongelezen_coach = sum(1 for rid in klant_reactie_ids if rid not in gezien)
-        berichten = supabase.table("carboo_coach_berichten").select("*, carboo_bericht_gelezen(klant_id)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute().data or []
-        coach_eigen_posts = supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(*)").eq("coach_id", coach_id).eq("is_admin_post", False).order("aangemaakt", desc=True).limit(30).execute().data or []
 
-    # opmerkingen/klant ongelezen tellen (zoals losse endpoint).
     ongelezen_klant = sum(1 for o in opm_klant if not o.get("gelezen"))
 
-    # Prikbord samenstellen (zelfde logica als losse endpoint).
+    # Prikbord samenstellen (zelfde logica).
     posts = list(admin_posts)
     posts.extend(coach_eigen_posts)
     if klant_rels:
@@ -534,7 +549,6 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
         "aanvraag": aanvraag,
         "rapporten": rapporten,
     }
-
 @app.get("/api/coach/profiel")
 async def get_coach_profiel(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     r = supabase.table("carboo_coaches").select("*").eq("user_id", user.id).execute()
