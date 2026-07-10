@@ -483,20 +483,10 @@ async def admin_verwijder_coach(coach_id: str, user=Depends(get_current_user), s
 async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Gebundeld: alle coach-zone data in EEN request. DASHBOARD-PARALLEL: queries in golven.
     De synchrone Supabase-client wordt in threads parallel uitgevoerd zodat de netwerklatentie
-    naar de database niet 13x na elkaar telt maar in enkele golven. Zelfde output-structuur.
-    (TIJDELIJK: per-query timing-logs via [DASH] voor diagnose.)"""
-    import asyncio, time
+    naar de database niet 13x na elkaar telt maar in enkele golven. Zelfde output-structuur."""
+    import asyncio
     uid = user.id
     loop = asyncio.get_event_loop()
-    _t0_total = time.time()
-
-    def _t(naam, fn):
-        def wrapped():
-            _s = time.time()
-            r = fn()
-            print(f"[DASH] {naam}: {(time.time()-_s)*1000:.0f}ms", flush=True)
-            return r
-        return wrapped
 
     def q_coach():      return supabase.table("carboo_coaches").select("*").eq("user_id", uid).execute().data
     def q_mijn_coaches():return supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email)").eq("klant_id", uid).eq("status", "actief").execute().data or []
@@ -506,25 +496,17 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
     def q_klant_rels(): return supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", uid).eq("status","actief").execute().data or []
     def q_admin_posts():return supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(id,tekst,anoniem,aangemaakt,klant_id)").eq("is_admin_post", True).order("aangemaakt", desc=True).limit(30).execute().data or []
 
-    async def _is_admin_timed():
-        _s = time.time()
-        r = await is_admin(user, supabase)
-        print(f"[DASH] is_admin: {(time.time()-_s)*1000:.0f}ms", flush=True)
-        return r
-
     # GOLF 1 — onafhankelijke queries parallel (incl. is_admin).
-    _g1 = time.time()
     (coach_data, is_adm, mijn_coaches, opm_klant, _aanv, rapporten, klant_rels, admin_posts) = await asyncio.gather(
-        loop.run_in_executor(None, _t("q_coach", q_coach)),
-        _is_admin_timed(),
-        loop.run_in_executor(None, _t("q_mijn_coaches", q_mijn_coaches)),
-        loop.run_in_executor(None, _t("q_opm_klant", q_opm_klant)),
-        loop.run_in_executor(None, _t("q_aanv", q_aanv)),
-        loop.run_in_executor(None, _t("q_rapporten", q_rapporten)),
-        loop.run_in_executor(None, _t("q_klant_rels", q_klant_rels)),
-        loop.run_in_executor(None, _t("q_admin_posts", q_admin_posts)),
+        loop.run_in_executor(None, q_coach),
+        is_admin(user, supabase),
+        loop.run_in_executor(None, q_mijn_coaches),
+        loop.run_in_executor(None, q_opm_klant),
+        loop.run_in_executor(None, q_aanv),
+        loop.run_in_executor(None, q_rapporten),
+        loop.run_in_executor(None, q_klant_rels),
+        loop.run_in_executor(None, q_admin_posts),
     )
-    print(f"[DASH] === GOLF 1 totaal: {(time.time()-_g1)*1000:.0f}ms", flush=True)
     coach_id = coach_data[0]["id"] if coach_data else None
     profiel  = coach_data[0] if coach_data else None
     aanvraag = _aanv[0] if _aanv else None
@@ -540,23 +522,19 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
         def q_berichten():     return supabase.table("carboo_coach_berichten").select("*, carboo_bericht_gelezen(klant_id)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute().data or []
         def q_coach_posts():   return supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(*)").eq("coach_id", coach_id).eq("is_admin_post", False).order("aangemaakt", desc=True).limit(30).execute().data or []
         # GOLF 2 — queries die coach_id nodig hebben, parallel.
-        _g2 = time.time()
         (mijn_klanten, opm_coach_rows, berichten, coach_eigen_posts) = await asyncio.gather(
-            loop.run_in_executor(None, _t("q_mijn_klanten", q_mijn_klanten)),
-            loop.run_in_executor(None, _t("q_opm_coach", q_opm_coach)),
-            loop.run_in_executor(None, _t("q_berichten", q_berichten)),
-            loop.run_in_executor(None, _t("q_coach_posts", q_coach_posts)),
+            loop.run_in_executor(None, q_mijn_klanten),
+            loop.run_in_executor(None, q_opm_coach),
+            loop.run_in_executor(None, q_berichten),
+            loop.run_in_executor(None, q_coach_posts),
         )
-        print(f"[DASH] === GOLF 2 totaal: {(time.time()-_g2)*1000:.0f}ms", flush=True)
         klant_reactie_ids = []
         for o in opm_coach_rows:
             for re_ in (o.get("carboo_coach_reacties") or []):
                 if re_.get("auteur_type") == "klant" and re_.get("id"):
                     klant_reactie_ids.append(re_["id"])
         if klant_reactie_ids:
-            _s = time.time()
             gel = supabase.table("carboo_coach_reactie_gelezen").select("reactie_id").eq("coach_id", coach_id).in_("reactie_id", klant_reactie_ids).execute().data or []
-            print(f"[DASH] q_reactie_gelezen (SERIEEL): {(time.time()-_s)*1000:.0f}ms", flush=True)
             gezien = set(g["reactie_id"] for g in gel)
             ongelezen_coach = sum(1 for rid in klant_reactie_ids if rid not in gezien)
 
@@ -567,13 +545,10 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
     posts.extend(coach_eigen_posts)
     if klant_rels:
         coach_ids = [c["coach_id"] for c in klant_rels]
-        _s = time.time()
         _kposts = supabase.table("carboo_coach_prikbord").select("*, carboo_coaches(naam), carboo_prikbord_reacties(id,tekst,anoniem,aangemaakt,klant_id)").in_("coach_id", coach_ids).eq("is_admin_post", False).order("aangemaakt", desc=True).limit(30).execute().data or []
-        print(f"[DASH] q_kposts (SERIEEL): {(time.time()-_s)*1000:.0f}ms", flush=True)
         posts.extend(_kposts)
     posts.sort(key=lambda p: p.get("aangemaakt", ""), reverse=True)
 
-    print(f"[DASH] ==== TOTAAL endpoint: {(time.time()-_t0_total)*1000:.0f}ms", flush=True)
     return {
         "profiel": profiel,
         "klanten": mijn_klanten,
