@@ -41,7 +41,21 @@ def get_supabase() -> Client:
         key = os.getenv("SUPABASE_SERVICE_KEY")
         if not url or not key:
             raise HTTPException(500, "Supabase niet geconfigureerd")
-        _supabase_singleton = create_client(url, key)
+        try:
+            import httpx
+            try:
+                from supabase import ClientOptions
+            except Exception:
+                from supabase.lib.client_options import ClientOptions
+            _pool = httpx.Client(
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=40, keepalive_expiry=30.0),
+                timeout=httpx.Timeout(120.0),
+            )
+            _supabase_singleton = create_client(url, key, ClientOptions(httpx_client=_pool))
+            print("[SUPABASE] client met connection-pool + keep-alive actief", flush=True)
+        except Exception as _e:
+            print(f"[SUPABASE] pool-init mislukt, val terug op standaard client: {_e}", flush=True)
+            _supabase_singleton = create_client(url, key)
     return _supabase_singleton
 
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
