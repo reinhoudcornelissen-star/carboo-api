@@ -2666,9 +2666,9 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
 
     # 2. Gewicht 7 dagen niet — alleen bij doel = gewichtsverlies
     try:
-        prof = supabase.table("fuelc_profiel").select("doel,energie_doel").eq("user_id", user.id).execute()
+        prof = supabase.table("fuelc_profiel").select("doelstelling,energie_doel").eq("user_id", user.id).execute()
         if prof.data:
-            doel = (prof.data[0].get("doel") or "").lower()
+            doel = (prof.data[0].get("doelstelling") or "").lower()
             if "afval" in doel or "verlies" in doel or "gewichtsverlies" in doel:
                 gewicht = supabase.table("fuelc_gewicht").select("datum").eq("user_id", user.id).gte("datum", (today - timedelta(days=8)).isoformat()).execute()
                 if not gewicht.data:
