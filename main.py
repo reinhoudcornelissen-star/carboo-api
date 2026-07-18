@@ -234,6 +234,7 @@ class DagboekItem(BaseModel):
     gi: Optional[int] = None
     categorie: Optional[str] = None
     product_id: Optional[str] = None
+    recept_id: Optional[str] = None
 
 class WelzijnData(BaseModel):
     datum: str
