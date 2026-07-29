@@ -188,6 +188,9 @@ class FuelcProfiel(BaseModel):
     geboortedatum: Optional[str] = None  # YYYY-MM-DD
     gewicht_kg: float
     lengte_cm: int
+    vet_meting_pct: Optional[float] = None        # VETMETING-BACKEND-V1
+    vet_meting_gewicht_kg: Optional[float] = None
+    vet_meting_datum: Optional[str] = None
     activiteit: str
     doelstelling: str
     bmr: Optional[int] = None
