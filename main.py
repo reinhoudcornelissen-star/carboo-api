@@ -256,10 +256,46 @@ class WelzijnData(BaseModel):
     energiek_training: Optional[bool] = None
     gewicht_kg: Optional[float] = None
 
+# MACRO-BACKEND-V1 — vetvrije massa en eiwitdoel worden hier berekend en meegestuurd met
+# het profiel, zodat dagschema, analyses en notificaties allemaal hetzelfde getal gebruiken.
+def bereken_vvm(profiel: dict) -> float:
+    """Vetvrije massa in kg: uit een echte vetmeting als die er is, anders Deurenberg."""
+    try:
+        g = float(profiel.get("gewicht_kg") or 70)
+        l = float(profiel.get("lengte_cm") or 175)
+        lft = float(profiel.get("leeftijd") or 30)
+        man = 1 if (profiel.get("geslacht") or "Man") == "Man" else 0
+        vm_pct = float(profiel.get("vet_meting_pct") or 0)
+        vm_gew = float(profiel.get("vet_meting_gewicht_kg") or 0)
+        if vm_pct > 0 and vm_gew > 0:
+            return round(vm_gew * (1 - vm_pct / 100), 1)
+        bmi = g / ((l / 100) ** 2) if l > 0 else 0
+        vet_pct = (1.20 * bmi + 0.23 * lft - 10.8 * man - 5.4) if bmi > 0 else 20.0
+        return round(g * (1 - vet_pct / 100), 1)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 56.0
+
+def bereken_eiwit_doel(profiel: dict) -> int:
+    """Eiwitdoel in gram. Verankerd in g/kg, dus onafhankelijk van de trainingsbelasting."""
+    try:
+        g = float(profiel.get("gewicht_kg") or 70)
+        doel = profiel.get("doelstelling") or "Gewicht behouden"
+        if doel == "Gewicht verliezen":
+            return int(round(2.5 * bereken_vvm(profiel)))
+        if doel == "Spiermassa opbouwen":
+            return int(round(2.0 * g))
+        return int(round(1.8 * g))
+    except (TypeError, ValueError):
+        return 115
+
 @app.get("/api/fuelc/profiel")
 async def get_fuelc_profiel(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     r = supabase.table("fuelc_profiel").select("*").eq("user_id", user.id).execute()
-    return {"profiel": r.data[0] if r.data else None}
+    prof = r.data[0] if r.data else None
+    if prof:  # MACRO-BACKEND-V1: berekende velden, geen kolommen
+        prof["vvm_kg"] = bereken_vvm(prof)
+        prof["eiwit_doel_g"] = bereken_eiwit_doel(prof)
+    return {"profiel": prof}
 
 @app.post("/api/fuelc/profiel")
 async def sla_fuelc_profiel(profiel: FuelcProfiel, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
