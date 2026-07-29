@@ -2667,6 +2667,87 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
         if key in gelezen_keys: return
         notifs.append({"key": key, "icon": icon, "titel": titel, "tekst": tekst, "link": link, "niveau": niveau, "aangemaakt": datetime.now(timezone.utc).isoformat()})
 
+    # MELDING-TIPS-V2 — aanmoedigen waar het kan. Positief op basis van wat iemand bereikt,
+    # corrigerend pas bij een weekpatroon (een slechte dag is geen bericht waard).
+    # Max 2 meldingen, en hoogstens 1 corrigerende. Doelen komen uit dezelfde bron als het schema.
+    try:
+        _van = (today - timedelta(days=14)).isoformat()
+        _db = supabase.table("fuelc_dagboek").select("datum,kcal,kh_g,eiwit_g,vezels_g,moment").eq("user_id", user.id).gte("datum", _van).execute()
+        _dag = {}
+        for _r in (_db.data or []):
+            _d = str(_r.get("datum") or "")[:10]
+            if not _d: continue
+            _a = _dag.setdefault(_d, {"kcal": 0.0, "kh": 0.0, "eiwit": 0.0, "vezels": 0.0, "n": 0})
+            _a["kcal"] += float(_r.get("kcal") or 0)
+            _a["kh"] += float(_r.get("kh_g") or 0)
+            _a["eiwit"] += float(_r.get("eiwit_g") or 0)
+            _a["vezels"] += float(_r.get("vezels_g") or 0)
+            _a["n"] += 1
+        _geldig = {_d: _a for _d, _a in _dag.items() if _a["n"] >= 3}
+        _pr = supabase.table("fuelc_profiel").select("*").eq("user_id", user.id).execute()
+        _prof = _pr.data[0] if _pr.data else None
+        if _prof and _geldig:
+            _eidoel = bereken_eiwit_doel(_prof)
+            _ebasis = float(_prof.get("energie_doel") or 2000)
+            _vpct = float(_prof.get("vet_doel_pct") or 25)
+            _tr = supabase.table("fuelc_trainingen").select("datum,kcal_verbranding").eq("user_id", user.id).gte("datum", _van).execute()
+            _train = {}
+            for _t in (_tr.data or []):
+                _d = str(_t.get("datum") or "")[:10]
+                _train[_d] = _train.get(_d, 0.0) + float(_t.get("kcal_verbranding") or 0)
+
+            def _khdoel_van(dagstr):
+                _e = _ebasis + _train.get(dagstr, 0.0)
+                _v = max(round(_e * _vpct / 100 / 9), round(_e * 20 / 100 / 9))
+                return max(0, round((_e - _eidoel * 4 - _v * 9) / 4))
+
+            _gist = (today - timedelta(days=1)).isoformat()
+            # reeks: opeenvolgende bijgehouden dagen tot gisteren
+            _reeks = 0
+            _loop = today - timedelta(days=1)
+            while _loop.isoformat() in _geldig:
+                _reeks += 1
+                _loop = _loop - timedelta(days=1)
+            _alle = supabase.table("fuelc_dagboek").select("datum").eq("user_id", user.id).execute()
+            _totaal = len(set(str(_x.get("datum") or "")[:10] for _x in (_alle.data or []) if _x.get("datum")))
+            _wkdagen = [_geldig[_d] for _d in [(today - timedelta(days=_i)).isoformat() for _i in range(1, 8)] if _d in _geldig]
+
+            _pos = []
+            _neg = []
+            if _reeks in (7, 14, 30, 60, 100):
+                _pos.append((f"reeks_{_reeks}", "🔥", f"{_reeks} dagen op rij", f"Je hield je voeding {_reeks} dagen zonder onderbreking bij. Die regelmaat maakt je analyses pas echt bruikbaar."))
+            if _totaal in (25, 50, 100, 250):
+                _pos.append((f"mijlpaal_{_totaal}", "🏅", f"{_totaal} dagen gelogd", f"Je {_totaal}e dag staat erin. Genoeg gegevens om echte patronen te zien in plaats van toeval."))
+            _drie = [_geldig.get((today - timedelta(days=_i)).isoformat()) for _i in (1, 2, 3)]
+            _vier = _geldig.get((today - timedelta(days=4)).isoformat())
+            _vierGoed = bool(_vier) and _vier["eiwit"] >= _eidoel * 0.95
+            # alleen bij het BEREIKEN van drie op rij, anders komt hij elke dag terug
+            if all(_drie) and all(_a["eiwit"] >= _eidoel * 0.95 for _a in _drie) and not _vierGoed:
+                _pos.append((f"eiwit3_{_gist}", "💪", "Je eiwit zit goed", f"Drie dagen op rij rond je doel van {_eidoel}g. Precies wat je spieren nodig hebben om te herstellen."))
+            if _gist in _geldig and _train.get(_gist, 0.0) >= 500 and _geldig[_gist]["kh"] >= _khdoel_van(_gist) * 0.85:
+                _khg = round(_geldig[_gist]["kh"])
+                _pos.append((f"getankt_{_gist}", "🚴", "Goed getankt", f"Je trainde stevig en at {_khg}g koolhydraten. Zo sta je morgen weer fris aan de start."))
+
+            if len(_wkdagen) >= 4:
+                _wk = f"{today.isocalendar()[0]}w{today.isocalendar()[1]}"
+                _gEi = sum(_a["eiwit"] for _a in _wkdagen) / len(_wkdagen)
+                _gKcal = sum(_a["kcal"] for _a in _wkdagen) / len(_wkdagen)
+                _gVez = sum(_a["vezels"] for _a in _wkdagen) / len(_wkdagen)
+                if _gKcal < _ebasis * 0.85:
+                    _neg.append((f"w_energie_{_wk}", "⚡", "Er mag wat energie bij", f"Deze week eet je gemiddeld {round(_ebasis - _gKcal)} kcal onder je doel. Een extra eetmoment per dag brengt je er al dichtbij."))
+                if _gEi < _eidoel * 0.85:
+                    _neg.append((f"w_eiwit_{_wk}", "💪", "Nog eiwit te winnen", f"Je zit deze week gemiddeld {round(_eidoel - _gEi)}g onder je doel van {_eidoel}g. Een portie kwark of skyr per dag sluit dat gat."))
+                if _gVez < 20:
+                    _neg.append((f"w_vezels_{_wk}", "🌿", "Meer vezels binnen bereik", f"Je zit rond {round(_gVez)}g vezels per dag. Volkoren, peulvruchten en een extra portie groenten brengen je richting 30g."))
+
+            for _k2, _ic, _ti, _tk in _pos[:2]:
+                add(_k2, _ic, _ti, _tk, "/app/fueling", "info")
+            if len(_pos) < 2 and _neg:
+                _k2, _ic, _ti, _tk = _neg[0]
+                add(_k2, _ic, _ti, _tk, "/app/fueling", "info")
+    except Exception:
+        pass
+
     # 1. Dagschema 2 dagen niet ingevuld
     try:
         recent = supabase.table("fuelc_dagboek").select("datum").eq("user_id", user.id).gte("datum", (today - timedelta(days=3)).isoformat()).execute()
