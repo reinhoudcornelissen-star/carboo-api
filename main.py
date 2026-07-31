@@ -1185,7 +1185,7 @@ async def sla_klant_zones_op(klant_id: str, data: dict, user=Depends(get_current
     sport = (data.get("sport") or "").strip()
     if not sport:
         raise HTTPException(400, "Sport is verplicht")
-    toegestaan = {"sport", "eenheid"}
+    toegestaan = {"sport", "eenheid", "zones_json"}
     for z in ["z1","z2","z3","z4","z5"]:
         for suf in ["_hs_van","_hs_tot","_tempo_van","_tempo_tot"]:
             toegestaan.add(z + suf)
