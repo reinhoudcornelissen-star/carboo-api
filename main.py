@@ -338,6 +338,20 @@ async def verwijder_training(training_id: str, user=Depends(get_current_user), s
     supabase.table("fuelc_trainingen").delete().eq("id", training_id).eq("user_id", user.id).execute()
     return {"status": "verwijderd"}
 
+# TRAINING-VERPLAATSEN-V1
+@app.patch("/api/fuelc/trainingen/{training_id}")
+async def verplaats_training(training_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Verplaats een training naar een andere datum. Alleen de datum wijzigt;
+    sport, segmenten en kcal blijven staan zoals ze gepland zijn.
+    Filtert op user_id, dus een klant kan alleen zijn eigen trainingen verzetten."""
+    datum = (data.get("datum") or "").strip()
+    if not datum:
+        raise HTTPException(400, "Datum is verplicht")
+    r = supabase.table("fuelc_trainingen").update({"datum": datum}).eq("id", training_id).eq("user_id", user.id).execute()
+    if not r.data:
+        raise HTTPException(404, "Training niet gevonden")
+    return {"status": "verplaatst", "datum": datum}
+
 
 # ─── COACH ZONE ───────────────────────────────────────────────────────────────
 
