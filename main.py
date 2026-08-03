@@ -226,6 +226,7 @@ class DagboekItem(BaseModel):
     vet_g: float
     vezels_g: Optional[float] = 0
     suikers_g: Optional[float] = 0
+    suikers_toegevoegd_g: Optional[float] = None
     verz_g: Optional[float] = 0
     natrium_mg: Optional[float] = 0
     kalium_mg: Optional[float] = 0
