@@ -10,3 +10,5 @@ python-multipart>=0.0.9
 anthropic>=0.40.0
 mollie-api-python==3.7.4
 pyjwt>=2.8.0
+
+pywebpush
