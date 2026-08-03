@@ -1,0 +1,74 @@
+
+======================================================================
+bestand: main.py   (4030 regels)
+======================================================================
+  ...
+ 1934 |     return {"status": "bijgewerkt"}
+ 1935 | 
+ 1936 | @app.get("/api/fuelc/welzijn")
+ 1937 | async def get_welzijn(van: str, tot: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1938 |     r = supabase.table("fuelc_dagboek_welzijn").select("*").eq("user_id", user.id).gte("datum", van).lte("datum", tot).execute()
+ 1939 |     return {"welzijn": r.data or []}
+ 1940 | 
+ 1941 | @app.post("/api/fuelc/welzijn")
+ 1942 | async def sla_welzijn_op(welzijn: WelzijnData, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1943 |     data = welzijn.dict()
+ 1944 |     data["user_id"] = user.id
+ 1945 |     supabase.table("fuelc_dagboek_welzijn").upsert(data, on_conflict="user_id,datum").execute()
+ 1946 |     return {"status": "opgeslagen"}
+ 1947 | 
+ 1948 | @app.get("/api/fuelc/bibliotheek")
+ 1949 | async def get_bibliotheek(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1950 |     r = supabase.table("fuelc_bibliotheek").select("*").or_(f"user_id.eq.{user.id},is_globaal.eq.true").order("naam").execute()
+ 1951 |     return {"producten": r.data or []}
+ 1952 | 
+ 1953 | @app.post("/api/fuelc/bibliotheek")
+ 1954 | async def voeg_product_toe(product: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1955 |     product["user_id"] = user.id
+ 1956 |     supabase.table("fuelc_bibliotheek").insert(product).execute()
+ 1957 |     return {"status": "opgeslagen"}
+ 1958 | 
+ 1959 | @app.patch("/api/fuelc/bibliotheek/{product_id}")
+ 1960 | async def update_product(product_id: str, update: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1961 |     supabase.table("fuelc_bibliotheek").update(update).eq("id", product_id).eq("user_id", user.id).execute()
+ 1962 |     return {"status": "bijgewerkt"}
+ 1963 | 
+ 1964 | @app.delete("/api/fuelc/bibliotheek/{product_id}")
+ 1965 | async def verwijder_product(product_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1966 |     supabase.table("fuelc_dagboek").update({"product_id": None}).eq("product_id", product_id).execute()
+ 1967 |     supabase.table("fuelc_bibliotheek").delete().eq("id", product_id).eq("user_id", user.id).execute()
+ 1968 |     return {"status": "verwijderd"}
+ 1969 | 
+ 1970 | @app.get("/api/fuelc/recepten")
+ 1971 | async def get_recepten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1972 |     r = supabase.table("fuelc_recepten_eigen").select("*").or_(f"user_id.eq.{user.id},is_globaal.eq.true").order("naam").execute()
+ 1973 |     return {"recepten": r.data or []}
+ 1974 | 
+ 1975 | @app.post("/api/fuelc/recepten")
+ 1976 | async def voeg_recept_toe(recept: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1977 |     recept["user_id"] = user.id
+ 1978 |     supabase.table("fuelc_recepten_eigen").insert(recept).execute()
+ 1979 |     return {"status": "opgeslagen"}
+ 1980 | 
+ 1981 | @app.delete("/api/fuelc/recepten/{recept_id}")
+ 1982 | async def verwijder_recept(recept_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1983 |     supabase.table("fuelc_recepten_eigen").delete().eq("id", recept_id).eq("user_id", user.id).execute()
+ 1984 |     return {"status": "verwijderd"}
+ 1985 | 
+ 1986 | @app.get("/api/fuelc/dagmenu")
+ 1987 | async def get_dagmenu(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1988 |     r = supabase.table("fuelc_dagmenu").select("*").or_(f"user_id.eq.{user.id},is_globaal.eq.true").order("naam").execute()
+ 1989 |     return {"menus": r.data or []}
+ 1990 | 
+ 1991 | @app.post("/api/fuelc/dagmenu")
+ 1992 | async def sla_dagmenu_op(menu: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1993 |     menu["user_id"] = user.id
+ 1994 |     supabase.table("fuelc_dagmenu").insert(menu).execute()
+ 1995 |     return {"status": "opgeslagen"}
+ 1996 | 
+ 1997 | @app.delete("/api/fuelc/dagmenu/{menu_id}")
+ 1998 | async def verwijder_dagmenu(menu_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1999 |     supabase.table("fuelc_dagmenu").delete().eq("id", menu_id).eq("user_id", user.id).execute()
+ 2000 |     return {"status": "verwijderd"}
+ 2001 | 
+ 2002 | @app.get("/api/fuelc/zones/{sport}")
