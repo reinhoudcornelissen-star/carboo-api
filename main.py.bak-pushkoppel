@@ -1072,10 +1072,6 @@ async def plaats_opmerking(item: CoachOpmerking, user=Depends(get_current_user),
         "item_type": item.item_type or "algemeen",
         "item_id": item.item_id, "item_label": item.item_label,
     }).execute()
-    # PUSHKOPPEL-V1
-    stuur_push_async(item.klant_id, "Opmerking van je coach",
-                     (item.tekst or "")[:120], url="/app/coach-zone",
-                     tag="coachopmerking", soort="coachopmerking", supabase=supabase)
     return {"ok": True, "id": r.data[0]["id"] if r.data else None}
 
 @app.get("/api/coach/opmerkingen/coach")
@@ -1261,10 +1257,6 @@ async def plan_klant_training(klant_id: str, data: dict, user=Depends(get_curren
         supabase.table("fuelc_trainingen").update(payload).eq("id", training_id).eq("user_id", klant_id).eq("coach_id", coach_id).execute()
         return {"ok": True, "id": training_id}
     ins = supabase.table("fuelc_trainingen").insert(payload).execute()
-    # PUSHKOPPEL-V1 — alleen bij een nieuwe training, niet bij een wijziging
-    stuur_push_async(klant_id, "Nieuwe training gepland",
-                     f"{payload['naam']} op {datum}", url="/app/fueling",
-                     tag="training", soort="training", supabase=supabase)
     return {"ok": True, "id": ins.data[0]["id"] if ins.data else None}
 
 @app.delete("/api/coach/klant/{klant_id}/training/{training_id}")
@@ -1775,10 +1767,6 @@ async def maak_raceplan_concept(klant_id: str, data: dict, user=Depends(get_curr
         "status": "concept",
         "door_coach": coach_id,
     }).execute()
-    # PUSHKOPPEL-V1
-    stuur_push_async(klant_id, "Je raceplan staat klaar",
-                     naam, url="/app/race",
-                     tag="raceplan", soort="raceplan", supabase=supabase)
     return {"ok": True, "id": r.data[0]["id"] if r.data else None}
 
 
@@ -2022,16 +2010,6 @@ def stuur_push(user_id: str, titel: str, tekst: str,
             pass
 
     return verzonden
-
-
-def stuur_push_async(*args, **kwargs):
-    """PUSHKOPPEL-V1 — verstuurt op een aparte thread zodat het verzoek
-    niet hoeft te wachten. Faalt stil, net als stuur_push zelf."""
-    import threading
-    try:
-        threading.Thread(target=stuur_push, args=args, kwargs=kwargs, daemon=True).start()
-    except Exception:
-        pass
 
 
 @app.get("/api/push/sleutel")
@@ -2357,17 +2335,6 @@ async def stuur_bericht(item: CoachBericht, user=Depends(get_current_user), supa
         "tekst": item.tekst,
         "type": item.type or "bericht",
     }).execute()
-    # PUSHKOPPEL-V1 — naar alle actieve klanten van deze coach
-    try:
-        _kl = supabase.table("carboo_coach_klanten").select("klant_id") \
-            .eq("coach_id", coach.data[0]["id"]).eq("status", "actief").limit(500).execute()
-        for _k in (_kl.data or []):
-            if _k.get("klant_id"):
-                stuur_push_async(_k["klant_id"], "Bericht van je coach",
-                                 (item.tekst or "")[:120], url="/app/coach-zone",
-                                 tag="coachbericht", soort="coachbericht", supabase=supabase)
-    except Exception:
-        pass
     return {"ok": True, "id": r.data[0]["id"] if r.data else None}
 
 @app.post("/api/coach/berichten/{bericht_id}/gelezen")

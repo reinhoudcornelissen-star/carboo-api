@@ -1,0 +1,311 @@
+CARBOO — waar ontstaan de meldingen?
+bestand: main.py (4165 regels)
+
+======================================================================
+1) DE MELDINGEN ZELF
+======================================================================
+  ...
+ 2803 | 
+ 2804 | @app.get("/api/notificaties")
+ 2805 | async def get_notificaties(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 2806 |     """Bereken alle actieve notificaties voor de huidige user."""
+ 2807 |     from datetime import date, datetime, timedelta, timezone
+ 2808 |     notifs = []
+ 2809 |     today = date.today()
+ 2810 | 
+ 2811 |     # Welke notif_keys zijn al gelezen?
+ 2812 |     gelezen_r = supabase.table("carboo_notificatie_gelezen").select("notificatie_key").eq("user_id", user.id).execute()
+ 2813 |     gelezen_keys = set(g["notificatie_key"] for g in (gelezen_r.data or []))
+ 2814 | 
+ 2815 |     def add(key: str, icon: str, titel: str, tekst: str, link: str = None, niveau: str = "info"):
+ 2816 |         if key in gelezen_keys: return
+ 2817 |         notifs.append({"key": key, "icon": icon, "titel": titel, "tekst": tekst, "link": link, "niveau": niveau, "aangemaakt": datetime.now(timezone.utc).isoformat()})
+ 2818 | 
+ 2819 |     # MELDING-TIPS-V2 â€” aanmoedigen waar het kan. Positief op basis van wat iemand bereikt,
+ 2820 |     # corrigerend pas bij een weekpatroon (een slechte dag is geen bericht waard).
+ 2821 |     # Max 2 meldingen, en hoogstens 1 corrigerende. Doelen komen uit dezelfde bron als het schema.
+ 2822 |     try:
+ 2823 |         _van = (today - timedelta(days=14)).isoformat()
+ 2824 |         _db = supabase.table("fuelc_dagboek").select("datum,kcal,kh_g,eiwit_g,vezels_g,moment").eq("user_id", user.id).gte("datum", _van).execute()
+ 2825 |         _dag = {}
+ 2826 |         for _r in (_db.data or []):
+ 2827 |             _d = str(_r.get("datum") or "")[:10]
+ 2828 |             if not _d: continue
+ 2829 |             _a = _dag.setdefault(_d, {"kcal": 0.0, "kh": 0.0, "eiwit": 0.0, "vezels": 0.0, "n": 0})
+ 2830 |             _a["kcal"] += float(_r.get("kcal") or 0)
+  ...
+ 3056 | 
+ 3057 | @app.post("/api/notificaties/gelezen")
+ 3058 | async def markeer_notif_gelezen(item: NotifGelezen, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 3059 |     try:
+ 3060 |         supabase.table("carboo_notificatie_gelezen").insert({"user_id": user.id, "notificatie_key": item.key}).execute()
+ 3061 |     except Exception as e:
+ 3062 |         if "duplicate" not in str(e).lower():
+ 3063 |             raise HTTPException(500, str(e))
+ 3064 |     return {"ok": True}
+ 3065 | 
+ 3066 | @app.post("/api/notificaties/alles-gelezen")
+ 3067 | async def markeer_alles_gelezen(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 3068 |     """Markeer ALLE huidige notificaties als gelezen."""
+ 3069 |     huidige = await get_notificaties(user, supabase)
+ 3070 |     for n in huidige["notificaties"]:
+ 3071 |         try:
+ 3072 |             supabase.table("carboo_notificatie_gelezen").insert({"user_id": user.id, "notificatie_key": n["key"]}).execute()
+ 3073 |         except: pass
+ 3074 |     return {"ok": True, "aantal": huidige["ongelezen"]}
+ 3075 | 
+ 3076 | 
+ 3077 | 
+ 3078 | class TurnstileVerify(BaseModel):
+ 3079 |     token: str
+ 3080 | 
+ 3081 | @app.post("/api/auth/turnstile-verify")
+ 3082 | async def turnstile_verify(data: TurnstileVerify):
+ 3083 |     """Verifieer Cloudflare Turnstile token tegen Cloudflare's siteverify endpoint."""
+ 3084 |     secret = os.getenv("TURNSTILE_SECRET_KEY")
+ 3085 |     if not secret:
+ 3086 |         raise HTTPException(500, "Turnstile niet geconfigureerd op server")
+ 3087 |     try:
+ 3088 |         async with httpx.AsyncClient(timeout=10.0) as client:
+ 3089 |             resp = await client.post(
+ 3090 |                 "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+ 3091 |                 data={"secret": secret, "response": data.token},
+ 3092 |             )
+
+======================================================================
+2) ALLE ROUTES DIE IETS AANMAKEN OF WIJZIGEN
+======================================================================
+    140  POST  /api/coach/bereken-kh                           ?
+    146  POST  /api/coach/genereer-rapport                     genereer_rapport
+    155  POST  /api/coach/genereer-pdf                         genereer_pdf
+    171  POST  /api/coach/sla-plan-op                          sla_plan_op
+    303  POST  /api/fuelc/profiel                              sla_fuelc_profiel
+    331  POST  /api/fuelc/trainingen                           voeg_training_toe
+    345  PATCH /api/fuelc/trainingen/{training_id}             verplaats_training
+    432  POST  /api/admin/aanvragen/{aanvraag_id}/keur-goed    keur_goed
+    454  POST  /api/admin/aanvragen/{aanvraag_id}/weiger       weiger_aanvraag
+    470  POST  /api/coach/aanvraag                             dien_aanvraag_in
+    493  POST  /api/admin/coach-aanmaken                       admin_maak_coach
+    524  POST  /api/admin/coach/{coach_id}/activeer            admin_activeer_coach
+    628  POST  /api/coach/profiel                              sla_coach_profiel
+    642  POST  /api/coach/invite/genereer                      genereer_invite
+    702  POST  /api/coach/klant-direct-toevoegen               klant_direct_toevoegen
+    822  POST  /api/coach/invite/{token}/accepteer             accepteer_invite
+    851  POST  /api/coach/invite/{token}/weiger                weiger_invite
+    875  PUT   /api/coach/privacy/{relatie_id}                 update_privacy
+   1060  POST  /api/coach/opmerkingen                          plaats_opmerking
+   1104  PUT   /api/coach/opmerkingen/{opmerking_id}/gelezen   markeer_gelezen
+   1116  POST  /api/coach/reacties                             plaats_reactie
+   1132  POST  /api/coach/reacties/gelezen                     markeer_reacties_gelezen
+   1162  POST  /api/coach/notities                             sla_notitie
+   1198  POST  /api/coach/klant/{klant_id}/zones               sla_klant_zones_op
+   1230  POST  /api/coach/klant/{klant_id}/training            plan_klant_training
+   1281  POST  /api/coach/klant/{klant_id}/voedingstip         plan_klant_voedingstip
+   1421  POST  /api/coach/klant/{klant_id}/gut-protocol        coach_sla_gut_protocol
+   1462  POST  /api/coach/klant/{klant_id}/gut-testplan        coach_sla_gut_testplan
+   1495  POST  /api/gut/protocol                               sla_protocol_op
+   1541  POST  /api/gut/sessies                                sla_sessie_op
+   1591  POST  /api/coach/klant/{klant_id}/gut-concept         maak_gut_concept
+   1624  POST  /api/gut/concept/goedkeuren                     keur_gut_concept_goed
+   1634  POST  /api/gut/concept/weigeren                       weiger_gut_concept
+   1645  POST  /api/gut/winkelmandje                           voeg_toe_winkelmandje
+   1724  POST  /api/dossier/rapporten                          sla_rapport_op
+   1752  POST  /api/coach/klant/{klant_id}/raceplan-concept    maak_raceplan_concept
+   1781  POST  /api/raceplan/concept/{rapport_id}/goedkeuren   keur_raceplan_concept_goed
+   1791  POST  /api/raceplan/concept/{rapport_id}/weigeren     weiger_raceplan_concept
+   1919  POST  /api/fuelc/dagboek                              voeg_dagboek_toe
+   1934  PUT   /api/fuelc/dagboek/{item_id}                    update_dagboek_item
+   2020  POST  /api/push/abonneren                             push_abonneren
+   2031  POST  /api/push/afmelden                              push_afmelden
+   2042  POST  /api/push/vernieuwen                            push_vernieuwen
+   2064  POST  /api/push/test                                  push_test
+   2076  POST  /api/fuelc/welzijn                              sla_welzijn_op
+   2088  POST  /api/fuelc/bibliotheek                          voeg_product_toe
+   2094  PATCH /api/fuelc/bibliotheek/{product_id}             update_product
+   2110  POST  /api/fuelc/recepten                             voeg_recept_toe
+   2126  POST  /api/fuelc/dagmenu                              sla_dagmenu_op
+   2142  POST  /api/fuelc/zones                                sla_zones_op
+   2177  POST  /api/gut/data                                   sla_gut_data
+   2192  POST  /api/gut/logs                                   sla_gut_log
+   2204  POST  /api/gut/schema                                 genereer_gut_schema
+   2221  POST  /api/credits/gebruik                            gebruik_credit
+   2234  POST  /api/fuelc/scan-etiket                          scan_etiket
+   2328  POST  /api/coach/berichten                            stuur_bericht
+   2340  POST  /api/coach/berichten/{bericht_id}/gelezen       markeer_bericht_gelezen
+   2387  POST  /api/coach/prikbord                             maak_post
+   2428  POST  /api/coach/prikbord/reactie                     plaats_prikbord_reactie
+   2467  POST  /api/forum/posts                                maak_forum_post
+   2482  POST  /api/forum/reacties                             plaats_forum_reactie
+   2514  POST  /api/admin/forum/posts/{post_id}/herstel        admin_herstel_post
+   2645  POST  /api/challenges                                 maak_challenge
+   2705  POST  /api/challenges/{ch_id}/deelnemer/{klant_id}    voeg_deelnemer_toe
+   2724  POST  /api/challenges/{ch_id}/deelnemen               deelnemen
+   2734  POST  /api/challenges/{ch_id}/score                   update_score
+   2783  POST  /api/challenges/{ch_id}/badges-toekennen        toekennen_badges
+   3057  POST  /api/notificaties/gelezen                       markeer_notif_gelezen
+   3066  POST  /api/notificaties/alles-gelezen                 markeer_alles_gelezen
+   3081  POST  /api/auth/turnstile-verify                      turnstile_verify
+   3100  POST  /api/auth/trial-starten                         start_trial
+   3192  POST  /api/fuelc/sjablonen                            maak_sjabloon
+   3253  POST  /api/strava/callback                            strava_callback
+   3337  POST  /api/strava/sync                                strava_sync
+   3547  POST  /api/strava/webhook                             strava_webhook_event
+   3569  POST  /api/strava/conflict-oplos                      strava_conflict_oplos
+   3626  POST  /api/garmin/reset-code                          garmin_reset_code
+   3635  POST  /api/garmin/zet-actief                          garmin_zet_actief
+   3811  POST  /api/mollie/betaling-aanmaken                   maak_betaling
+   3871  POST  /api/mollie/webhook                             mollie_webhook
+   3979  PUT   /api/admin/prijzen/{pakket_id}                  update_prijs
+   3999  POST  /api/admin/abonnement-toewijzen                 abonnement_toewijzen
+   4095  POST  /api/fuelc/scan-koelkast                        scan_koelkast
+
+======================================================================
+3) TABELLEN DIE MET MELDINGEN TE MAKEN HEBBEN
+======================================================================
+  ...
+  262 | # MACRO-BACKEND-V1 â€” vetvrije massa en eiwitdoel worden hier berekend en meegestuurd met
+  263 | # het profiel, zodat dagschema, analyses en notificaties allemaal hetzelfde getal gebruiken.
+  264 | def bereken_vvm(profiel: dict) -> float:
+  265 |     """Vetvrije massa in kg: uit een echte vetmeting als die er is, anders Deurenberg."""
+  266 |     try:
+  ...
+  578 |         def q_opm_coach():     return supabase.table("carboo_coach_opmerkingen").select("*, carboo_coach_reacties(*)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute().data or []
+  579 |         def q_berichten():     return supabase.table("carboo_coach_berichten").select("*, carboo_bericht_gelezen(klant_id)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute().data or []
+  580 |         def q_coach_posts():   return supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(*)").eq("coach_id", coach_id).eq("is_admin_post", False).order("aangemaakt", desc=True).limit(30).execute().data or []
+  581 |         # GOLF 2 â€” queries die coach_id nodig hebben, parallel.
+  582 |         (mijn_klanten, opm_coach_rows, berichten, coach_eigen_posts) = await asyncio.gather(
+  ...
+  593 |         if klant_reactie_ids:
+  594 |             gel = supabase.table("carboo_coach_reactie_gelezen").select("reactie_id").eq("coach_id", coach_id).in_("reactie_id", klant_reactie_ids).execute().data or []
+  595 |             gezien = set(g["reactie_id"] for g in gel)
+  596 |             ongelezen_coach = sum(1 for rid in klant_reactie_ids if rid not in gezien)
+  597 | 
+  ...
+ 1092 |     if klant_reactie_ids:
+ 1093 |         gel = supabase.table("carboo_coach_reactie_gelezen").select("reactie_id").eq("coach_id", coach_id).in_("reactie_id", klant_reactie_ids).execute()
+ 1094 |         gezien = set(g["reactie_id"] for g in (gel.data or []))
+ 1095 |         ongelezen = sum(1 for rid in klant_reactie_ids if rid not in gezien)
+ 1096 |     return {"opmerkingen": rows, "ongelezen": ongelezen}
+  ...
+ 1104 | @app.put("/api/coach/opmerkingen/{opmerking_id}/gelezen")
+ 1105 | async def markeer_gelezen(opmerking_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1106 |     supabase.table("carboo_coach_opmerkingen").update({"gelezen": True}).eq("id", opmerking_id).eq("klant_id", user.id).execute()
+ 1107 |     return {"ok": True}
+ 1108 | 
+  ...
+ 1132 | @app.post("/api/coach/reacties/gelezen")
+ 1133 | async def markeer_reacties_gelezen(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1134 |     """Coach markeert alle huidige klant-reacties op zijn opmerkingen als gelezen."""
+ 1135 |     coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+ 1136 |     if not coach.data:
+  ...
+ 1146 |         try:
+ 1147 |             supabase.table("carboo_coach_reactie_gelezen").insert({"reactie_id": rid, "coach_id": coach_id}).execute()
+ 1148 |         except Exception:
+ 1149 |             pass  # bestaat al (unique)
+ 1150 |     return {"ok": True}
+  ...
+ 1772 | 
+ 1773 | # Klant: lijst van openstaande raceplan-concepten (voor de melding/goedkeuring).
+ 1774 | @app.get("/api/raceplan/concepten")
+ 1775 | async def get_raceplan_concepten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1776 |     r = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum,door_coach").eq("user_id", user.id).eq("status", "concept").is_("verwijderd_op", "null").order("datum", desc=True).execute()
+  ...
+ 1789 | 
+ 1790 | # Klant: weigert een concept -> soft delete, verdwijnt uit de meldingen.
+ 1791 | @app.post("/api/raceplan/concept/{rapport_id}/weigeren")
+ 1792 | async def weiger_raceplan_concept(rapport_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1793 |     from datetime import datetime
+  ...
+ 1939 | # ============================================================
+ 1940 | # WEBPUSH-V1 â€” meldingen naar de telefoon
+ 1941 | # ============================================================
+ 1942 | 
+ 1943 | class PushAbonnement(BaseModel):
+  ...
+ 1960 |                soort: str = "algemeen", supabase: Client = None):
+ 1961 |     """Stuurt een melding naar alle actieve toestellen van een gebruiker.
+ 1962 |     Faalt stil: een melding die niet aankomt mag nooit een verzoek breken."""
+ 1963 |     prive, contact = _vapid()
+ 1964 |     if not prive or supabase is None:
+ 1965 |         return 0
+  ...
+ 2065 | async def push_test(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 2066 |     n = stuur_push(user.id, "Carboo", "Meldingen staan aan. Zo ziet het eruit.",
+ 2067 |                    supabase=supabase)
+ 2068 |     return {"verzonden": n}
+ 2069 | 
+  ...
+ 2309 |     coach_id = coach.data[0]["id"]
+ 2310 |     r = supabase.table("carboo_coach_berichten").select("*, carboo_bericht_gelezen(klant_id)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute()
+ 2311 |     return {"berichten": r.data or []}
+ 2312 | 
+ 2313 | @app.get("/api/coach/berichten/inbox")
+  ...
+ 2318 |     coach_ids = [c["coach_id"] for c in coaches.data]
+ 2319 |     r = supabase.table("carboo_coach_berichten").select("*, carboo_coaches(naam), carboo_bericht_gelezen(klant_id)").in_("coach_id", coach_ids).order("aangemaakt", desc=True).limit(50).execute()
+ 2320 |     gelezen_ids = set()
+ 2321 |     for b in (r.data or []):
+ 2322 |         for g in (b.get("carboo_bericht_gelezen") or []):
+ 2323 |             if g.get("klant_id") == user.id:
+ 2324 |                 gelezen_ids.add(b["id"])
+ 2325 |     ongelezen = sum(1 for b in (r.data or []) if b["id"] not in gelezen_ids)
+  ...
+ 2340 | @app.post("/api/coach/berichten/{bericht_id}/gelezen")
+ 2341 | async def markeer_bericht_gelezen(bericht_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 2342 |     try:
+ 2343 |         supabase.table("carboo_bericht_gelezen").insert({"bericht_id": bericht_id, "klant_id": user.id}).execute()
+ 2344 |     except Exception:
+ 2345 |         pass
+ 2346 |     return {"ok": True}
+  ...
+ 2801 | 
+ 2802 | # â”€â”€â”€ NOTIFICATIES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ 2803 | 
+ 2804 | @app.get("/api/notificaties")
+ 2805 | async def get_notificaties(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 2806 |     """Bereken alle actieve notificaties voor de huidige user."""
+ 2807 |     from datetime import date, datetime, timedelta, timezone
+ 2808 |     notifs = []
+ 2809 |     today = date.today()
+  ...
+ 2811 |     # Welke notif_keys zijn al gelezen?
+ 2812 |     gelezen_r = supabase.table("carboo_notificatie_gelezen").select("notificatie_key").eq("user_id", user.id).execute()
+ 2813 |     gelezen_keys = set(g["notificatie_key"] for g in (gelezen_r.data or []))
+ 2814 | 
+ 2815 |     def add(key: str, icon: str, titel: str, tekst: str, link: str = None, niveau: str = "info"):
+ 2816 |         if key in gelezen_keys: return
+  ...
+ 2818 | 
+ 2819 |     # MELDING-TIPS-V2 â€” aanmoedigen waar het kan. Positief op basis van wat iemand bereikt,
+ 2820 |     # corrigerend pas bij een weekpatroon (een slechte dag is geen bericht waard).
+ 2821 |     # Max 2 meldingen, en hoogstens 1 corrigerende. Doelen komen uit dezelfde bron als het schema.
+ 2822 |     try:
+ 2823 |         _van = (today - timedelta(days=14)).isoformat()
+ 2824 |         _db = supabase.table("fuelc_dagboek").select("datum,kcal,kh_g,eiwit_g,vezels_g,moment").eq("user_id", user.id).gte("datum", _van).execute()
+  ...
+ 3051 |     notifs.sort(key=lambda n: (niveau_orde.get(n["niveau"], 2), n["aangemaakt"]), reverse=False)
+ 3052 |     return {"notificaties": notifs, "ongelezen": len(notifs)}
+ 3053 | 
+ 3054 | class NotifGelezen(BaseModel):
+ 3055 |     key: str
+ 3056 | 
+ 3057 | @app.post("/api/notificaties/gelezen")
+ 3058 | async def markeer_notif_gelezen(item: NotifGelezen, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 3059 |     try:
+ 3060 |         supabase.table("carboo_notificatie_gelezen").insert({"user_id": user.id, "notificatie_key": item.key}).execute()
+ 3061 |     except Exception as e:
+ 3062 |         if "duplicate" not in str(e).lower():
+ 3063 |             raise HTTPException(500, str(e))
+  ...
+ 3065 | 
+ 3066 | @app.post("/api/notificaties/alles-gelezen")
+ 3067 | async def markeer_alles_gelezen(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 3068 |     """Markeer ALLE huidige notificaties als gelezen."""
+ 3069 |     huidige = await get_notificaties(user, supabase)
+ 3070 |     for n in huidige["notificaties"]:
+ 3071 |         try:
+ 3072 |             supabase.table("carboo_notificatie_gelezen").insert({"user_id": user.id, "notificatie_key": n["key"]}).execute()
+ 3073 |         except: pass
+ 3074 |     return {"ok": True, "aantal": huidige["ongelezen"]}
+ 3075 | 

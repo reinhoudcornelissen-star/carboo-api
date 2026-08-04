@@ -1,0 +1,100 @@
+CARBOO — bronroutes voor pushmeldingen
+
+======================================================================
+1) COACH STUURT EEN BERICHT
+======================================================================
+ 2328 | @app.post("/api/coach/berichten")
+ 2329 | async def stuur_bericht(item: CoachBericht, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 2330 |     coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+ 2331 |     if not coach.data:
+ 2332 |         raise HTTPException(403, "Geen coach account")
+ 2333 |     r = supabase.table("carboo_coach_berichten").insert({
+ 2334 |         "coach_id": coach.data[0]["id"],
+ 2335 |         "tekst": item.tekst,
+ 2336 |         "type": item.type or "bericht",
+ 2337 |     }).execute()
+ 2338 |     return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+ 2339 | 
+
+======================================================================
+2) COACH PLAATST EEN OPMERKING
+======================================================================
+ 1060 | @app.post("/api/coach/opmerkingen")
+ 1061 | async def plaats_opmerking(item: CoachOpmerking, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1062 |     coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+ 1063 |     if not coach.data:
+ 1064 |         raise HTTPException(403, "Geen coach account")
+ 1065 |     coach_id = coach.data[0]["id"]
+ 1066 |     relatie = supabase.table("carboo_coach_klanten").select("id").eq("id", item.relatie_id).eq("coach_id", coach_id).eq("status", "actief").execute()
+ 1067 |     if not relatie.data:
+ 1068 |         raise HTTPException(403, "Geen actieve relatie met deze klant")
+ 1069 |     r = supabase.table("carboo_coach_opmerkingen").insert({
+ 1070 |         "relatie_id": item.relatie_id, "coach_id": coach_id,
+ 1071 |         "klant_id": item.klant_id, "tekst": item.tekst,
+ 1072 |         "item_type": item.item_type or "algemeen",
+ 1073 |         "item_id": item.item_id, "item_label": item.item_label,
+ 1074 |     }).execute()
+ 1075 |     return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+ 1076 | 
+
+======================================================================
+3) COACH PLANT EEN TRAINING
+======================================================================
+ 1230 | @app.post("/api/coach/klant/{klant_id}/training")
+ 1231 | async def plan_klant_training(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1232 |     """Coach plant een training voor de klant. Slaat op met bron=coach + voedingsvelden."""
+ 1233 |     coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+ 1234 |     datum = (data.get("datum") or "").strip()
+ 1235 |     sport = (data.get("sport") or "").strip()
+ 1236 |     if not datum or not sport:
+ 1237 |         raise HTTPException(400, "Datum en sport zijn verplicht")
+ 1238 |     payload = {
+ 1239 |         "user_id": klant_id,
+ 1240 |         "datum": datum,
+ 1241 |         "sport": sport,
+ 1242 |         "bron": "coach",
+ 1243 |         "coach_id": coach_id,
+ 1244 |         "duur_min": int(data.get("duur_min") or 0),
+ 1245 |         "starttijd": (data.get("starttijd") or "07:00"),
+ 1246 |         "kcal_verbranding": int(data.get("kcal_verbranding") or 0),
+ 1247 |         "zone_verdeling": data.get("zone_verdeling"),
+ 1248 |         "naam": (data.get("naam") or sport),
+ 1249 |         "notitie": (data.get("notitie") or ""),
+ 1250 |         "coach_advies_tekst": (data.get("coach_advies_tekst") or ""),
+ 1251 |         "coach_kh_doel": (int(data["coach_kh_doel"]) if data.get("coach_kh_doel") not in (None, "") else None),
+ 1252 |         "coach_eiwit_doel": (int(data["coach_eiwit_doel"]) if data.get("coach_eiwit_doel") not in (None, "") else None),
+ 1253 |     }
+ 1254 |     training_id = data.get("training_id")
+ 1255 |     if training_id:
+ 1256 |         # Update bestaande coach-training (alleen als die van deze coach is)
+ 1257 |         supabase.table("fuelc_trainingen").update(payload).eq("id", training_id).eq("user_id", klant_id).eq("coach_id", coach_id).execute()
+ 1258 |         return {"ok": True, "id": training_id}
+ 1259 |     ins = supabase.table("fuelc_trainingen").insert(payload).execute()
+ 1260 |     return {"ok": True, "id": ins.data[0]["id"] if ins.data else None}
+ 1261 | 
+
+======================================================================
+4) COACH MAAKT EEN RACEPLAN-CONCEPT
+======================================================================
+ 1752 | @app.post("/api/coach/klant/{klant_id}/raceplan-concept")
+ 1753 | async def maak_raceplan_concept(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+ 1754 |     from datetime import datetime
+ 1755 |     coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+ 1756 |     html = data.get("html") or ""
+ 1757 |     if not html:
+ 1758 |         raise HTTPException(400, "Geen raceplan-inhoud meegegeven")
+ 1759 |     naam = (data.get("naam") or "Raceplan van je coach").strip()
+ 1760 |     r = supabase.table("carboo_rapporten").insert({
+ 1761 |         "user_id": klant_id,
+ 1762 |         "naam": naam,
+ 1763 |         "type": data.get("type") or "race_html",
+ 1764 |         "html": html,
+ 1765 |         "meta": data.get("meta") or {},
+ 1766 |         "datum": datetime.now().isoformat(),
+ 1767 |         "status": "concept",
+ 1768 |         "door_coach": coach_id,
+ 1769 |     }).execute()
+ 1770 |     return {"ok": True, "id": r.data[0]["id"] if r.data else None}
+ 1771 | 
+ 1772 | 
+ 1773 | # Klant: lijst van openstaande raceplan-concepten (voor de melding/goedkeuring).
