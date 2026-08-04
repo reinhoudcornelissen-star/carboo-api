@@ -2183,64 +2183,6 @@ async def racemap_status(user=Depends(get_current_user),
 
 # ─── Publiek, zonder login ──────────────────────────────────────────────
 
-# ── ARTIKELS-PUBLIEK-V1 — de Carboo-posts op het open web ──────────────
-
-def _artikel_veilig(p: dict, kort: bool = True) -> dict:
-    tekst = p.get("tekst") or ""
-    return {
-        "id": p["id"],
-        "titel": p.get("titel") or "",
-        "tekst": (tekst[:240] + "…") if (kort and len(tekst) > 240) else tekst,
-        "type": p.get("type"),
-        "foto_url": p.get("foto_url"),
-        "aangemaakt": p.get("aangemaakt"),
-    }
-
-
-@app.get("/api/publiek/artikels")
-async def publieke_artikels(supabase: Client = Depends(get_supabase)):
-    r = supabase.table("carboo_coach_prikbord") \
-        .select("id,titel,tekst,type,foto_url,aangemaakt") \
-        .eq("is_admin_post", True) \
-        .order("aangemaakt", desc=True).limit(60).execute()
-    return {"artikels": [_artikel_veilig(p) for p in (r.data or [])]}
-
-
-@app.get("/api/publiek/artikel/{artikel_id}")
-async def publiek_artikel(artikel_id: str, supabase: Client = Depends(get_supabase)):
-    r = supabase.table("carboo_coach_prikbord") \
-        .select("id,titel,tekst,type,foto_url,aangemaakt") \
-        .eq("id", artikel_id).eq("is_admin_post", True).execute()
-    if not r.data:
-        raise HTTPException(404, "Artikel niet gevonden")
-    return _artikel_veilig(r.data[0], kort=False)
-
-
-# ── FEED-RECENT-V1 — de laatste racemaps over alle wedstrijden ─────────
-
-@app.get("/api/publiek/racemaps-recent")
-async def publieke_racemaps_recent(supabase: Client = Depends(get_supabase)):
-    r = supabase.table("carboo_racemaps_publiek").select("*") \
-        .is_("verwijderd_op", "null") \
-        .order("gepubliceerd", desc=True).limit(40).execute()
-    rijen = r.data or []
-    if not rijen:
-        return {"racemaps": []}
-
-    ids = [x["rapport_id"] for x in rijen]
-    rap = supabase.table("carboo_rapporten").select("id,meta").in_("id", ids).execute()
-    per_id = {x["id"]: x for x in (rap.data or [])}
-
-    uit = []
-    for x in rijen:
-        if x["rapport_id"] not in per_id:
-            continue
-        veilig = _publiek_veilig(x, per_id[x["rapport_id"]])
-        veilig["slug"] = x["wedstrijd_slug"]
-        uit.append(veilig)
-    return {"racemaps": uit}
-
-
 @app.get("/api/publiek/wedstrijden")
 async def publieke_wedstrijden(supabase: Client = Depends(get_supabase)):
     r = supabase.table("carboo_racemaps_publiek") \
