@@ -3033,7 +3033,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             if _reeks in (7, 14, 30, 60, 100):
                 _pos.append((f"reeks_{_reeks}", "🔥", f"{_reeks} dagen op rij", f"Je hield je voeding {_reeks} dagen zonder onderbreking bij. Die regelmaat maakt je analyses pas echt bruikbaar."))
             if _totaal in (25, 50, 100, 250):
-                _pos.append((f"mijlpaal_{_totaal}", "🏁…", f"{_totaal} dagen gelogd", f"Je {_totaal}e dag staat erin. Genoeg gegevens om echte patronen te zien in plaats van toeval."))
+                _pos.append((f"mijlpaal_{_totaal}", "ðŸ…", f"{_totaal} dagen gelogd", f"Je {_totaal}e dag staat erin. Genoeg gegevens om echte patronen te zien in plaats van toeval."))
             _drie = [_geldig.get((today - timedelta(days=_i)).isoformat()) for _i in (1, 2, 3)]
             _vier = _geldig.get((today - timedelta(days=4)).isoformat())
             _vierGoed = bool(_vier) and _vier["eiwit"] >= _eidoel * 0.95
@@ -3168,7 +3168,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             elif coach_id and ch["coach_id"] == coach_id: relevant = False  # eigen challenge
             elif ch["coach_id"] in klant_coach_ids: relevant = True
             if relevant:
-                add(f"challenge_nieuw_{ch['id']}", "🏁†", "Nieuwe challenge", ch["titel"], "/app/coach-zone", "info")
+                add(f"challenge_nieuw_{ch['id']}", "ðŸ†", "Nieuwe challenge", ch["titel"], "/app/coach-zone", "info")
     except Exception as e: print(f"notif challenge nieuw fout: {e}")
 
     # 8. Challenge eindigt over 3 dagen (waar je in deelneemt)
@@ -3201,7 +3201,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
         _concepten = supabase.table("carboo_rapporten").select("id,naam").eq("user_id", user.id).eq("status", "concept").is_("verwijderd_op", "null").order("datum", desc=True).limit(5).execute()
         for _c in (_concepten.data or []):
             _naam = _c.get("naam") or "Raceplan"
-            add(f"raceplan_concept_{_c['id']}", "🏁", "Raceplan klaargezet door je coach",
+            add(f"raceplan_concept_{_c['id']}", "ðŸ", "Raceplan klaargezet door je coach",
                 f"{_naam} staat klaar - bekijk en keur goed.", "/app/dossier", "info")
     except Exception as e: print(f"notif raceplan concept fout: {e}")
 
@@ -3209,7 +3209,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
     try:
         _gc = supabase.table("carboo_gut_protocol").select("id").eq("user_id", user.id).eq("status", "concept").execute()
         for _g in (_gc.data or []):
-            add(f"gut_concept_{_g['id']}", "🏁½ï¸", "Gut-protocol klaargezet door je coach",
+            add(f"gut_concept_{_g['id']}", "ðŸ½ï¸", "Gut-protocol klaargezet door je coach",
                 "Je coach heeft een Train the Gut-protocol klaargezet - bekijk en keur goed.", "/app/gut", "info")
     except Exception as e: print(f"notif gut concept fout: {e}")
 
@@ -3855,7 +3855,7 @@ async def garmin_actief_plan(pairing_code: str, supabase: Client = Depends(get_s
                     # min binnen het uur
                     min_offset = int(str(it.get("min", "0")).replace("min", "").strip())
                     tijd_sec = (uur_int * 60 + min_offset) * 60
-                    emoji_to_type = {"⚡": "GEL", "🥤": "SD", "🏁Œ": "VAST", "☕": "CAF", "🏁«": "VAST", "🏁ª": "VAST", "🌾": "VAST"}
+                    emoji_to_type = {"⚡": "GEL", "🥤": "SD", "ðŸŒ": "VAST", "☕": "CAF", "ðŸ«": "VAST", "ðŸª": "VAST", "🌾": "VAST"}
                     type_short = emoji_to_type.get(it.get("emoji", ""), "GEL")
                     items_list.append({
                         "tijd": tijd_sec,
