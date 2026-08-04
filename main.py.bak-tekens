@@ -97,7 +97,7 @@ def health():
     return {"status": "ok", "version": "2.0.0"}
 
 
-# ═══ MODULE 1 — RACE NUTRITION COACH ═════════════════════════════════════════
+# â•â•â• MODULE 1 â€” RACE NUTRITION COACH â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class CoachData(BaseModel):
     atleet_naam: str
@@ -182,7 +182,7 @@ async def haal_plan_op(user=Depends(get_current_user), supabase: Client = Depend
     return {"plan": r.data[0]["coach_data"] if r.data else None}
 
 
-# ═══ MODULE 2 — FUELC ════════════════════════════════════════════════════════
+# â•â•â• MODULE 2 â€” FUELC â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class FuelcProfiel(BaseModel):
     geslacht: str
@@ -259,7 +259,7 @@ class WelzijnData(BaseModel):
     energiek_training: Optional[bool] = None
     gewicht_kg: Optional[float] = None
 
-# MACRO-BACKEND-V1 — vetvrije massa en eiwitdoel worden hier berekend en meegestuurd met
+# MACRO-BACKEND-V1 â€” vetvrije massa en eiwitdoel worden hier berekend en meegestuurd met
 # het profiel, zodat dagschema, analyses en notificaties allemaal hetzelfde getal gebruiken.
 def bereken_vvm(profiel: dict) -> float:
     """Vetvrije massa in kg: uit een echte vetmeting als die er is, anders Deurenberg."""
@@ -356,7 +356,7 @@ async def verplaats_training(training_id: str, data: dict, user=Depends(get_curr
     return {"status": "verplaatst", "datum": datum}
 
 
-# ─── COACH ZONE ───────────────────────────────────────────────────────────────
+# â”€â”€â”€ COACH ZONE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 import secrets
 
@@ -394,7 +394,7 @@ class CoachNotitie(BaseModel):
     tekst: str
 
 
-# ─── ADMIN + COACH AANVRAGEN ─────────────────────────────────────────────────
+# â”€â”€â”€ ADMIN + COACH AANVRAGEN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class CoachAanvraag(BaseModel):
     naam: str
@@ -475,7 +475,7 @@ async def dien_aanvraag_in(item: CoachAanvraag, user=Depends(get_current_user), 
         if bestaand_status == "goedgekeurd":
             raise HTTPException(400, "Aanvraag al goedgekeurd")
         if bestaand_status == "pending":
-            raise HTTPException(400, "Aanvraag al ingediend — wacht op goedkeuring")
+            raise HTTPException(400, "Aanvraag al ingediend â€” wacht op goedkeuring")
         supabase.table("carboo_coach_aanvragen").update({
             "naam": item.naam, "email": item.email,
             "bio": item.bio or "", "specialisatie": item.specialisatie or "",
@@ -488,7 +488,7 @@ async def dien_aanvraag_in(item: CoachAanvraag, user=Depends(get_current_user), 
         }).execute()
     return {"ok": True}
 
-# ── Coach profiel ──────────────────────────────────────────────────────────────
+# â”€â”€ Coach profiel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/admin/coach-aanmaken")
 async def admin_maak_coach(item: CoachProfiel, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -553,7 +553,7 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
     def q_klant_rels(): return supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", uid).eq("status","actief").execute().data or []
     def q_admin_posts():return supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(id,tekst,anoniem,aangemaakt,klant_id)").eq("is_admin_post", True).order("aangemaakt", desc=True).limit(30).execute().data or []
 
-    # GOLF 1 — onafhankelijke queries parallel (incl. is_admin).
+    # GOLF 1 â€” onafhankelijke queries parallel (incl. is_admin).
     (coach_data, is_adm, mijn_coaches, opm_klant, _aanv, rapporten, klant_rels, admin_posts) = await asyncio.gather(
         loop.run_in_executor(None, q_coach),
         is_admin(user, supabase),
@@ -578,7 +578,7 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
         def q_opm_coach():     return supabase.table("carboo_coach_opmerkingen").select("*, carboo_coach_reacties(*)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute().data or []
         def q_berichten():     return supabase.table("carboo_coach_berichten").select("*, carboo_bericht_gelezen(klant_id)").eq("coach_id", coach_id).order("aangemaakt", desc=True).limit(50).execute().data or []
         def q_coach_posts():   return supabase.table("carboo_coach_prikbord").select("*, carboo_prikbord_reacties(*)").eq("coach_id", coach_id).eq("is_admin_post", False).order("aangemaakt", desc=True).limit(30).execute().data or []
-        # GOLF 2 — queries die coach_id nodig hebben, parallel.
+        # GOLF 2 â€” queries die coach_id nodig hebben, parallel.
         (mijn_klanten, opm_coach_rows, berichten, coach_eigen_posts) = await asyncio.gather(
             loop.run_in_executor(None, q_mijn_klanten),
             loop.run_in_executor(None, q_opm_coach),
@@ -636,7 +636,7 @@ async def sla_coach_profiel(item: CoachProfiel, user=Depends(get_current_user), 
     profiel = supabase.table("carboo_coaches").select("*").eq("user_id", user.id).execute()
     return {"ok": True, "profiel": profiel.data[0] if profiel.data else None}
 
-# ── Invite systeem ──────────────────────────────────────────────────────────────
+# â”€â”€ Invite systeem â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # NIEUW: koppeling op klant email, betere validatie
 
 @app.post("/api/coach/invite/genereer")
@@ -853,7 +853,7 @@ async def weiger_invite(token: str, supabase: Client = Depends(get_supabase)):
     supabase.table("carboo_coach_klanten").update({"status": "geweigerd", "bijgewerkt": "now()"}).eq("invite_token", token).execute()
     return {"ok": True}
 
-# ── Klant: coaches beheren ─────────────────────────────────────────────────────
+# â”€â”€ Klant: coaches beheren â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/coach/mijn-coaches")
 async def get_mijn_coaches(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -865,7 +865,7 @@ async def verwijder_coach(relatie_id: str, user=Depends(get_current_user), supab
     supabase.table("carboo_coach_klanten").update({"status": "ingetrokken", "bijgewerkt": "now()"}).eq("id", relatie_id).eq("klant_id", user.id).execute()
     return {"ok": True}
 
-# ── Privacy instellingen ────────────────────────────────────────────────────────
+# â”€â”€ Privacy instellingen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/coach/privacy/{relatie_id}")
 async def get_privacy(relatie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -887,7 +887,7 @@ async def update_privacy(relatie_id: str, item: PrivacyInstellingen, user=Depend
     }).eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
     return {"ok": True}
 
-# ── Coach: klanten overzicht ────────────────────────────────────────────────────
+# â”€â”€ Coach: klanten overzicht â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/coach/mijn-klanten")
 async def get_mijn_klanten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -1055,7 +1055,7 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         }
     return result
 
-# ── Opmerkingen ─────────────────────────────────────────────────────────────────
+# â”€â”€ Opmerkingen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/coach/opmerkingen")
 async def plaats_opmerking(item: CoachOpmerking, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -1153,7 +1153,7 @@ async def markeer_reacties_gelezen(user=Depends(get_current_user), supabase: Cli
             pass  # bestaat al (unique)
     return {"ok": True}
 
-# ── Privé notities ─────────────────────────────────────────────────────────────
+# â”€â”€ PrivÃ© notities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/coach/notities/{klant_id}")
 async def get_notities(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -1179,7 +1179,7 @@ async def verwijder_notitie(notitie_id: str, user=Depends(get_current_user), sup
     return {"ok": True}
 
 
-# ─── COACH: ZONES PER KLANT ───────────────────────────────────────────────────
+# â”€â”€â”€ COACH: ZONES PER KLANT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def _verifieer_coach_klant(user, klant_id, supabase):
     """Check dat de ingelogde gebruiker een coach is die aan deze klant gekoppeld is."""
@@ -1222,7 +1222,7 @@ async def sla_klant_zones_op(klant_id: str, data: dict, user=Depends(get_current
     return {"ok": True}
 
 
-# ─── COACH: TRAININGEN PLANNEN VOOR KLANT ─────────────────────────────────────
+# â”€â”€â”€ COACH: TRAININGEN PLANNEN VOOR KLANT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/coach/klant/{klant_id}/trainingen")
 async def get_klant_trainingen(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -1261,7 +1261,7 @@ async def plan_klant_training(klant_id: str, data: dict, user=Depends(get_curren
         supabase.table("fuelc_trainingen").update(payload).eq("id", training_id).eq("user_id", klant_id).eq("coach_id", coach_id).execute()
         return {"ok": True, "id": training_id}
     ins = supabase.table("fuelc_trainingen").insert(payload).execute()
-    # PUSHKOPPEL-V1 � alleen bij een nieuwe training, niet bij een wijziging
+    # PUSHKOPPEL-V1 — alleen bij een nieuwe training, niet bij een wijziging
     stuur_push_async(klant_id, "Nieuwe training gepland",
                      f"{payload['naam']} op {datum}", url="/app/fueling",
                      tag="training", soort="training", supabase=supabase)
@@ -1275,9 +1275,9 @@ async def verwijder_klant_training(klant_id: str, training_id: str, user=Depends
     return {"ok": True}
 
 
-# ─── DOSSIER / RAPPORTEN ──────────────────────────────────────────────────────
+# â”€â”€â”€ DOSSIER / RAPPORTEN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-# ─── COACH: VOEDINGSTIPS PER DAG ──────────────────────────────────────────────
+# â”€â”€â”€ COACH: VOEDINGSTIPS PER DAG â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/coach/klant/{klant_id}/voedingstips")
 async def get_klant_voedingstips(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -1323,7 +1323,7 @@ class RapportItem(BaseModel):
     html: str
     meta: Optional[dict] = {}
 
-# ─── TRAIN THE GUT ───────────────────────────────────────────────────────────
+# â”€â”€â”€ TRAIN THE GUT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class GutProtocol(BaseModel):
     sport: str
@@ -1390,7 +1390,7 @@ def bereken_startdosis(niveau: str, ervaring: str, sport: str, max_kh_per_uur=No
         startdosis = round(basis * sport_factor / 5) * 5
     startdosis = max(20, min(startdosis, max_dosis))
     if startdosis < 60:
-        ratio = "Geen vereiste — glucose/maltodextrine volstaat"
+        ratio = "Geen vereiste â€” glucose/maltodextrine volstaat"
     elif startdosis < 90:
         ratio = "2:1 glucose:fructose"
     else:
@@ -1949,7 +1949,7 @@ async def update_dagboek_item(item_id: str, update: dict, user=Depends(get_curre
     return {"status": "bijgewerkt"}
 
 # ============================================================
-# WEBPUSH-V1 — meldingen naar de telefoon
+# WEBPUSH-V1 â€” meldingen naar de telefoon
 # ============================================================
 
 class PushAbonnement(BaseModel):
@@ -2025,7 +2025,7 @@ def stuur_push(user_id: str, titel: str, tekst: str,
 
 
 def stuur_push_async(*args, **kwargs):
-    """PUSHKOPPEL-V1 � verstuurt op een aparte thread zodat het verzoek
+    """PUSHKOPPEL-V1 — verstuurt op een aparte thread zodat het verzoek
     niet hoeft te wachten. Faalt stil, net als stuur_push zelf."""
     import threading
     try:
@@ -2091,7 +2091,7 @@ async def push_test(user=Depends(get_current_user), supabase: Client = Depends(g
 
 
 # ============================================================
-# RACEMAPS-PUBLIEK-V1 � raceplannen delen op het open web
+# RACEMAPS-PUBLIEK-V1 — raceplannen delen op het open web
 # ============================================================
 
 class RacemapPubliceer(BaseModel):
@@ -2307,7 +2307,7 @@ async def sla_zones_op(data: dict, user=Depends(get_current_user), supabase: Cli
     return {"status": "opgeslagen"}
 
 
-# ═══ MODULE 3 — TRAIN THE GUT ════════════════════════════════════════════════
+# â•â•â• MODULE 3 â€” TRAIN THE GUT â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class GutLog(BaseModel):
     week_nr: int
@@ -2367,7 +2367,7 @@ async def genereer_gut_schema(body: dict, user=Depends(get_current_user)):
         raise HTTPException(500, f"Schema generatie mislukt: {e}")
 
 
-# ═══ CREDITS ════════════════════════════════════════════════════════════════
+# â•â•â• CREDITS â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @app.get("/api/credits")
 async def get_credits(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -2385,7 +2385,7 @@ async def gebruik_credit(omschrijving: str = "Rapport", user=Depends(get_current
     return {"credits": credits - 1}
 
 
-# ═══ ETIKETSCAN ══════════════════════════════════════════════════════════════
+# â•â•â• ETIKETSCAN â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @app.post("/api/fuelc/scan-etiket")
 async def scan_etiket(request: Request, user=Depends(get_current_user)):
@@ -2438,7 +2438,7 @@ async def scan_etiket(request: Request, user=Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(500, f"Claude fout: {type(e).__name__}: {str(e)[:200]}")
 
-# ─── COACH ZONE SOCIAAL ───────────────────────────────────────────────────────
+# â”€â”€â”€ COACH ZONE SOCIAAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class CoachBericht(BaseModel):
     tekst: str
@@ -2455,7 +2455,7 @@ class PrikbordReactie(BaseModel):
     tekst: str
     anoniem: Optional[bool] = False
 
-# ── Groepsberichten ────────────────────────────────────────────────────────────
+# â”€â”€ Groepsberichten â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/coach/berichten")
 async def get_berichten_coach(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -2491,7 +2491,7 @@ async def stuur_bericht(item: CoachBericht, user=Depends(get_current_user), supa
         "tekst": item.tekst,
         "type": item.type or "bericht",
     }).execute()
-    # PUSHKOPPEL-V1 � naar alle actieve klanten van deze coach
+    # PUSHKOPPEL-V1 — naar alle actieve klanten van deze coach
     try:
         _kl = supabase.table("carboo_coach_klanten").select("klant_id") \
             .eq("coach_id", coach.data[0]["id"]).eq("status", "actief").limit(500).execute()
@@ -2519,7 +2519,7 @@ async def verwijder_bericht(bericht_id: str, user=Depends(get_current_user), sup
         supabase.table("carboo_coach_berichten").delete().eq("id", bericht_id).eq("coach_id", coach.data[0]["id"]).execute()
     return {"ok": True}
 
-# ── Prikbord ───────────────────────────────────────────────────────────────────
+# â”€â”€ Prikbord â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/coach/prikbord")
 async def get_prikbord(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -2558,7 +2558,7 @@ async def maak_post(item: PrikbordPost, user=Depends(get_current_user), supabase
     coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
 
     if is_adm:
-        # Admin post — zichtbaar voor iedereen
+        # Admin post â€” zichtbaar voor iedereen
         r = supabase.table("carboo_coach_prikbord").insert({
             "coach_id": coach.data[0]["id"] if coach.data else None,
             "is_admin_post": True,
@@ -2608,7 +2608,7 @@ async def verwijder_prikbord_reactie(reactie_id: str, user=Depends(get_current_u
     return {"ok": True}
 
 
-# ─── FORUM ─────────────────────────────────────────────────────────────────────
+# â”€â”€â”€ FORUM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class ForumPost(BaseModel):
     titel: str
@@ -2688,7 +2688,7 @@ async def admin_herstel_post(post_id: str, user=Depends(get_current_user), supab
 
 
 
-# ─── CHALLENGES + LEADERBOARD ──────────────────────────────────────────────────
+# â”€â”€â”€ CHALLENGES + LEADERBOARD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class ChallengeMaak(BaseModel):
     titel: str
@@ -2966,7 +2966,7 @@ async def toekennen_badges(ch_id: str, user=Depends(get_current_user), supabase:
 
 
 
-# ─── NOTIFICATIES ──────────────────────────────────────────────────────────────
+# â”€â”€â”€ NOTIFICATIES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/notificaties")
 async def get_notificaties(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -2983,7 +2983,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
         if key in gelezen_keys: return
         notifs.append({"key": key, "icon": icon, "titel": titel, "tekst": tekst, "link": link, "niveau": niveau, "aangemaakt": datetime.now(timezone.utc).isoformat()})
 
-    # MELDING-TIPS-V2 — aanmoedigen waar het kan. Positief op basis van wat iemand bereikt,
+    # MELDING-TIPS-V2 â€” aanmoedigen waar het kan. Positief op basis van wat iemand bereikt,
     # corrigerend pas bij een weekpatroon (een slechte dag is geen bericht waard).
     # Max 2 meldingen, en hoogstens 1 corrigerende. Doelen komen uit dezelfde bron als het schema.
     try:
@@ -3031,18 +3031,18 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             _pos = []
             _neg = []
             if _reeks in (7, 14, 30, 60, 100):
-                _pos.append((f"reeks_{_reeks}", "🔥", f"{_reeks} dagen op rij", f"Je hield je voeding {_reeks} dagen zonder onderbreking bij. Die regelmaat maakt je analyses pas echt bruikbaar."))
+                _pos.append((f"reeks_{_reeks}", "ðŸ”¥", f"{_reeks} dagen op rij", f"Je hield je voeding {_reeks} dagen zonder onderbreking bij. Die regelmaat maakt je analyses pas echt bruikbaar."))
             if _totaal in (25, 50, 100, 250):
-                _pos.append((f"mijlpaal_{_totaal}", "🏅", f"{_totaal} dagen gelogd", f"Je {_totaal}e dag staat erin. Genoeg gegevens om echte patronen te zien in plaats van toeval."))
+                _pos.append((f"mijlpaal_{_totaal}", "ðŸ…", f"{_totaal} dagen gelogd", f"Je {_totaal}e dag staat erin. Genoeg gegevens om echte patronen te zien in plaats van toeval."))
             _drie = [_geldig.get((today - timedelta(days=_i)).isoformat()) for _i in (1, 2, 3)]
             _vier = _geldig.get((today - timedelta(days=4)).isoformat())
             _vierGoed = bool(_vier) and _vier["eiwit"] >= _eidoel * 0.95
             # alleen bij het BEREIKEN van drie op rij, anders komt hij elke dag terug
             if all(_drie) and all(_a["eiwit"] >= _eidoel * 0.95 for _a in _drie) and not _vierGoed:
-                _pos.append((f"eiwit3_{_gist}", "💪", "Je eiwit zit goed", f"Drie dagen op rij rond je doel van {_eidoel}g. Precies wat je spieren nodig hebben om te herstellen."))
+                _pos.append((f"eiwit3_{_gist}", "ðŸ’ª", "Je eiwit zit goed", f"Drie dagen op rij rond je doel van {_eidoel}g. Precies wat je spieren nodig hebben om te herstellen."))
             if _gist in _geldig and _train.get(_gist, 0.0) >= 500 and _geldig[_gist]["kh"] >= _khdoel_van(_gist) * 0.85:
                 _khg = round(_geldig[_gist]["kh"])
-                _pos.append((f"getankt_{_gist}", "🚴", "Goed getankt", f"Je trainde stevig en at {_khg}g koolhydraten. Zo sta je morgen weer fris aan de start."))
+                _pos.append((f"getankt_{_gist}", "ðŸš´", "Goed getankt", f"Je trainde stevig en at {_khg}g koolhydraten. Zo sta je morgen weer fris aan de start."))
 
             if len(_wkdagen) >= 4:
                 _wk = f"{today.isocalendar()[0]}w{today.isocalendar()[1]}"
@@ -3050,11 +3050,11 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
                 _gKcal = sum(_a["kcal"] for _a in _wkdagen) / len(_wkdagen)
                 _gVez = sum(_a["vezels"] for _a in _wkdagen) / len(_wkdagen)
                 if _gKcal < _ebasis * 0.85:
-                    _neg.append((f"w_energie_{_wk}", "⚡", "Er mag wat energie bij", f"Deze week eet je gemiddeld {round(_ebasis - _gKcal)} kcal onder je doel. Een extra eetmoment per dag brengt je er al dichtbij."))
+                    _neg.append((f"w_energie_{_wk}", "âš¡", "Er mag wat energie bij", f"Deze week eet je gemiddeld {round(_ebasis - _gKcal)} kcal onder je doel. Een extra eetmoment per dag brengt je er al dichtbij."))
                 if _gEi < _eidoel * 0.85:
-                    _neg.append((f"w_eiwit_{_wk}", "💪", "Nog eiwit te winnen", f"Je zit deze week gemiddeld {round(_eidoel - _gEi)}g onder je doel van {_eidoel}g. Een portie kwark of skyr per dag sluit dat gat."))
+                    _neg.append((f"w_eiwit_{_wk}", "ðŸ’ª", "Nog eiwit te winnen", f"Je zit deze week gemiddeld {round(_eidoel - _gEi)}g onder je doel van {_eidoel}g. Een portie kwark of skyr per dag sluit dat gat."))
                 if _gVez < 20:
-                    _neg.append((f"w_vezels_{_wk}", "🌿", "Meer vezels binnen bereik", f"Je zit rond {round(_gVez)}g vezels per dag. Volkoren, peulvruchten en een extra portie groenten brengen je richting 30g."))
+                    _neg.append((f"w_vezels_{_wk}", "ðŸŒ¿", "Meer vezels binnen bereik", f"Je zit rond {round(_gVez)}g vezels per dag. Volkoren, peulvruchten en een extra portie groenten brengen je richting 30g."))
 
             for _k2, _ic, _ti, _tk in _pos[:2]:
                 add(_k2, _ic, _ti, _tk, "/app/fueling", "info")
@@ -3077,7 +3077,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
         historiek = supabase.table("fuelc_dagboek").select("datum").eq("user_id", user.id).execute()
         totaal_dagen = len(set((it["datum"] or "")[:10] for it in (historiek.data or [])))
         if len(gemiste) >= 2 and totaal_dagen >= 3:
-            add(f"dagschema_inactief_{today.isoformat()}", "📋", "Dagschema bijhouden",
+            add(f"dagschema_inactief_{today.isoformat()}", "ðŸ“‹", "Dagschema bijhouden",
                 f"Je hebt je dagschema {len(gemiste)} dagen niet ingevuld. Houd je voeding bij voor betere inzichten!",
                 "/app/fueling", "warning")
     except Exception as e: print(f"notif dagboek fout: {e}")
@@ -3096,12 +3096,12 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             # (vandaag niet invullen -> morgen overschrijdt de grens -> reset)
             laatste_kans = (verschil == 2 and s_freeze <= 0) or (verschil == 3 and s_freeze > 0)
             if laatste_kans:
-                add(f"streak_gevaar_{today.isoformat()}", "🔥", "Je vlammetje dooft bijna...",
+                add(f"streak_gevaar_{today.isoformat()}", "ðŸ”¥", "Je vlammetje dooft bijna...",
                     f"Vul vandaag je fueling in om je streak van {s_count} dag{'en' if s_count != 1 else ''} brandend te houden!",
                     "/app/fueling", "warning")
     except Exception as e: print(f"notif streak fout: {e}")
 
-    # 2. Gewicht 7 dagen niet — alleen bij doel = gewichtsverlies
+    # 2. Gewicht 7 dagen niet â€” alleen bij doel = gewichtsverlies
     try:
         prof = supabase.table("fuelc_profiel").select("doelstelling,energie_doel").eq("user_id", user.id).execute()
         if prof.data:
@@ -3109,7 +3109,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             if "afval" in doel or "verlies" in doel or "gewichtsverlies" in doel:
                 gewicht = supabase.table("fuelc_gewicht").select("datum").eq("user_id", user.id).gte("datum", (today - timedelta(days=8)).isoformat()).execute()
                 if not gewicht.data:
-                    add(f"gewicht_inactief_{today.isoformat()}", "⚖️", "Gewicht bijhouden",
+                    add(f"gewicht_inactief_{today.isoformat()}", "âš–ï¸", "Gewicht bijhouden",
                         "Je hebt je gewicht 7+ dagen niet ingegeven. Wekelijks wegen helpt bij gewichtsverlies!",
                         "/app/fueling", "warning")
     except Exception as e: print(f"notif gewicht fout: {e}")
@@ -3120,14 +3120,14 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
         # Admin posts voor iedereen
         adm_posts = supabase.table("carboo_coach_prikbord").select("id,titel,aangemaakt,is_admin_post").eq("is_admin_post", True).gte("aangemaakt", sinds).order("aangemaakt", desc=True).limit(5).execute()
         for p in (adm_posts.data or []):
-            add(f"feed_post_{p['id']}", "📣", "Nieuwe Carboo post", p["titel"], "/app/coach-zone", "info")
+            add(f"feed_post_{p['id']}", "ðŸ“£", "Nieuwe Carboo post", p["titel"], "/app/coach-zone", "info")
         # Posts van eigen coaches
         klant_coaches = supabase.table("carboo_coach_klanten").select("coach_id").eq("klant_id", user.id).eq("status", "actief").execute()
         coach_ids = [k["coach_id"] for k in (klant_coaches.data or [])]
         if coach_ids:
             coach_posts = supabase.table("carboo_coach_prikbord").select("id,titel,aangemaakt").in_("coach_id", coach_ids).eq("is_admin_post", False).gte("aangemaakt", sinds).order("aangemaakt", desc=True).limit(5).execute()
             for p in (coach_posts.data or []):
-                add(f"feed_post_{p['id']}", "💬", "Nieuwe post van je coach", p["titel"], "/app/coach-zone", "info")
+                add(f"feed_post_{p['id']}", "ðŸ’¬", "Nieuwe post van je coach", p["titel"], "/app/coach-zone", "info")
     except Exception as e: print(f"notif feed fout: {e}")
 
     # 5. Coach feedback (ongelezen opmerkingen)
@@ -3135,7 +3135,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
         opm = supabase.table("carboo_coach_opmerkingen").select("id,tekst,aangemaakt").eq("klant_id", user.id).eq("gelezen", False).order("aangemaakt", desc=True).limit(5).execute()
         for o in (opm.data or []):
             preview = (o["tekst"] or "")[:60] + ("..." if len(o.get("tekst") or "") > 60 else "")
-            add(f"coach_feedback_{o['id']}", "💬", "Feedback van je coach", preview, "/app/coach-zone", "info")
+            add(f"coach_feedback_{o['id']}", "ðŸ’¬", "Feedback van je coach", preview, "/app/coach-zone", "info")
     except Exception as e: print(f"notif feedback fout: {e}")
 
     # 6. Forum reactie op eigen post
@@ -3148,7 +3148,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             reacties = supabase.table("carboo_forum_reacties").select("id,tekst,auteur_naam,post_id,aangemaakt").in_("post_id", post_ids).neq("auteur_id", user.id).gte("aangemaakt", sinds).order("aangemaakt", desc=True).limit(5).execute()
             post_titels = {p["id"]: p["titel"] for p in eigen.data}
             for r in (reacties.data or []):
-                add(f"forum_reactie_{r['id']}", "💬", f"Nieuwe reactie van {r.get('auteur_naam', 'iemand')}",
+                add(f"forum_reactie_{r['id']}", "ðŸ’¬", f"Nieuwe reactie van {r.get('auteur_naam', 'iemand')}",
                     f"Op '{post_titels.get(r['post_id'], 'je post')}'", "/app/coach-zone", "info")
     except Exception as e: print(f"notif forum fout: {e}")
 
@@ -3168,7 +3168,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             elif coach_id and ch["coach_id"] == coach_id: relevant = False  # eigen challenge
             elif ch["coach_id"] in klant_coach_ids: relevant = True
             if relevant:
-                add(f"challenge_nieuw_{ch['id']}", "🏆", "Nieuwe challenge", ch["titel"], "/app/coach-zone", "info")
+                add(f"challenge_nieuw_{ch['id']}", "ðŸ†", "Nieuwe challenge", ch["titel"], "/app/coach-zone", "info")
     except Exception as e: print(f"notif challenge nieuw fout: {e}")
 
     # 8. Challenge eindigt over 3 dagen (waar je in deelneemt)
@@ -3181,7 +3181,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             eindigend = supabase.table("carboo_challenges").select("id,titel,eind_datum").in_("id", ch_ids).eq("actief", True).gte("eind_datum", eind1).lte("eind_datum", eind3).execute()
             for ch in (eindigend.data or []):
                 dagen = (date.fromisoformat(ch["eind_datum"]) - today).days
-                add(f"challenge_eind_{ch['id']}_{today.isoformat()}", "⏰", "Challenge bijna afgelopen",
+                add(f"challenge_eind_{ch['id']}_{today.isoformat()}", "â°", "Challenge bijna afgelopen",
                     f"'{ch['titel']}' eindigt over {dagen} dag{'en' if dagen != 1 else ''}!", "/app/coach-zone", "warning")
     except Exception as e: print(f"notif challenge eind fout: {e}")
 
@@ -3191,7 +3191,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
         abo = supabase.table("carboo_abonnementen").select("id,pakket,verval_datum").eq("user_id", user.id).eq("status", "actief").lte("verval_datum", vervalt).gte("verval_datum", today.isoformat()).execute()
         for a in (abo.data or []):
             dagen = (date.fromisoformat(a["verval_datum"]) - today).days
-            add(f"abo_vervalt_{a['id']}_{today.isoformat()}", "⚠️", "Abonnement verloopt",
+            add(f"abo_vervalt_{a['id']}_{today.isoformat()}", "âš ï¸", "Abonnement verloopt",
                 f"Je '{a['pakket']}' abonnement vervalt over {dagen} dag{'en' if dagen != 1 else ''}",
                 "/app/account", "warning")
     except Exception as e: print(f"notif abo fout: {e}")
@@ -3201,7 +3201,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
         _concepten = supabase.table("carboo_rapporten").select("id,naam").eq("user_id", user.id).eq("status", "concept").is_("verwijderd_op", "null").order("datum", desc=True).limit(5).execute()
         for _c in (_concepten.data or []):
             _naam = _c.get("naam") or "Raceplan"
-            add(f"raceplan_concept_{_c['id']}", "🏁", "Raceplan klaargezet door je coach",
+            add(f"raceplan_concept_{_c['id']}", "ðŸ", "Raceplan klaargezet door je coach",
                 f"{_naam} staat klaar - bekijk en keur goed.", "/app/dossier", "info")
     except Exception as e: print(f"notif raceplan concept fout: {e}")
 
@@ -3209,7 +3209,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
     try:
         _gc = supabase.table("carboo_gut_protocol").select("id").eq("user_id", user.id).eq("status", "concept").execute()
         for _g in (_gc.data or []):
-            add(f"gut_concept_{_g['id']}", "🍽️", "Gut-protocol klaargezet door je coach",
+            add(f"gut_concept_{_g['id']}", "ðŸ½ï¸", "Gut-protocol klaargezet door je coach",
                 "Je coach heeft een Train the Gut-protocol klaargezet - bekijk en keur goed.", "/app/gut", "info")
     except Exception as e: print(f"notif gut concept fout: {e}")
 
@@ -3266,7 +3266,7 @@ async def turnstile_verify(data: TurnstileVerify):
 
 @app.post("/api/auth/trial-starten")
 async def start_trial(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    """Geeft een 7-daags 'alles' trial abo aan een nieuwe user. Eénmalig per user_id."""
+    """Geeft een 7-daags 'alles' trial abo aan een nieuwe user. EÃ©nmalig per user_id."""
     from datetime import date, timedelta
     # Check of user al ooit een abo had
     bestaand = supabase.table("carboo_abonnementen").select("id").eq("user_id", user.id).execute()
@@ -3286,7 +3286,7 @@ async def start_trial(user=Depends(get_current_user), supabase: Client = Depends
 
 
 
-# ─── MOLLIE BETALINGEN ────────────────────────────────────────────────────────
+# â”€â”€â”€ MOLLIE BETALINGEN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 # Extra credits pakketten
 EXTRA_CREDITS = {
@@ -3345,7 +3345,7 @@ async def mijn_abonnement(user=Depends(get_current_user), supabase: Client = Dep
 
 
 
-# ─── SJABLONEN ─────────────────────────────────────────────────────────────────
+# â”€â”€â”€ SJABLONEN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class SjabloonMaak(BaseModel):
     naam: str
@@ -3371,7 +3371,7 @@ async def verwijder_sjabloon(sjabloon_id: str, user=Depends(get_current_user), s
 
 
 
-# ─── STRAVA INTEGRATIE ─────────────────────────────────────────────────────────
+# â”€â”€â”€ STRAVA INTEGRATIE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 STRAVA_CLIENT_ID = os.getenv("STRAVA_CLIENT_ID", "")
 STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET", "")
@@ -3619,7 +3619,7 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
     }
 
 
-# ─── STRAVA WEBHOOK (push i.p.v. polling) ────────────────────────────────────
+# â”€â”€â”€ STRAVA WEBHOOK (push i.p.v. polling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @app.get("/api/strava/webhook")
 async def strava_webhook_verify(request: Request):
     """Strava verificatie-handshake. Strava roept dit aan bij het aanmaken van de subscription."""
@@ -3633,7 +3633,7 @@ async def strava_webhook_verify(request: Request):
 
 
 async def _strava_webhook_verwerk(event: dict):
-    """Verwerk één Strava webhook-event op de achtergrond (gebruikt supabase_admin)."""
+    """Verwerk Ã©Ã©n Strava webhook-event op de achtergrond (gebruikt supabase_admin)."""
     try:
         object_type = event.get("object_type")
         aspect_type = event.get("aspect_type")
@@ -3641,7 +3641,7 @@ async def _strava_webhook_verwerk(event: dict):
         owner_id = event.get("owner_id")
         updates = event.get("updates") or {}
 
-        # ── Deauthorisatie: atleet heeft de app ingetrokken ──
+        # â”€â”€ Deauthorisatie: atleet heeft de app ingetrokken â”€â”€
         if object_type == "athlete" and str(updates.get("authorized", "")).lower() == "false":
             supabase_admin.table("carboo_strava_koppelingen").delete().eq("strava_athlete_id", owner_id).execute()
             print(f"[strava-webhook] deauth: koppeling gewist voor athlete {owner_id}")
@@ -3658,13 +3658,13 @@ async def _strava_webhook_verwerk(event: dict):
         k = k_r.data[0]
         user_id = k["user_id"]
 
-        # ── Activiteit verwijderd ──
+        # â”€â”€ Activiteit verwijderd â”€â”€
         if aspect_type == "delete":
             supabase_admin.table("fuelc_trainingen").delete().eq("user_id", user_id).eq("strava_activity_id", object_id).execute()
             print(f"[strava-webhook] activiteit {object_id} verwijderd voor user {user_id}")
             return
 
-        # ── Activiteit aangemaakt of bijgewerkt: ophalen + opslaan ──
+        # â”€â”€ Activiteit aangemaakt of bijgewerkt: ophalen + opslaan â”€â”€
         token = await _refresh_token_indien_nodig(k, supabase_admin)
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.get(
@@ -3754,12 +3754,12 @@ async def strava_conflict_oplos(item: StravaConflictResolve, user=Depends(get_cu
             "strava_activity_id": item.strava_activity_id,
             "naam": item.naam,
         }).execute()
-        return {"ok": True, "actie": "Strava geïmporteerd"}
+        return {"ok": True, "actie": "Strava geÃ¯mporteerd"}
     except Exception as e:
         raise HTTPException(500, f"Import fout: {str(e)}")
 
 
-# ─── GARMIN INTEGRATIE ─────────────────────────────────────────────────────────
+# â”€â”€â”€ GARMIN INTEGRATIE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 import random
 
@@ -3855,7 +3855,7 @@ async def garmin_actief_plan(pairing_code: str, supabase: Client = Depends(get_s
                     # min binnen het uur
                     min_offset = int(str(it.get("min", "0")).replace("min", "").strip())
                     tijd_sec = (uur_int * 60 + min_offset) * 60
-                    emoji_to_type = {"⚡": "GEL", "🥤": "SD", "🍌": "VAST", "☕": "CAF", "🍫": "VAST", "🍪": "VAST", "🌾": "VAST"}
+                    emoji_to_type = {"âš¡": "GEL", "ðŸ¥¤": "SD", "ðŸŒ": "VAST", "â˜•": "CAF", "ðŸ«": "VAST", "ðŸª": "VAST", "ðŸŒ¾": "VAST"}
                     type_short = emoji_to_type.get(it.get("emoji", ""), "GEL")
                     items_list.append({
                         "tijd": tijd_sec,
@@ -3912,9 +3912,9 @@ async def admin_verborgen_posts(user=Depends(get_current_user), supabase: Client
 
 
 
-# ═══════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # MOLLIE BETALINGEN
-# ═══════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 import hmac
 import hashlib
@@ -3937,7 +3937,7 @@ PAKKETTEN = {
     "fueling": {"label": "Fueling",            "module": "fueling"},
     "race":    {"label": "Race Nutrition Plan", "module": "race"},
     "gut":     {"label": "Train the Gut",       "module": "gut"},
-    "alles":   {"label": "Alles-in-één",        "module": "alles"},
+    "alles":   {"label": "Alles-in-Ã©Ã©n",        "module": "alles"},
     "coach":   {"label": "Coach Zone",          "module": "coach"},
 }
 
@@ -4010,7 +4010,7 @@ async def maak_betaling(item: BetalingRequest, user=Depends(get_current_user)):
     customer_id = await _get_of_maak_mollie_klant(user.id, user.email, user.email)
     payload = {
         "amount": {"currency": "EUR", "value": f"{prijs:.2f}"},
-        "description": f"Carboo — {pakket['label']} (maandelijks)",
+        "description": f"Carboo â€” {pakket['label']} (maandelijks)",
         "sequenceType": "first",
         "customerId": customer_id,
         "redirectUrl": f"{APP_URL}/app/abonnement?betaling=ok&pakket={item.pakket_id}&user_id={user.id}",
@@ -4103,7 +4103,7 @@ async def mollie_webhook(request: Request):
                     json={
                         "amount": {"currency": "EUR", "value": f"{prijs:.2f}"},
                         "interval": "1 month",
-                        "description": f"Carboo — {PAKKETTEN.get(pakket, {}).get('label', pakket)} (maandelijks)",
+                        "description": f"Carboo â€” {PAKKETTEN.get(pakket, {}).get('label', pakket)} (maandelijks)",
                         "webhookUrl": WEBHOOK_URL,
                         "metadata": {"user_id": user_id, "pakket": pakket, "type": "abonnement_verlenging"},
                     },
@@ -4165,7 +4165,7 @@ async def admin_abonnementen(user=Depends(get_current_user)):
 
 @app.post("/api/admin/abonnement-toewijzen")
 async def abonnement_toewijzen(item: dict, user=Depends(get_current_user)):
-    """Admin wijst abonnement toe. Als gebruiker niet bestaat + wachtwoord opgegeven → maakt account aan."""
+    """Admin wijst abonnement toe. Als gebruiker niet bestaat + wachtwoord opgegeven â†’ maakt account aan."""
     admin = supabase_admin.table("carboo_admins").select("user_id").eq("user_id", user.id).execute()
     if not admin.data:
         raise HTTPException(403, "Geen toegang")
@@ -4242,7 +4242,7 @@ async def annuleer_abonnement(pakket_id: str, user=Depends(get_current_user)):
     return {"ok": True, "bericht": "Automatische verlenging geannuleerd. Abonnement loopt door tot vervaldatum."}
 
 
-# ─── KOELKASTSCAN (Blaze-vlam feature, 1x per maand vanaf 30 dagen streak) ───
+# â”€â”€â”€ KOELKASTSCAN (Blaze-vlam feature, 1x per maand vanaf 30 dagen streak) â”€â”€â”€
 
 @app.get("/api/fuelc/koelkastscan-status")
 async def koelkastscan_status(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
