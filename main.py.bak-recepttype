@@ -2409,24 +2409,6 @@ async def recept_publiek(recept_id: str, body: dict, user=Depends(get_current_us
     return {"ok": True, "publiek": aan}
 
 
-# RECEPT-TYPE-V1
-RECEPT_TYPES = ["Ontbijt", "Lunch", "Avondmaal", "Snack", "Sportvoeding", "Herstel"]
-
-
-@app.patch("/api/fuelc/recepten/{recept_id}/type")
-async def recept_type(recept_id: str, body: dict, user=Depends(get_current_user),
-                      supabase: Client = Depends(get_supabase)):
-    """Wijzigt het type van een recept. Alleen de eigenaar."""
-    t = (body.get("type") or "").strip()
-    if t not in RECEPT_TYPES:
-        raise HTTPException(400, "Onbekend type")
-    r = supabase.table("fuelc_recepten_eigen").update({"type": t}) \
-        .eq("id", recept_id).eq("user_id", user.id).execute()
-    if not r.data:
-        raise HTTPException(404, "Recept niet gevonden")
-    return {"ok": True, "type": t}
-
-
 @app.delete("/api/fuelc/recepten/{recept_id}")
 async def verwijder_recept(recept_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     supabase.table("fuelc_recepten_eigen").delete().eq("id", recept_id).eq("user_id", user.id).execute()
