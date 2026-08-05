@@ -2287,9 +2287,8 @@ def _recept_veilig(r: dict, kort: bool = True) -> dict:
 
 @app.get("/api/publiek/recepten")
 async def publieke_recepten(supabase: Client = Depends(get_supabase)):
-    # RECEPT-PUBLIEK-V2 — alleen wat bewust online gezet is
     r = supabase.table("fuelc_recepten_eigen").select("*") \
-        .eq("is_globaal", True).eq("publiek", True).order("naam").limit(200).execute()
+        .eq("is_globaal", True).order("naam").limit(200).execute()
     return {"recepten": [_recept_veilig(x) for x in (r.data or [])]}
 
 
@@ -2299,7 +2298,7 @@ async def publiek_recept(slug: str, supabase: Client = Depends(get_supabase)):
     if len(staart) != 8:
         raise HTTPException(404, "Recept niet gevonden")
     r = supabase.table("fuelc_recepten_eigen").select("*") \
-        .eq("is_globaal", True).eq("publiek", True).limit(400).execute()
+        .eq("is_globaal", True).limit(400).execute()
     for x in (r.data or []):
         if str(x["id"]).replace("-", "")[:8] == staart:
             return _recept_veilig(x, kort=False)
@@ -2391,19 +2390,6 @@ async def voeg_recept_toe(recept: dict, user=Depends(get_current_user), supabase
     recept["user_id"] = user.id
     supabase.table("fuelc_recepten_eigen").insert(recept).execute()
     return {"status": "opgeslagen"}
-
-@app.patch("/api/fuelc/recepten/{recept_id}/publiek")
-async def recept_publiek(recept_id: str, body: dict, user=Depends(get_current_user),
-                         supabase: Client = Depends(get_supabase)):
-    """Zet een globaal recept op of van de publieke feed.
-    Alleen de eigenaar van het recept kan dit."""
-    aan = bool(body.get("publiek"))
-    r = supabase.table("fuelc_recepten_eigen").update({"publiek": aan}) \
-        .eq("id", recept_id).eq("user_id", user.id).execute()
-    if not r.data:
-        raise HTTPException(404, "Recept niet gevonden")
-    return {"ok": True, "publiek": aan}
-
 
 @app.delete("/api/fuelc/recepten/{recept_id}")
 async def verwijder_recept(recept_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
