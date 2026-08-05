@@ -2251,60 +2251,6 @@ async def publieke_racemaps_recent(supabase: Client = Depends(get_supabase)):
     return {"racemaps": uit}
 
 
-# ── RECEPTEN-PUBLIEK-V1 — de globale recepten op het open web ──────────
-
-def _recept_slug(naam: str, rid: str) -> str:
-    """Leesbare URL met de eerste acht tekens van het id erachter,
-    zodat twee recepten met dezelfde naam elkaar niet in de weg zitten."""
-    return _slug(naam) + "-" + str(rid).replace("-", "")[:8]
-
-
-def _recept_veilig(r: dict, kort: bool = True) -> dict:
-    import json as _json
-    ingr = r.get("ingredienten")
-    if isinstance(ingr, str):
-        try:
-            ingr = _json.loads(ingr)
-        except Exception:
-            ingr = []
-    uit = {
-        "id": r["id"],
-        "slug": _recept_slug(r.get("naam") or "recept", r["id"]),
-        "naam": r.get("naam") or "",
-        "type": r.get("type"),
-        "porties": r.get("aantal_porties") or 1,
-        "kcal": r.get("kcal"), "kh": r.get("kh"),
-        "eiwit": r.get("eiwit"), "vet": r.get("vet"),
-        "vezels": r.get("vezels"), "gi": r.get("gi"),
-        "ingredienten": ingr or [],
-    }
-    if not kort:
-        uit["bereiding"] = r.get("bereiding") or ""
-        uit["suikers"] = r.get("suikers")
-        uit["natrium"] = r.get("natrium")
-    return uit
-
-
-@app.get("/api/publiek/recepten")
-async def publieke_recepten(supabase: Client = Depends(get_supabase)):
-    r = supabase.table("fuelc_recepten_eigen").select("*") \
-        .eq("is_globaal", True).order("naam").limit(200).execute()
-    return {"recepten": [_recept_veilig(x) for x in (r.data or [])]}
-
-
-@app.get("/api/publiek/recept/{slug}")
-async def publiek_recept(slug: str, supabase: Client = Depends(get_supabase)):
-    staart = slug.rsplit("-", 1)[-1]
-    if len(staart) != 8:
-        raise HTTPException(404, "Recept niet gevonden")
-    r = supabase.table("fuelc_recepten_eigen").select("*") \
-        .eq("is_globaal", True).limit(400).execute()
-    for x in (r.data or []):
-        if str(x["id"]).replace("-", "")[:8] == staart:
-            return _recept_veilig(x, kort=False)
-    raise HTTPException(404, "Recept niet gevonden")
-
-
 @app.get("/api/publiek/wedstrijden")
 async def publieke_wedstrijden(supabase: Client = Depends(get_supabase)):
     r = supabase.table("carboo_racemaps_publiek") \
