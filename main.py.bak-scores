@@ -2288,21 +2288,9 @@ def _recept_veilig(r: dict, kort: bool = True) -> dict:
 @app.get("/api/publiek/recepten")
 async def publieke_recepten(supabase: Client = Depends(get_supabase)):
     # RECEPT-PUBLIEK-V2 — alleen wat bewust online gezet is
-    # SCORES-V1 — op de feed staat wat bewust gedeeld is, plus wat goed scoort
     r = supabase.table("fuelc_recepten_eigen").select("*") \
-        .eq("is_globaal", True).order("naam").limit(400).execute()
-    sc = _scores_per_recept(supabase)
-    uit = []
-    for x in (r.data or []):
-        s = sc.get(str(x.get("id")), {})
-        verdient = (s.get("aantal_scores", 0) >= SCORE_MIN_STEMMEN
-                    and (s.get("gemiddelde") or 0) >= SCORE_MIN_GEMIDDELDE)
-        if x.get("publiek") or verdient:
-            veilig = _recept_veilig(x)
-            veilig["gemiddelde"] = s.get("gemiddelde")
-            veilig["aantal_scores"] = s.get("aantal_scores", 0)
-            uit.append(veilig)
-    return {"recepten": uit}
+        .eq("is_globaal", True).eq("publiek", True).order("naam").limit(200).execute()
+    return {"recepten": [_recept_veilig(x) for x in (r.data or [])]}
 
 
 @app.get("/api/publiek/recept/{slug}")
@@ -2398,10 +2386,8 @@ async def get_recepten(user=Depends(get_current_user), supabase: Client = Depend
     r = supabase.table("fuelc_recepten_eigen").select("*").or_(f"user_id.eq.{user.id},is_globaal.eq.true").order("naam").execute()
     # VAN-MIJ-V1 — de app moet weten welke globale recepten van deze gebruiker zijn
     rijen = r.data or []
-    _sc = _scores_per_recept(supabase, user.id)
     for _x in rijen:
         _x["van_mij"] = str(_x.get("user_id")) == str(user.id)
-        _x.update(_sc.get(str(_x.get("id")), {"gemiddelde": None, "aantal_scores": 0, "mijn_score": None}))
     return {"recepten": rijen}
 
 @app.post("/api/fuelc/recepten")
@@ -2439,61 +2425,6 @@ async def recept_type(recept_id: str, body: dict, user=Depends(get_current_user)
     if not r.data:
         raise HTTPException(404, "Recept niet gevonden")
     return {"ok": True, "type": t}
-
-
-# SCORES-V1 — beoordelingen van recepten
-SCORE_MIN_STEMMEN = 3      # minder dan dit telt niet mee voor de feed
-SCORE_MIN_GEMIDDELDE = 4.0
-
-
-def _scores_per_recept(supabase: Client, eigen_user_id: str = None) -> dict:
-    """Geeft per recept het gemiddelde, het aantal stemmen en eventueel
-    de eigen stem. Faalt stil: zonder scores werkt de app gewoon door."""
-    uit: dict = {}
-    try:
-        r = supabase.table("fuelc_recept_scores").select("recept_id,user_id,score").limit(5000).execute()
-        per: dict = {}
-        for x in (r.data or []):
-            rid = str(x.get("recept_id"))
-            per.setdefault(rid, []).append(x)
-        for rid, rijen in per.items():
-            punten = [float(y.get("score") or 0) for y in rijen if y.get("score")]
-            if not punten:
-                continue
-            eigen = None
-            if eigen_user_id:
-                for y in rijen:
-                    if str(y.get("user_id")) == str(eigen_user_id):
-                        eigen = y.get("score")
-                        break
-            uit[rid] = {
-                "gemiddelde": round(sum(punten) / len(punten), 1),
-                "aantal_scores": len(punten),
-                "mijn_score": eigen,
-            }
-    except Exception:
-        pass
-    return uit
-
-
-class ReceptScore(BaseModel):
-    score: int
-
-
-@app.post("/api/fuelc/recepten/{recept_id}/score")
-async def recept_score(recept_id: str, item: ReceptScore, user=Depends(get_current_user),
-                       supabase: Client = Depends(get_supabase)):
-    """Eén stem per klant per recept. Opnieuw stemmen overschrijft de vorige."""
-    if not 1 <= int(item.score) <= 5:
-        raise HTTPException(400, "Score moet tussen 1 en 5 liggen")
-    supabase.table("fuelc_recept_scores").upsert({
-        "recept_id": recept_id,
-        "user_id": user.id,
-        "score": int(item.score),
-    }, on_conflict="recept_id,user_id").execute()
-
-    scores = _scores_per_recept(supabase, user.id).get(str(recept_id), {})
-    return {"ok": True, **scores}
 
 
 @app.delete("/api/fuelc/recepten/{recept_id}")
