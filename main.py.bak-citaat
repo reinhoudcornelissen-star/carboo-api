@@ -2786,21 +2786,6 @@ async def bevoorrading_coach(klant_id: str, van: str, tot: str,
     return _bereken_bevoorrading(klant_id, van, tot, supabase)
 
 
-# ── CITAAT-V1 — het citaat van de week ────────────────────────────────
-
-@app.get("/api/publiek/citaat")
-async def publiek_citaat(week: int = 1, supabase: Client = Depends(get_supabase)):
-    """Het citaat dat bij dit weeknummer hoort. Bestaat het niet,
-    dan komt er niets terug en toont de app gewoon geen blok."""
-    nr = ((int(week) - 1) % 52) + 1
-    try:
-        r = supabase.table("fuelc_citaten").select("week_nr,tekst,auteur,context") \
-            .eq("week_nr", nr).eq("actief", True).limit(1).execute()
-        return (r.data or [{}])[0]
-    except Exception:
-        return {}
-
-
 @app.get("/api/publiek/wedstrijden")
 async def publieke_wedstrijden(supabase: Client = Depends(get_supabase)):
     r = supabase.table("carboo_racemaps_publiek") \
