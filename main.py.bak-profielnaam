@@ -206,8 +206,6 @@ class FuelcProfiel(BaseModel):
     td_0: Optional[bool] = False
     td_1: Optional[bool] = False
     td_2: Optional[bool] = False
-    voornaam: Optional[str] = None
-    achternaam: Optional[str] = None
 
 class TrainingData(BaseModel):
     datum: str
