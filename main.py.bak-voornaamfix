@@ -2488,7 +2488,7 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client) ->
     profiel = {}
     try:
         pr = supabase.table("fuelc_profiel") \
-            .select("energie_doel,kh_doel_pct,eiwit_doel_pct,vet_doel_pct,gewicht_kg,voornaam,achternaam") \
+            .select("energie_doel,kh_doel_pct,eiwit_doel_pct,vet_doel_pct,gewicht_kg,voornaam,achternaam")   # VOORNAAM-V1 \
             .eq("user_id", user_id).limit(1).execute().data or []
         profiel = pr[0] if pr else {}
     except Exception:
