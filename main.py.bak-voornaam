@@ -2472,7 +2472,7 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client) ->
     profiel = {}
     try:
         pr = supabase.table("fuelc_profiel") \
-            .select("energie_doel,kh_doel_pct,eiwit_doel_pct,vet_doel_pct,gewicht_kg,voornaam,achternaam")   # VOORNAAM-V1 \
+            .select("energie_doel,kh_doel_pct,eiwit_doel_pct,vet_doel_pct,gewicht_kg") \
             .eq("user_id", user_id).limit(1).execute().data or []
         profiel = pr[0] if pr else {}
     except Exception:
@@ -2582,7 +2582,6 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client) ->
 
     res = {
         "van": van, "tot": tot,
-        "voornaam": (profiel.get("voornaam") or "").strip() or None,
         "gewicht_kg": gewicht, "gewogen_op": gewogen_op,
         "dagen_gelogd": len(dagen),
         "trainingen_aantal": len(tr),
