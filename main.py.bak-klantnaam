@@ -585,22 +585,6 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
             loop.run_in_executor(None, q_berichten),
             loop.run_in_executor(None, q_coach_posts),
         )
-        # KLANTNAAM-V1 — namen erbij, zodat het overzicht leesbaar wordt.
-        # Faalt stil: zonder naam valt het scherm terug op het e-mailadres.
-        try:
-            _ids = [k.get("klant_id") for k in mijn_klanten if k.get("klant_id")]
-            if _ids:
-                _pr = supabase.table("fuelc_profiel") \
-                    .select("user_id,voornaam,achternaam") \
-                    .in_("user_id", _ids).execute().data or []
-                _namen = {str(p["user_id"]): p for p in _pr}
-                for _k in mijn_klanten:
-                    _p = _namen.get(str(_k.get("klant_id"))) or {}
-                    _k["voornaam"] = (_p.get("voornaam") or "").strip() or None
-                    _k["achternaam"] = (_p.get("achternaam") or "").strip() or None
-        except Exception:
-            pass
-
         klant_reactie_ids = []
         for o in opm_coach_rows:
             for re_ in (o.get("carboo_coach_reacties") or []):
