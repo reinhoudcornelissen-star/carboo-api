@@ -2051,14 +2051,13 @@ def stuur_push(user_id: str, titel: str, tekst: str,
 
 
 def stuur_push_async(*args, **kwargs):
-    """PUSHKOPPEL-V2 — verstuurt synchroon. Een losse daemon-thread bleef
-    op Render soms uren hangen tot de dienst weer opgepord werd; een push
-    duurt maar een fractie van een seconde, dus we wachten er gewoon op.
-    Faalt stil, net als stuur_push zelf."""
+    """PUSHKOPPEL-V1 — verstuurt op een aparte thread zodat het verzoek
+    niet hoeft te wachten. Faalt stil, net als stuur_push zelf."""
+    import threading
     try:
-        return stuur_push(*args, **kwargs)
+        threading.Thread(target=stuur_push, args=args, kwargs=kwargs, daemon=True).start()
     except Exception:
-        return 0
+        pass
 
 
 @app.get("/api/push/sleutel")
