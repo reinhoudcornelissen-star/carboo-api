@@ -220,6 +220,8 @@ class TrainingData(BaseModel):
     starttijd: Optional[str] = "07:00"
 
 class DagboekItem(BaseModel):
+    # DAGBOEK-TRAINING-ID-V1 — koppelt het item aan de training waaronder het gelogd is
+    training_id: Optional[str] = None
     datum: str
     moment: int
     naam: str
