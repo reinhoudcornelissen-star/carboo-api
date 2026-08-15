@@ -1960,6 +1960,23 @@ async def get_streak(user=Depends(get_current_user), supabase: Client = Depends(
 async def voeg_dagboek_toe(item: DagboekItem, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     data = item.dict()
     data["user_id"] = user.id
+
+    # DAGBOEK-KOPPELING-V1 — leidt de training af uit datum en moment.
+    # In het dagschema geldt momentNr = 99 + index in de trainingen van die dag,
+    # dus moment 99 is de eerste training, 100 de tweede, enzovoort. We halen
+    # de lijst op in dezelfde volgorde als /api/fuelc/trainingen hem teruggeeft.
+    if not data.get("training_id") and int(data.get("moment") or 0) >= 99:
+        try:
+            _tr = supabase.table("fuelc_trainingen").select("id,datum") \
+                .eq("user_id", user.id).order("datum", desc=True).limit(60).execute()
+            _dag = str(data.get("datum") or "")[:10]
+            _rijen = [t for t in (_tr.data or []) if str(t.get("datum") or "")[:10] == _dag]
+            _idx = int(data["moment"]) - 99
+            if 0 <= _idx < len(_rijen):
+                data["training_id"] = _rijen[_idx]["id"]
+        except Exception as _e:
+            print(f"[DAGBOEK-KOPPELING-V1] koppeling mislukt: {_e}")
+
     supabase.table("fuelc_dagboek").insert(data).execute()
     # Update streak na elke toevoeging
     if data.get("datum"):
