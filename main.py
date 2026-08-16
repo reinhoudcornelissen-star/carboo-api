@@ -1616,6 +1616,102 @@ async def sla_sessie_op(item: GutSessie, user=Depends(get_current_user), supabas
     }).eq("user_id", user.id).execute()
     return {"ok": True, "sessie_id": sessie_id}
 
+# ─── GUT-TRAININGSSESSIE-V1 ────────────────────────────────────────────────
+# Een training met gelogde voeding wordt een sessie in Train the Gut.
+# De sporter beantwoordt twee vragen; al de rest halen we uit gegevens
+# die al bestaan.
+
+class TrainingSessie(BaseModel):
+    training_id: str
+    maagcomfort: Optional[int] = None
+    energie_score: Optional[int] = None
+    duur_min: Optional[int] = None
+    notitie: Optional[str] = None
+
+
+_DRANK_WOORDEN = ("water", "sportdrank", "isotoon", "thee", "koffie",
+                  "cola", "drank", "limonade", "sap", "bidon")
+
+
+@app.get("/api/gut/sessies/gelogd")
+async def gut_sessies_gelogd(datum: str = "", user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Welke trainingen zijn al geevalueerd? Het kaartje verdwijnt daarna."""
+    q = supabase.table("carboo_gut_sessies").select("training_id,datum") \
+        .eq("user_id", user.id).eq("bron", "training")
+    if datum:
+        q = q.eq("datum", datum)
+    r = q.execute()
+    return {"training_ids": [s["training_id"] for s in (r.data or []) if s.get("training_id")]}
+
+
+@app.post("/api/gut/sessies/training")
+async def sla_trainingssessie_op(item: TrainingSessie, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    tr = supabase.table("fuelc_trainingen").select("*") \
+        .eq("id", item.training_id).eq("user_id", user.id).limit(1).execute()
+    training = (tr.data or [None])[0]
+    if not training:
+        raise HTTPException(404, "Training niet gevonden")
+
+    rijen = supabase.table("fuelc_dagboek").select("naam,categorie,kh_g,hoeveelheid_g") \
+        .eq("user_id", user.id).eq("training_id", item.training_id).execute().data or []
+
+    kh_totaal = 0.0
+    vocht_ml = 0.0
+    for r in rijen:
+        kh_totaal += float(r.get("kh_g") or 0)
+        naam = (r.get("naam") or "").lower()
+        cat = (r.get("categorie") or "").lower()
+        if "drank" in cat or any(w in naam for w in _DRANK_WOORDEN):
+            vocht_ml += float(r.get("hoeveelheid_g") or 0)
+
+    # Duur: wat de sporter meegaf wint, anders de werkelijke, anders de geplande.
+    duur = item.duur_min or training.get("duur_min") or training.get("duur_gepland") or 0
+    uren = (duur / 60) if duur else 0
+
+    kh_uur = round(kh_totaal / uren, 1) if uren > 0 else None
+    vocht_uur = round(vocht_ml / uren) if uren > 0 else None
+
+    kcal_uur = (float(training.get("kcal_verbranding") or 0) / uren) if uren > 0 else 0
+    intensiteit = "zwaar" if kcal_uur > 750 else ("matig" if kcal_uur >= 500 else "licht")
+
+    week = None
+    try:
+        p = supabase.table("carboo_gut_protocol").select("week_huidig") \
+            .eq("user_id", user.id).eq("actief", True).limit(1).execute()
+        if p.data:
+            week = p.data[0].get("week_huidig")
+    except Exception:
+        pass
+
+    data = {
+        "user_id": user.id,
+        "bron": "training",
+        "training_id": item.training_id,
+        "datum": str(training.get("datum") or "")[:10],
+        "sport": training.get("sport") or "",
+        "duur_min": duur or None,
+        "intensiteit": intensiteit,
+        "week_nummer": week,
+        "maagcomfort": item.maagcomfort,
+        "energie_score": item.energie_score,
+        "kh_per_uur": kh_uur,
+        "vocht_ml_per_uur": vocht_uur,
+        "notitie": item.notitie or "",
+    }
+
+    try:
+        r = supabase.table("carboo_gut_sessies").insert(data).execute()
+        return {
+            "ok": True,
+            "sessie_id": r.data[0]["id"] if r.data else None,
+            "kh_per_uur": kh_uur,
+            "vocht_ml_per_uur": vocht_uur,
+        }
+    except Exception as e:
+        # De unieke index vangt een dubbele evaluatie op; dat is geen fout.
+        return {"ok": False, "fout": str(e)[:200]}
+
+
 @app.delete("/api/gut/sessies/{sessie_id}")
 async def verwijder_sessie(sessie_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     supabase.table("carboo_gut_sessies").delete().eq("user_id", user.id).eq("id", sessie_id).execute()
