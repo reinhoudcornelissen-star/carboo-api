@@ -3231,7 +3231,7 @@ async def gebruik_credit(omschrijving: str = "Rapport", user=Depends(get_current
 # â•â•â• ETIKETSCAN â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @app.post("/api/fuelc/scan-etiket")
-async def scan_etiket(request: Request, user=Depends(get_current_user)):
+async def scan_etiket(request: Request, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     import json, re
     try:
         import anthropic
@@ -3247,6 +3247,38 @@ async def scan_etiket(request: Request, user=Depends(get_current_user)):
 
     if media_type not in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
         media_type = "image/jpeg"
+
+
+    # ─── ETIKETSCAN-LIMIET-V1 ───────────────────────────────────────────
+    # Proefgebruikers krijgen vijf etiketscans. Wie betaalt, scant onbeperkt.
+    # De teller gaat omhoog voor de aanroep naar Anthropic, omdat die geld
+    # kost en anders meerdere gelijktijdige verzoeken langs de controle glippen.
+    _MAX_PROEF = 5
+    try:
+        _g = supabase.table("carboo_gebruikers").select("etiketscan_aantal") \
+            .eq("id", user.id).single().execute()
+        _aantal = (_g.data or {}).get("etiketscan_aantal") or 0
+    except Exception:
+        _aantal = 0
+
+    _abos = supabase.table("carboo_abonnementen").select("mollie_payment_id,status") \
+        .eq("user_id", user.id).eq("status", "actief").execute().data or []
+    _betaald = any((a.get("mollie_payment_id") or "") not in ("trial_auto_7d", "admin_trial") for a in _abos)
+
+    if not _betaald and _aantal >= _MAX_PROEF:
+        return {
+            "ok": False,
+            "limiet": True,
+            "aantal": _aantal,
+            "max": _MAX_PROEF,
+            "bericht": f"Je proefperiode bevat {_MAX_PROEF} etiketscans. Met een abonnement scan je onbeperkt.",
+        }
+
+    try:
+        supabase.table("carboo_gebruikers").update({"etiketscan_aantal": _aantal + 1}) \
+            .eq("id", user.id).execute()
+    except Exception as _e:
+        print(f"[ETIKETSCAN-LIMIET-V1] teller niet bijgewerkt: {_e}")
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
