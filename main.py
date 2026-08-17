@@ -2785,6 +2785,16 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
         except Exception as _e:
             print(f"[KERNBEVINDING-V1] vorige week niet opgehaald: {_e}")
 
+    # NORMEN-V1 — de normen staan in de database, niet in deze code
+    if met_inzichten:
+        try:
+            _n = supabase.table("carboo_normen").select("*") \
+                .eq("actief", True).order("volgorde").execute()
+            res["normen"] = _n.data or []
+        except Exception as _e:
+            print(f"[NORMEN-V1] normen niet opgehaald: {_e}")
+            res["normen"] = []
+
     if not met_inzichten:
         return res
 
@@ -2833,48 +2843,78 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     def voeg(lijst, ernst, kop, tekst):
         lijst.append({"ernst": ernst, "kop": kop, "tekst": tekst})
 
+    # ── KWALITEIT-NORMEN-V1 — grenzen komen uit carboo_normen, niet uit deze code ──
+    def _norm(sleutel, veld="norm_min", terugval=None):
+        for _n in (res.get("normen") or []):
+            if _n.get("sleutel") == sleutel:
+                _w = _n.get(veld)
+                return terugval if _w is None else float(_w)
+        return terugval
+
     # ── kwaliteit ───────────────────────────────────────────────────
-    lage_groentedagen = len([v for v in dagen.values() if v["groenten"] < 200])
-    if d["groenten"] < 250:
+    _n_groenten = _norm("groenten", "norm_min", 300)
+    lage_groentedagen = len([v for v in dagen.values() if v["groenten"] < _n_groenten])
+    if d["groenten"] < _n_groenten:
         voeg(kwaliteit, "geel", "Je groenten blijven achter",
              ("Op " + str(lage_groentedagen) + " van de " + str(len(dagen)) +
-              " dagen bleef je onder de 200 gram. Eén extra portie per dag tilt meteen ook je "
-              "vezels en kalium mee omhoog — die twee volgen je groenten."))
-    elif d["groenten"] >= 300:
+              " dagen bleef je onder de " + str(round(_n_groenten)) + " gram. Eén extra portie per dag "
+              "tilt meteen ook je vezels en kalium mee omhoog — die twee volgen je groenten."))
+    else:
         voeg(kwaliteit, "groen", "Je groenten zitten op peil",
-             "Gemiddeld boven de 300 gram per dag. Dat is waar je vezels en kalium vandaan komen.")
+             ("Gemiddeld boven de " + str(round(_n_groenten)) + " gram per dag. Dat is waar je vezels "
+              "en kalium vandaan komen."))
+
+    _n_fruit = _norm("fruit", "norm_min", 200)
+    if d.get("fruit") is not None:
+        if d["fruit"] < _n_fruit:
+            voeg(kwaliteit, "geel", "Je fruit blijft achter",
+                 (str(d["fruit"]) + " gram per dag tegenover " + str(round(_n_fruit)) +
+                  " als richtlijn. Twee stuks per dag brengt je er meestal."))
+        else:
+            voeg(kwaliteit, "groen", "Je fruit zit op peil",
+                 ("Gemiddeld " + str(d["fruit"]) + " gram per dag."))
 
     kcal = max(d["kcal"], 1)
+    _n_suiker = _norm("suikers_toegevoegd_pct", "norm_max", 10)
     pct_toeg = (d["suikers_toegevoegd"] * 4 / kcal) * 100
-    if pct_toeg > 10:
+    if pct_toeg > _n_suiker:
         voeg(kwaliteit, "rood", "Te veel toegevoegde suiker",
-             ("Toegevoegde suikers leverden " + str(round(pct_toeg)) + "% van je energie. "
-              "De WHO houdt 10% aan als bovengrens, en onder de 5% als streefwaarde."))
+             ("Toegevoegde suikers leverden " + str(round(pct_toeg)) + "% van je energie, "
+              "tegenover " + str(round(_n_suiker)) + "% als bovengrens."))
     else:
         voeg(kwaliteit, "groen", "Je suikers zitten goed",
              ("Toegevoegde suikers bleven op " + str(round(pct_toeg)) + "% van je energie, "
-              "onder de bovengrens van de WHO. Het grootste deel van je koolhydraten is zetmeel, "
-              "en dat is precies wat je wil."))
+              "onder de bovengrens van " + str(round(_n_suiker)) + "%. Het grootste deel van je "
+              "koolhydraten is zetmeel, en dat is precies wat je wil."))
 
-    vet_tot = max(d["verzadigd"] + d["onverzadigd"], 1)
-    pct_verz = (d["verzadigd"] / vet_tot) * 100
-    if pct_verz > 33:
-        voeg(kwaliteit, "rood", "Een derde van je vet is verzadigd",
-             ("Onder de 30% is het streven. Verzadigd vet komt meestal uit kaas, boter en vet vlees; "
-              "één van die bronnen vervangen brengt je er meestal onder."))
-    elif pct_verz < 28:
+    # verzadigd vet als aandeel van je ENERGIE — dezelfde maat als de tabel
+    _n_verz = _norm("verz_pct", "norm_max", 10)
+    pct_verz_e = (d["verzadigd"] * 9 / kcal) * 100
+    if pct_verz_e > _n_verz:
+        voeg(kwaliteit, "rood", "Je verzadigd vet ligt te hoog",
+             (str(round(pct_verz_e)) + "% van je energie kwam uit verzadigd vet, tegenover " +
+              str(round(_n_verz)) + "% als bovengrens. Kaas, boter en vet vlees zijn de gewone "
+              "bronnen; één ervan vervangen brengt je er meestal onder."))
+    else:
         voeg(kwaliteit, "groen", "Je vetverdeling is in orde",
-             ("Ruim twee derde van je vet is onverzadigd. Dat is de verhouding waar je naartoe wil."))
+             (str(round(pct_verz_e)) + "% van je energie uit verzadigd vet, onder de grens van " +
+              str(round(_n_verz)) + "%."))
 
-    if d["omega3"] < 1.5:
+    _n_omega = _norm("omega3", "norm_min", 1.5)
+    if d["omega3"] < _n_omega:
         voeg(kwaliteit, "geel", "Weinig omega 3",
-             ("Je komt op " + str(d["omega3"]) + " gram per dag, tegenover een richtlijn van 1,5. "
-              "Twee porties vette vis per week brengt je daar meestal."))
+             ("Je komt op " + str(d["omega3"]) + " gram per dag, tegenover " + str(_n_omega) +
+              " als richtlijn. Twee porties vette vis per week brengt je daar meestal."))
 
-    if d["vezels"] < 30 and d["groenten"] >= 250:
+    _n_vezels = _norm("vezels", "norm_min", 30)
+    if d["vezels"] < _n_vezels:
         voeg(kwaliteit, "geel", "Je vezels blijven onder de richtlijn",
-             (str(d["vezels"]) + " gram per dag tegenover 30 als richtlijn. Volkoren in plaats van wit "
-              "brood of pasta is de snelste weg."))
+             (str(d["vezels"]) + " gram per dag tegenover " + str(round(_n_vezels)) +
+              " als richtlijn. Volkoren in plaats van wit brood of pasta is de snelste weg."))
+    else:
+        voeg(kwaliteit, "groen", "Je vezels zitten op peil",
+             (str(d["vezels"]) + " gram per dag, boven de richtlijn van " +
+              str(round(_n_vezels)) + "."))
 
     # ── macro's ─────────────────────────────────────────────────────
     e_doel = float(profiel.get("energie_doel") or 0)
@@ -3032,6 +3072,131 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
             kern = groen[0]["tekst"]
         else:
             kop = "Een week zonder uitschieters."
+
+    # ── NORMEN-V1 — één aandachtspunt en één sterk punt uit de normentabel ──
+    def _waarden(pd, gewicht, dagen_met_drank=7):
+        """Zet de daggemiddelden om naar de sleutels uit carboo_normen.
+        Wat niet berekend kan worden, ontbreekt gewoon."""
+        if not pd:
+            return {}
+        w = {}
+        kcal = pd.get("kcal") or 0
+
+        for sleutel in ("groenten", "fruit", "vezels", "kalium", "calcium",
+                        "ijzer", "vitd", "vitb12", "omega3"):
+            if pd.get(sleutel) is not None:
+                w[sleutel] = pd.get(sleutel)
+
+        if pd.get("nd") is not None:
+            w["nutrientdensiteit"] = pd.get("nd")
+        if pd.get("score") is not None and "nutrientdensiteit" not in w:
+            w["nutrientdensiteit"] = pd.get("score")
+
+        if kcal > 0:
+            _vz = pd.get("verzadigd")
+            if _vz is None:
+                _vz = pd.get("verz")
+            if _vz is not None:
+                w["verz_pct"] = round(_vz * 9 / kcal * 100, 1)
+            _vt = pd.get("vet")
+            if _vt is None and _vz is not None and pd.get("onverzadigd") is not None:
+                _vt = _vz + pd.get("onverzadigd")
+            if _vt is not None:
+                w["vet_pct"] = round(_vt * 9 / kcal * 100, 1)
+            _st = pd.get("suikers_toegevoegd")
+            if _st is None:
+                _st = pd.get("suikers_toegevoegd_g")
+            if _st is not None:
+                w["suikers_toegevoegd_pct"] = round(_st * 4 / kcal * 100, 1)
+
+        if gewicht and pd.get("eiwit") is not None:
+            w["eiwit_g_kg"] = round(pd["eiwit"] / gewicht, 2)
+
+        _v = pd.get("vocht") or pd.get("vocht_ml")
+        if _v and dagen_met_drank >= 4:
+            w["vocht_dag"] = _v
+
+        return w
+
+    try:
+        _normen = res.get("normen") or []
+        _gew = float(profiel.get("gewicht_kg") or 0) or None
+
+        _drankdagen = len([1 for _v in dagen.values()
+                           if (_v.get("vocht") or _v.get("vocht_ml") or 0) > 0])
+
+        _nu = _waarden(d, _gew, _drankdagen)
+        _vr = _waarden(res.get("vorige") or {}, _gew, 7)
+
+        _kandidaten = []
+        for _n in _normen:
+            _s = _n.get("sleutel")
+            if _s not in _nu:
+                continue
+            _w = _nu[_s]
+            _min = _n.get("norm_min")
+            _max = _n.get("norm_max")
+            _richting = _n.get("richting")
+
+            # hoe ver van de norm, in procent; positief = beter dan norm
+            if _richting == "hoger" and _min:
+                _afw = (_w - _min) / _min * 100
+            elif _richting == "lager" and _max:
+                _afw = (_max - _w) / _max * 100
+            elif _richting == "bereik" and _min and _max:
+                if _w < _min:
+                    _afw = (_w - _min) / _min * 100
+                elif _w > _max:
+                    _afw = (_max - _w) / _max * 100
+                else:
+                    _afw = 0.0
+            else:
+                continue
+
+            # verandering tegenover vorige week, positief = vooruit
+            _ver = None
+            if _s in _vr and _vr[_s]:
+                _pct = (_w - _vr[_s]) / _vr[_s] * 100
+                _ver = _pct if _richting != "lager" else -_pct
+
+            _kandidaten.append({
+                "naam": _n.get("naam"), "eenheid": _n.get("eenheid"),
+                "waarde": _w, "norm": _min if _richting != "lager" else _max,
+                "richting": _richting, "afw": round(_afw, 1),
+                "ver": None if _ver is None else round(_ver, 1),
+                "vorige": _vr.get(_s),
+            })
+
+        def _zin_norm(k):
+            t = ("Je zat op " + str(k["waarde"]) + " " + k["eenheid"] +
+                 ", tegenover een norm van " + str(k["norm"]) + ".")
+            if k["ver"] is not None and abs(k["ver"]) >= 15:
+                t += (" Vorige week was dat " + str(k["vorige"]) + " " + k["eenheid"] + ".")
+            return t
+
+        _onder = [k for k in _kandidaten if k["afw"] < 0]
+        _boven = [k for k in _kandidaten if k["afw"] >= 0]
+
+        # NORMEN-AFWIJKING-V2 — de grootste afwijking van de norm wint, ongeacht of
+        # ze deze week verslechterde. Een chronisch probleem is niet minder
+        # belangrijk omdat het niet nieuw is. De verandering blijft wel in
+        # de tekst staan.
+        _aandacht = min(_onder, key=lambda k: k["afw"]) if _onder else None
+        _sterk = max(_boven, key=lambda k: k["afw"]) if _boven else None
+
+        if _aandacht:
+            kop = ("Je " + _aandacht["naam"] +
+                   (" ligt boven de norm." if _aandacht["richting"] == "lager"
+                    else " blijft onder de norm."))
+            kern = _zin_norm(_aandacht)
+            if _sterk:
+                kern += (" Sterk punt deze week: je " + _sterk["naam"] + " op " +
+                         str(_sterk["waarde"]) + " " + _sterk["eenheid"] + ".")
+        elif _sterk:
+            kop = "Je " + _sterk["naam"] + " zit goed."
+            kern = _zin_norm(_sterk)
+    except Exception as _e:
+        print(f"[NORMEN-V1] selectie mislukt: {_e}")
 
     return {
         "kop": kop,
