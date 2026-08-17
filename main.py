@@ -2770,6 +2770,24 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client) ->
         ],
         "trainingen": trainingen,
     }
+    # KERNBEVINDING-V1 — dezelfde week, zeven dagen eerder. Alleen bruikbaar als
+    # er toen genoeg gelogd is; anders vergelijk je met ruis.
+    if met_inzichten:
+        try:
+            from datetime import date as _d, timedelta as _td
+            _vres = _bereken_bevoorrading(
+                user_id,
+                str(_d.fromisoformat(str(van)[:10]) - _td(days=7)),
+                str(_d.fromisoformat(str(tot)[:10]) - _td(days=7)),
+                supabase, met_inzichten=False)
+            if (_vres.get("dagen_gelogd") or 0) >= 5:
+                res["vorige"] = _vres.get("per_dag")
+        except Exception as _e:
+            print(f"[KERNBEVINDING-V1] vorige week niet opgehaald: {_e}")
+
+    if not met_inzichten:
+        return res
+
     try:
         res.update(_bouw_inzichten(res, dagen, profiel, tr))
     except Exception as e:
@@ -2883,7 +2901,8 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
 
         if pct_slecht < 0.6:
             voeg(macros, "geel", _dagnaam(slechtste).capitalize() + " valt uit de rij",
-                 ("Op die dag haalde je " + str(round(pct_slecht * 100)) + "% van je koolhydraatdoel, "
+                 ("Op die dag haalde je " + str(round(pct_slecht * 100)) + "% van je koolhydraatdoel — dat doel "
+                  "schaalt mee met je training, dus een zware dag legt de lat hoger — "
                   "terwijl de rest van de week er dicht bij zat."))
         if binnen10 >= len(dagpct) - 1 and len(dagpct) >= 5:
             voeg(macros, "groen", "Je koolhydraten volgen je training",
@@ -2952,21 +2971,73 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
               "haal je alles uit je eigen voorraad."))
 
     # ── de kop ──────────────────────────────────────────────────────
+    # ── KERNBEVINDING-V1 — wat verschilt van vorige week ────────────────────
+    vorige = res.get("vorige") or {}
+    verschillen = []
+
+    def _verg(sleutel, naam, eenheid, hoger_beter, drempel=15):
+        """Vergelijkt een gemiddelde met dat van vorige week."""
+        nu = d.get(sleutel)
+        vr = vorige.get(sleutel)
+        if nu in (None, 0) or vr in (None, 0):
+            return
+        pct = (nu - vr) / vr * 100
+        if abs(pct) < drempel:
+            return
+        beter = (pct > 0) if hoger_beter else (pct < 0)
+        verschillen.append({
+            "naam": naam, "eenheid": eenheid, "nu": nu, "vorige": vr,
+            "pct": round(abs(pct)), "omhoog": pct > 0, "beter": beter,
+        })
+
+    _verg("vezels", "vezels", "g", True)
+    _verg("groenten", "groenten", "g", True)
+    _verg("verz", "verzadigd vet", "g", False)
+    _verg("eiwit", "eiwit", "g", True)
+    _verg("kh", "koolhydraten", "g", True, 20)
+    _verg("suikers_toegevoegd", "toegevoegde suikers", "g", False)
+
+    # eerst wat achteruitging, dan de grootste sprong
+    verschillen.sort(key=lambda x: (x["beter"], -x["pct"]))
+
+    def _zin(v):
+        richting = "steeg" if v["omhoog"] else "zakte"
+        return ("Je " + v["naam"] + " " + richting + " van " + str(v["vorige"]) +
+                " naar " + str(v["nu"]) + " " + v["eenheid"] + " per dag, " +
+                str(v["pct"]) + " procent verschil met vorige week.")
+
+    # ── de kop ──
     rood = [i for i in (macros + kwaliteit) if i["ernst"] == "rood"]
     geel = [i for i in (macros + kwaliteit) if i["ernst"] == "geel"]
 
-    if laagste_dag and any("valt uit de rij" in i["kop"] for i in macros):
-        kop = laagste_dag.capitalize() + " is de dag die eruit springt."
+    kern = ""
+    if verschillen and not verschillen[0]["beter"]:
+        v = verschillen[0]
+        kop = "Je " + v["naam"] + (" loopt op." if v["omhoog"] else " zakt weg.")
+        kern = _zin(v)
     elif rood:
         kop = rood[0]["kop"] + "."
+        kern = rood[0]["tekst"]
     elif geel:
         kop = geel[0]["kop"] + "."
+        kern = geel[0]["tekst"]
+    elif verschillen:
+        v = verschillen[0]
+        kop = "Je " + v["naam"] + (" gaat vooruit." if v["beter"] else " verandert.")
+        kern = _zin(v)
     else:
-        kop = "Een week zonder uitschieters."
+        groen = [i for i in (kwaliteit + macros) if i["ernst"] == "groen"]
+        if groen:
+            kop = groen[0]["kop"] + "."
+            kern = groen[0]["tekst"]
+        else:
+            kop = "Een week zonder uitschieters."
 
     return {
         "kop": kop,
-        "standfirst": _standfirst(res["dagen_gelogd"], laagste_dag or "één dag"),
+        "standfirst": (_standfirst(res["dagen_gelogd"], laagste_dag or "één dag")
+                       if not kern else
+                       (str(res["dagen_gelogd"]) + " van de zeven dagen gelogd. " + kern)),
         "inzichten_kwaliteit": kwaliteit[:4],
         "inzichten_macros": macros[:3],
         "inzichten_trainingen": trainingen_inz[:4],
