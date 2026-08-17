@@ -2433,7 +2433,11 @@ async def publieke_recepten(supabase: Client = Depends(get_supabase)):
             veilig = _recept_veilig(x)
             veilig["gemiddelde"] = s.get("gemiddelde")
             veilig["aantal_scores"] = s.get("aantal_scores", 0)
+            veilig["aangemaakt"] = (x.get("aangemaakt") or x.get("created_at")
+                                    or x.get("datum") or x.get("bijgewerkt") or "")
             uit.append(veilig)
+    # RECEPTEN-NIEUWSTE-V2 — nieuwste eerst; zonder datum belandt een recept achteraan
+    uit.sort(key=lambda v: str(v.get("aangemaakt") or ""), reverse=True)
     return {"recepten": uit}
 
 
