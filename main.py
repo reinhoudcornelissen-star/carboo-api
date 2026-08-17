@@ -2693,7 +2693,20 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client) ->
         tijdens = round(sum((r.get("kh_g") or 0) for r in dg
                             if str(r.get("datum")) == str(t.get("datum"))
                             and (r.get("moment") or 0) >= 90))
+        # BEVINDINGEN-TRAININGEN-V1 — vocht en intensiteit horen bij het beeld van een training
+        _DRANKW = ("water", "sportdrank", "isotoon", "thee", "koffie", "cola",
+                   "drank", "limonade", "sap", "bidon")
+        vocht_ml = round(sum((r.get("hoeveelheid_g") or 0) for r in dg
+                             if str(r.get("datum")) == str(t.get("datum"))
+                             and (r.get("moment") or 0) >= 90
+                             and (("drank" in (r.get("categorie") or "").lower())
+                                  or any(w in (r.get("naam") or "").lower() for w in _DRANKW))))
+        _uren = (duur / 60) if duur else 0
+        _kcal_uur = ((t.get("kcal_verbranding") or 0) / _uren) if _uren > 0 else 0
         trainingen.append({
+            "vocht_ml": vocht_ml,
+            "vocht_per_uur": round(vocht_ml / _uren) if _uren > 0 else 0,
+            "intensiteit": "zwaar" if _kcal_uur > 750 else ("matig" if _kcal_uur >= 500 else "rustig"),
             "datum": t.get("datum"),
             "sport": t.get("sport"),
             "duur_min": duur,
@@ -2884,6 +2897,56 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
                   " tegenover " + str(lichtste["eiwit"]) + " in je " + lichtste["naam"].lower() +
                   ". Meer dan veertig gram in één maaltijd benut je niet volledig; verschuiven kost je niets extra."))
 
+    # ── BEVINDINGEN-TRAININGEN-V1 — rond je trainingen ─────────────────────────────
+    trainingen_inz: list = []
+    _trs = res.get("trainingen") or []
+
+    def _drempel(t):
+        # Bij lage intensiteit heb je genoeg voorraad om het tot 75 minuten
+        # zonder bijtanken te doen; bij matig tot zwaar ligt dat op 60.
+        return 60 if (t.get("intensiteit") or "rustig") in ("matig", "zwaar") else 75
+
+    _lang = [t for t in _trs if (t.get("duur_min") or 0) >= _drempel(t)]
+    _kort = [t for t in _trs if (t.get("duur_min") or 0) < _drempel(t)]
+
+    if _lang:
+        _khs = [t.get("kh_per_uur") or 0 for t in _lang]
+        _vs = [t.get("vocht_per_uur") or 0 for t in _lang]
+        _gem_kh = round(sum(_khs) / len(_khs))
+        _gem_v = round(sum(_vs) / len(_vs))
+
+        if len(_lang) >= 3 and (max(_khs) - min(_khs)) <= 15 and _gem_kh >= 30:
+            voeg(trainingen_inz, "groen", "Je koolhydraten zitten stabiel rond de " + str(_gem_kh),
+                 ("Over " + str(len(_lang)) + " sessies boven het uur zat je tussen " + str(min(_khs)) +
+                  " en " + str(max(_khs)) + " gram per uur. Dat is een patroon, geen toeval."))
+        elif len(_lang) >= 3 and (max(_khs) - min(_khs)) > 30:
+            voeg(trainingen_inz, "geel", "Je inname onderweg schommelt sterk",
+                 ("Van " + str(min(_khs)) + " tot " + str(max(_khs)) + " gram per uur over " +
+                  str(len(_lang)) + " sessies. Een vaste gewoonte is makkelijker vol te houden "
+                  "dan elke keer opnieuw beslissen."))
+
+        _langste = max(_lang, key=lambda t: t.get("duur_min") or 0)
+        _duur_l = _langste.get("duur_min") or 0
+        _kh_l = _langste.get("kh_per_uur") or 0
+        if _duur_l >= 150 and _kh_l < 75:
+            voeg(trainingen_inz, "geel", "Op je langste sessie mag er meer bij",
+                 (_dagnaam(_langste.get("datum")).capitalize() + " duurde " + str(_duur_l) +
+                  " minuten aan " + str(_kh_l) + " gram per uur. Vanaf tweeëneenhalf uur ligt de "
+                  "richtlijn hoger, zeker als je maag dat aankan."))
+
+        if _gem_v > 0 and _gem_v < 500:
+            voeg(trainingen_inz, "geel", "Je drinkt weinig onderweg",
+                 ("Gemiddeld " + str(_gem_v) + " ml per uur, tegenover 500 tot 800 als richtlijn. "
+                  "Op warme dagen weegt dat zwaarder door dan je koolhydraten."))
+        elif _gem_v >= 500:
+            voeg(trainingen_inz, "groen", "Je vochtinname zit goed",
+                 ("Gemiddeld " + str(_gem_v) + " ml per uur over je langere sessies."))
+
+    if _kort and not any((t.get("kh_per_uur") or 0) > 0 for t in _kort):
+        voeg(trainingen_inz, "groen", "Korte sessies liet je met rust",
+             (str(len(_kort)) + " sessies onder de drempel, zonder bijtanken. Terecht — daar "
+              "haal je alles uit je eigen voorraad."))
+
     # ── de kop ──────────────────────────────────────────────────────
     rood = [i for i in (macros + kwaliteit) if i["ernst"] == "rood"]
     geel = [i for i in (macros + kwaliteit) if i["ernst"] == "geel"]
@@ -2902,6 +2965,7 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         "standfirst": _standfirst(res["dagen_gelogd"], laagste_dag or "één dag"),
         "inzichten_kwaliteit": kwaliteit[:4],
         "inzichten_macros": macros[:3],
+        "inzichten_trainingen": trainingen_inz[:4],
     }
 
 
