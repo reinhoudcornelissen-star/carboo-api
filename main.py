@@ -2588,7 +2588,7 @@ def _nd_score(v: dict) -> float:
     return round(min(10.0, s), 1)
 
 
-def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client) -> dict:
+def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, met_inzichten: bool = True) -> dict:
     # alles in een paar bevragingen, niet een per dag
     dg = supabase.table("fuelc_dagboek").select("*") \
         .eq("user_id", user_id).gte("datum", van).lte("datum", tot).execute().data or []
