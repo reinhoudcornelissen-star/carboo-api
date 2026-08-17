@@ -2987,6 +2987,142 @@ async def sla_welzijn_op(welzijn: WelzijnData, user=Depends(get_current_user), s
     supabase.table("fuelc_dagboek_welzijn").upsert(data, on_conflict="user_id,datum").execute()
     return {"status": "opgeslagen"}
 
+# ─── BOODSCHAPPEN-V1 — boodschappenlijst ────────────────────────────────
+# Eén lijst per gebruiker. Groepering gebeurt in de frontend op categorie,
+# zodat je de rayons kan aflopen in plaats van alfabetisch te zoeken.
+
+@app.get("/api/fuelc/boodschappen")
+async def get_boodschappen(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_boodschappen").select("*") \
+        .eq("user_id", user.id).order("aangemaakt").execute()
+    return {"items": r.data or []}
+
+
+@app.post("/api/fuelc/boodschappen")
+async def voeg_boodschap_toe(payload: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Aanvaardt een enkel item of {"items": [...]} voor een heel recept."""
+    lijst = payload.get("items")
+    if lijst is None:
+        lijst = [payload]
+    rijen = []
+    for it in lijst:
+        naam = (it.get("naam") or "").strip()
+        if not naam:
+            continue
+        rijen.append({
+            "user_id": user.id,
+            "naam": naam,
+            "hoeveelheid": (it.get("hoeveelheid") or None),
+            "categorie": (it.get("categorie") or None),
+            "bron_recept": (it.get("bron_recept") or None),
+        })
+    if rijen:
+        supabase.table("carboo_boodschappen").insert(rijen).execute()
+    return {"ok": True, "toegevoegd": len(rijen)}
+
+
+@app.patch("/api/fuelc/boodschappen/{item_id}")
+async def wijzig_boodschap(item_id: str, wijziging: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    toegestaan = {k: v for k, v in wijziging.items() if k in ("afgevinkt", "hoeveelheid", "naam", "categorie")}
+    if toegestaan:
+        supabase.table("carboo_boodschappen").update(toegestaan) \
+            .eq("id", item_id).eq("user_id", user.id).execute()
+    return {"ok": True}
+
+
+@app.delete("/api/fuelc/boodschappen/afgevinkt")
+async def wis_afgevinkt(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_boodschappen").delete() \
+        .eq("user_id", user.id).eq("afgevinkt", True).execute()
+    return {"ok": True}
+
+
+@app.get("/api/fuelc/boodschappen/suggesties")
+async def boodschappen_suggesties(per_groep: int = 4, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """De meest gelogde producten van de laatste 90 dagen, per categorie."""
+    from datetime import date, timedelta
+    vanaf = str(date.today() - timedelta(days=90))
+    r = supabase.table("fuelc_dagboek").select("naam,categorie") \
+        .eq("user_id", user.id).gte("datum", vanaf).execute()
+
+    tel: dict = {}
+    for rij in (r.data or []):
+        naam = (rij.get("naam") or "").strip()
+        if not naam:
+            continue
+        cat = (rij.get("categorie") or "").strip() or "Overig"
+        sleutel = (cat, naam)
+        tel[sleutel] = tel.get(sleutel, 0) + 1
+
+    per_cat: dict = {}
+    for (cat, naam), aantal in tel.items():
+        per_cat.setdefault(cat, []).append({"naam": naam, "categorie": cat, "aantal": aantal})
+
+    uit: dict = {}
+    for cat, lijst in per_cat.items():
+        lijst.sort(key=lambda x: -x["aantal"])
+        uit[cat] = lijst[:max(1, min(per_groep, 10))]
+    return {"suggesties": uit}
+
+
+@app.get("/api/fuelc/boodschappen/lijsten")
+async def get_boodschappenlijsten(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_boodschappen_lijsten").select("*") \
+        .eq("user_id", user.id).order("aangemaakt", desc=True).execute()
+    return {"lijsten": r.data or []}
+
+
+@app.post("/api/fuelc/boodschappen/lijsten")
+async def bewaar_boodschappenlijst(payload: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Bewaart de openstaande items als momentopname onder een naam."""
+    naam = (payload.get("naam") or "").strip()
+    if not naam:
+        raise HTTPException(400, "Geef de lijst een naam")
+    huidig = supabase.table("carboo_boodschappen").select("naam,hoeveelheid,categorie") \
+        .eq("user_id", user.id).eq("afgevinkt", False).execute().data or []
+    r = supabase.table("carboo_boodschappen_lijsten").insert({
+        "user_id": user.id, "naam": naam, "items": huidig,
+    }).execute()
+    return {"ok": True, "lijst_id": r.data[0]["id"] if r.data else None, "aantal": len(huidig)}
+
+
+@app.post("/api/fuelc/boodschappen/lijsten/{lijst_id}/laden")
+async def laad_boodschappenlijst(lijst_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Zet de bewaarde items erbij — vervangt niet wat er al staat."""
+    r = supabase.table("carboo_boodschappen_lijsten").select("items") \
+        .eq("id", lijst_id).eq("user_id", user.id).limit(1).execute()
+    if not r.data:
+        raise HTTPException(404, "Lijst niet gevonden")
+    rijen = []
+    for it in (r.data[0].get("items") or []):
+        naam = (it.get("naam") or "").strip()
+        if not naam:
+            continue
+        rijen.append({
+            "user_id": user.id,
+            "naam": naam,
+            "hoeveelheid": it.get("hoeveelheid"),
+            "categorie": it.get("categorie"),
+        })
+    if rijen:
+        supabase.table("carboo_boodschappen").insert(rijen).execute()
+    return {"ok": True, "toegevoegd": len(rijen)}
+
+
+@app.delete("/api/fuelc/boodschappen/lijsten/{lijst_id}")
+async def verwijder_boodschappenlijst(lijst_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_boodschappen_lijsten").delete() \
+        .eq("id", lijst_id).eq("user_id", user.id).execute()
+    return {"ok": True}
+
+
+@app.delete("/api/fuelc/boodschappen/{item_id}")
+async def verwijder_boodschap(item_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    supabase.table("carboo_boodschappen").delete() \
+        .eq("id", item_id).eq("user_id", user.id).execute()
+    return {"ok": True}
+
+
 @app.get("/api/fuelc/bibliotheek")
 async def get_bibliotheek(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     r = supabase.table("fuelc_bibliotheek").select("*").or_(f"user_id.eq.{user.id},is_globaal.eq.true").order("naam").execute()
