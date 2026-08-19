@@ -1931,6 +1931,127 @@ async def weiger_raceplan_concept(rapport_id: str, user=Depends(get_current_user
     return {"ok": True}
 # === EINDE COACH-CONCEPTEN: RACEPLAN =========================================
 
+# ─── ACHTERSCANTJE-V1 — 't Achterscantje ─────────────────────────────────────
+# Streepjescode eerst: Open Food Facts is gratis en snel. Staat het product
+# er niet in, dan geeft deze route gevonden=false terug en valt de app terug
+# op de fotoscan, die wel geld kost.
+
+_OFF_VELDEN = ("code,product_name,product_name_nl,brands,quantity,serving_size,"
+               "serving_quantity,nutriments,ingredients_text,ingredients_text_nl,"
+               "nova_group,categories,categories_tags,image_front_small_url")
+
+
+def _off_naar_carboo(pr: dict) -> dict:
+    """Zet een Open Food Facts-product om naar de vorm van de etiketscan."""
+    n = pr.get("nutriments") or {}
+
+    def _w(*sleutels):
+        for s in sleutels:
+            v = n.get(s)
+            if v not in (None, ""):
+                try:
+                    return round(float(v), 2)
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    naam = (pr.get("product_name_nl") or pr.get("product_name") or "").strip()
+    merk = (pr.get("brands") or "").split(",")[0].strip()
+    if merk and merk.lower() not in naam.lower():
+        naam = (naam + " " + merk).strip()
+
+    zout = _w("salt_100g")
+    natrium_mg = None
+    if _w("sodium_100g") is not None:
+        natrium_mg = round(_w("sodium_100g") * 1000)
+    if zout is None and natrium_mg is not None:
+        zout = round(natrium_mg * 2.5 / 1000, 2)
+
+    uit = {
+        "naam": naam or "Onbekend product",
+        "barcode": pr.get("code"),
+        "portie_g": pr.get("serving_quantity"),
+        "portie_label": pr.get("serving_size"),
+        "kcal": _w("energy-kcal_100g"),
+        "kh": _w("carbohydrates_100g"),
+        "suikers": _w("sugars_100g"),
+        "vezels": _w("fiber_100g"),
+        "eiwit": _w("proteins_100g"),
+        "vet": _w("fat_100g"),
+        "verz": _w("saturated-fat_100g"),
+        "natrium": natrium_mg,
+        "zout": zout,
+        "kalium": _w("potassium_100g"),
+        "calcium": _w("calcium_100g"),
+        "ijzer": _w("iron_100g"),
+        "ingredienten": (pr.get("ingredients_text_nl") or pr.get("ingredients_text") or "").strip(),
+        "nova": pr.get("nova_group"),
+        "off_categorieen": pr.get("categories") or "",
+        "foto": pr.get("image_front_small_url"),
+        "bron": "openfoodfacts",
+    }
+    return uit
+
+
+def _achterscantje_categorie(p: dict) -> str:
+    """Probeert de Carboo-categorie te bepalen. Bestaat er al een
+    herkenningsfunctie in dit bestand, dan gebruiken we die."""
+    for _naam in ("herken_categorie", "_herken_categorie", "categorie_uit_naam",
+                  "_categorie_uit_naam", "bepaal_categorie"):
+        _f = globals().get(_naam)
+        if callable(_f):
+            try:
+                _c = _f(p.get("naam") or "")
+                if _c:
+                    return _c
+            except Exception:
+                pass
+    return ""
+
+
+@app.get("/api/fuelc/achterscantje/barcode")
+async def achterscantje_barcode(code: str, user=Depends(get_current_user),
+                                supabase: Client = Depends(get_supabase)):
+    code = (code or "").strip()
+    if not code.isdigit() or len(code) < 8:
+        raise HTTPException(400, "Geen geldige streepjescode")
+
+    url = f"https://world.openfoodfacts.org/api/v2/product/{code}.json?fields={_OFF_VELDEN}"
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(url, headers={"User-Agent": "Carboo/2.0 (sports nutrition app)"})
+            data = r.json()
+    except Exception as e:
+        print(f"[ACHTERSCANTJE-V1] Open Food Facts niet bereikbaar: {e}")
+        return {"gevonden": False, "reden": "onbereikbaar"}
+
+    if data.get("status") != 1 or not data.get("product"):
+        return {"gevonden": False, "reden": "onbekend product"}
+
+    p = _off_naar_carboo(data["product"])
+    if p.get("kcal") is None and p.get("kh") is None:
+        return {"gevonden": False, "reden": "geen voedingswaarden"}
+
+    p["categorie"] = _achterscantje_categorie(p)
+
+    try:
+        p["oordeel"] = _winkelbuddy_oordeel(p, supabase)
+    except Exception as e:
+        print(f"[ACHTERSCANTJE-V1] oordeel mislukt: {e}")
+        p["oordeel"] = []
+
+    try:
+        b = supabase.table("carboo_categorieboodschap").select("boodschap,bron") \
+            .eq("categorie", p.get("categorie") or "").limit(1).execute()
+        if b.data:
+            p["boodschap"] = b.data[0].get("boodschap")
+            p["boodschap_bron"] = b.data[0].get("bron")
+    except Exception:
+        pass
+
+    return {"gevonden": True, "product": p}
+
+
 @app.get("/api/fuelc/off-zoek")
 async def off_zoek(q: str):
     if not q or len(q) < 2:
