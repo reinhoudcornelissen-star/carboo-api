@@ -1993,20 +1993,17 @@ def _off_naar_carboo(pr: dict) -> dict:
     return uit
 
 
-def _achterscantje_categorie(p: dict) -> str:
-    """Probeert de Carboo-categorie te bepalen. Bestaat er al een
-    herkenningsfunctie in dit bestand, dan gebruiken we die."""
-    for _naam in ("herken_categorie", "_herken_categorie", "categorie_uit_naam",
-                  "_categorie_uit_naam", "bepaal_categorie"):
-        _f = globals().get(_naam)
-        if callable(_f):
-            try:
-                _c = _f(p.get("naam") or "")
-                if _c:
-                    return _c
-            except Exception:
-                pass
-    return ""
+# ACHTERSCANTJE-CAT-V2 — de bestaande herkenning verwacht drie argumenten.
+def _achterscantje_categorie(p: dict, supabase: Client) -> str:
+    """Bepaalt de Carboo-categorie met de herkenning die al in dit
+    bestand staat. De categorietekst van Open Food Facts gaat mee als hint."""
+    try:
+        return herken_categorie(p.get("naam") or "",
+                                p.get("off_categorieen") or "",
+                                supabase) or ""
+    except Exception as _e:
+        print(f"[ACHTERSCANTJE-CAT-V2] herkenning mislukt: {_e}")
+        return ""
 
 
 @app.get("/api/fuelc/achterscantje/barcode")
@@ -2032,7 +2029,7 @@ async def achterscantje_barcode(code: str, user=Depends(get_current_user),
     if p.get("kcal") is None and p.get("kh") is None:
         return {"gevonden": False, "reden": "geen voedingswaarden"}
 
-    p["categorie"] = _achterscantje_categorie(p)
+    p["categorie"] = _achterscantje_categorie(p, supabase)
 
     try:
         p["oordeel"] = _winkelbuddy_oordeel(p, supabase)
