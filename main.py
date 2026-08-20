@@ -2123,25 +2123,45 @@ async def achterscantje_barcode(code: str, user=Depends(get_current_user),
     if p.get("kcal") is None and p.get("kh") is None:
         return {"gevonden": False, "reden": "geen voedingswaarden"}
 
-    p["categorie"] = _achterscantje_categorie(p, supabase)
-
-    try:
-        p["oordeel"] = _winkelbuddy_oordeel(p, supabase)
-    except Exception as e:
-        print(f"[ACHTERSCANTJE-V1] oordeel mislukt: {e}")
-        p["oordeel"] = []
-
-    try:
-        b = supabase.table("carboo_categorieboodschap").select("boodschap,bron") \
-            .eq("categorie", p.get("categorie") or "").limit(1).execute()
-        if b.data:
-            p["boodschap"] = b.data[0].get("boodschap")
-            p["boodschap_bron"] = b.data[0].get("bron")
-    except Exception:
-        pass
+    # ACHTERSCANTJE-KEUZE-V1 — we raden de categorie, de klant bevestigt of corrigeert.
+    p["categorie_voorstel"] = _achterscantje_categorie(p, supabase)
 
     return {"gevonden": True, "product": p}
 
+
+
+
+# ─── ACHTERSCANTJE-KEUZE-V1 — oordeel voor een gekozen categorie ────────────────────
+# De klant kiest de voedingsgroep zelf. Dat werkt na een streepjescode en
+# na een fotoscan, en het raadwerk uit de tags blijft een voorstel.
+
+@app.post("/api/fuelc/achterscantje/oordeel")
+async def achterscantje_oordeel(payload: dict, user=Depends(get_current_user),
+                                supabase: Client = Depends(get_supabase)):
+    product = payload.get("product") or {}
+    categorie = (payload.get("categorie") or "").strip()
+    if not categorie:
+        raise HTTPException(400, "Kies eerst een voedingsgroep")
+
+    product["categorie"] = categorie
+
+    uit = {"categorie": categorie, "oordeel": [], "boodschap": None, "boodschap_bron": None}
+
+    try:
+        uit["oordeel"] = _winkelbuddy_oordeel(product, supabase)
+    except Exception as e:
+        print(f"[ACHTERSCANTJE-KEUZE-V1] oordeel mislukt: {e}")
+
+    try:
+        b = supabase.table("carboo_categorieboodschap").select("boodschap,bron") \
+            .eq("categorie", categorie).limit(1).execute()
+        if b.data:
+            uit["boodschap"] = b.data[0].get("boodschap")
+            uit["boodschap_bron"] = b.data[0].get("bron")
+    except Exception as e:
+        print(f"[ACHTERSCANTJE-KEUZE-V1] boodschap niet opgehaald: {e}")
+
+    return uit
 
 @app.get("/api/fuelc/off-zoek")
 async def off_zoek(q: str):
