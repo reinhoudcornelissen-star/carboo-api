@@ -1987,6 +1987,7 @@ def _off_naar_carboo(pr: dict) -> dict:
         "ingredienten": (pr.get("ingredients_text_nl") or pr.get("ingredients_text") or "").strip(),
         "nova": pr.get("nova_group"),
         "off_categorieen": pr.get("categories") or "",
+        "off_tags": " ".join(pr.get("categories_tags") or []),
         "foto": pr.get("image_front_small_url"),
         "bron": "openfoodfacts",
     }
@@ -1994,16 +1995,96 @@ def _off_naar_carboo(pr: dict) -> dict:
 
 
 # ACHTERSCANTJE-CAT-V2 — de bestaande herkenning verwacht drie argumenten.
+# ─── ACHTERSCANTJE-CATMAP-V1 — van Open Food Facts naar onze categorieen ──────────
+# Van specifiek naar algemeen: het eerste fragment dat past, wint. Kaas
+# staat dus voor zuivel, notenpasta voor noten, gevogelte voor vlees.
+
+_OFF_NAAR_CARBOO = [
+    # zuivel, gesplitst
+    ("cheese", "Kaas"), ("fromage", "Kaas"),
+    ("yogurt", "Yoghurt en verse zuivel"), ("yoghurt", "Yoghurt en verse zuivel"),
+    ("fermented-milk", "Yoghurt en verse zuivel"), ("quark", "Yoghurt en verse zuivel"),
+    ("skyr", "Yoghurt en verse zuivel"), ("fromage-blanc", "Yoghurt en verse zuivel"),
+    ("dairy-desserts", "Yoghurt en verse zuivel"), ("cottage", "Yoghurt en verse zuivel"),
+    ("milk", "Melk"), ("cream", "Melk"), ("dairies", "Melk"),
+
+    # vetten voor noten, anders wordt notenolie een noot
+    ("butters", "Sauzen en spreads"), ("nut-butter", "Sauzen en spreads"),
+    ("spread", "Sauzen en spreads"), ("sauce", "Sauzen en spreads"),
+    ("mayonnaise", "Sauzen en spreads"), ("ketchup", "Sauzen en spreads"),
+    ("condiment", "Sauzen en spreads"), ("dressing", "Sauzen en spreads"),
+    ("olive-oil", "Vetten en oliën"), ("vegetable-oil", "Vetten en oliën"),
+    ("oils", "Vetten en oliën"), ("margarine", "Vetten en oliën"),
+    ("fats", "Vetten en oliën"),
+
+    # eiwitbronnen
+    ("poultry", "Gevogelte"), ("chicken", "Gevogelte"), ("turkey", "Gevogelte"),
+    ("shellfish", "Schaal- en schelpdieren"), ("crustacean", "Schaal- en schelpdieren"),
+    ("mollusc", "Schaal- en schelpdieren"), ("shrimp", "Schaal- en schelpdieren"),
+    ("fish", "Vis"), ("seafood", "Vis"), ("salmon", "Vis"), ("tuna", "Vis"),
+    ("charcuterie", "Vlees"), ("ham", "Vlees"), ("sausage", "Vlees"),
+    ("meat", "Vlees"), ("beef", "Vlees"), ("pork", "Vlees"),
+    ("egg", "Eieren"),
+
+    # plantaardig
+    ("tofu", "Peulvruchten"), ("tempeh", "Peulvruchten"), ("legume", "Peulvruchten"),
+    ("pulses", "Peulvruchten"), ("beans", "Peulvruchten"), ("lentil", "Peulvruchten"),
+    ("chickpea", "Peulvruchten"),
+    ("nuts", "Noten en zaden"), ("seeds", "Noten en zaden"), ("almond", "Noten en zaden"),
+
+    # sport voor snacks, anders wordt een gel een snoepje
+    ("sports-nutrition", "Sportvoeding"), ("energy-bar", "Sportvoeding"),
+    ("sports-drink", "Sportvoeding"), ("isotonic", "Sportvoeding"),
+
+    # granen
+    ("breakfast-cereal", "Granen en brood"), ("cereal", "Granen en brood"),
+    ("bread", "Granen en brood"), ("pasta", "Granen en brood"),
+    ("rice", "Granen en brood"), ("flour", "Granen en brood"),
+    ("oat", "Granen en brood"), ("potato", "Granen en brood"),
+    ("couscous", "Granen en brood"), ("quinoa", "Granen en brood"),
+
+    # maaltijden voor snacks
+    ("prepared-meal", "Maaltijden"), ("meals", "Maaltijden"), ("pizza", "Maaltijden"),
+    ("soup", "Maaltijden"), ("sandwich", "Maaltijden"), ("salad", "Maaltijden"),
+
+    # dranken
+    ("water", "Dranken"), ("beverage", "Dranken"), ("soda", "Dranken"),
+    ("juice", "Dranken"), ("tea", "Dranken"), ("coffee", "Dranken"),
+
+    # snacks
+    ("chocolate", "Snacks"), ("biscuit", "Snacks"), ("cookie", "Snacks"),
+    ("candy", "Snacks"), ("chips", "Snacks"), ("crisps", "Snacks"),
+    ("ice-cream", "Snacks"), ("cake", "Snacks"), ("snack", "Snacks"),
+    ("confectioner", "Snacks"), ("sweet", "Snacks"),
+
+    ("spice", "Kruiden en specerijen"), ("herb", "Kruiden en specerijen"),
+
+    # groenten en fruit als laatste: hun tags zitten op bijna alles
+    ("dried-fruit", "Groenten en fruit"), ("fruit", "Groenten en fruit"),
+    ("vegetable", "Groenten en fruit"),
+]
+
+
 def _achterscantje_categorie(p: dict, supabase: Client) -> str:
-    """Bepaalt de Carboo-categorie met de herkenning die al in dit
-    bestand staat. De categorietekst van Open Food Facts gaat mee als hint."""
+    """Vertaalt de categorie van Open Food Facts naar een Carboo-categorie."""
+    tekst = ((p.get("off_tags") or "") + " " + (p.get("off_categorieen") or "")).lower()
+    for fragment, categorie in _OFF_NAAR_CARBOO:
+        if fragment in tekst:
+            return categorie
+
+    # niets gevonden in de tags: proberen op de productnaam met je eigen lijst
     try:
-        return herken_categorie(p.get("naam") or "",
-                                p.get("off_categorieen") or "",
-                                supabase) or ""
+        naam = (p.get("naam") or "").lower()
+        for w in (_haal_catwoorden(supabase) or []):
+            if _bevat_woord(naam, w.get("woord") or ""):
+                c = (w.get("categorie") or "").replace(" & ", " en ")
+                if c in ("Groenten", "Fruit"):
+                    return "Groenten en fruit"
+                return c
     except Exception as _e:
-        print(f"[ACHTERSCANTJE-CAT-V2] herkenning mislukt: {_e}")
-        return ""
+        print(f"[ACHTERSCANTJE-CATMAP-V1] woordenlijst mislukt: {_e}")
+
+    return ""
 
 
 @app.get("/api/fuelc/achterscantje/barcode")
