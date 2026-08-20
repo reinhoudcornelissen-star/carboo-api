@@ -3882,6 +3882,102 @@ async def gebruik_credit(omschrijving: str = "Rapport", user=Depends(get_current
 
 # â•â•â• ETIKETSCAN â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
+# ─── WINKELBUDDY-V1 — een product beoordelen per onderdeel ─────────────────
+# Elk onderdeel krijgt groen, oranje of rood los van de rest. Geen
+# eindcijfer: de sporter ziet waar het aan ligt en beslist zelf.
+
+_SUIKERWOORDEN = ("suiker", "glucosestroop", "glucose-fructose", "fructose",
+                  "honing", "dextrose", "siroop", "stroop", "maltodextrine",
+                  "invertsuiker", "melasse", "sucrose")
+_HARDINGWOORDEN = ("gehard", "gehydrogeneerd", "hydrogenated")
+_NATUURLIJK = ("fruit", "appel", "peer", "banaan", "melk", "yoghurt", "room",
+               "sinaasappel", "aardbei", "bes", "druif", "dadel", "rozijn")
+
+
+def _winkelbuddy_oordeel(p: dict, supabase: Client) -> list:
+    def _g(sleutel, terugval=None):
+        w = p.get(sleutel)
+        try:
+            return float(w) if w is not None else terugval
+        except (TypeError, ValueError):
+            return terugval
+
+    ingr = (p.get("ingredienten") or "").lower()
+    kh = _g("kh")
+    suikers = _g("suikers")
+    vet = _g("vet")
+    verz = _g("verz")
+    vezels = _g("vezels")
+    zout = _g("zout")
+    if zout is None and _g("natrium") is not None:
+        zout = round(_g("natrium") * 2.5 / 1000, 2)   # natrium in mg naar gram zout
+
+    # toegevoegde suikers: niet af te lezen, wel af te leiden
+    toegevoegd = None
+    if suikers is not None and ingr:
+        if any(w in ingr for w in _SUIKERWOORDEN):
+            toegevoegd = suikers
+        elif any(w in ingr for w in _NATUURLIJK):
+            toegevoegd = 0.0
+
+    zetmeel_aandeel = None
+    if kh and suikers is not None and kh > 0:
+        zetmeel_aandeel = round(max(0.0, kh - suikers) / kh * 100, 1)
+
+    verz_aandeel = None
+    if vet and verz is not None and vet > 0:
+        verz_aandeel = round(verz / vet * 100, 1)
+
+    transvet = None
+    if ingr:
+        transvet = 1.0 if any(w in ingr for w in _HARDINGWOORDEN) else 0.0
+
+    waarden = {
+        "suikers_toegevoegd": toegevoegd,
+        "zetmeel_aandeel": zetmeel_aandeel,
+        "vezels": vezels,
+        "verz_aandeel": verz_aandeel,
+        "verz_absoluut": verz,
+        "transvet": transvet,
+        "nova": None,           # komt uit Open Food Facts, niet uit een etiket
+        "zout": zout,
+    }
+
+    try:
+        drempels = supabase.table("carboo_productdrempels").select("*") \
+            .eq("actief", True).order("volgorde").execute().data or []
+    except Exception as _e:
+        print(f"[WINKELBUDDY-V1] drempels niet opgehaald: {_e}")
+        return []
+
+    # WINKELBUDDY-CAT-V1 — een regel telt alleen waar ze iets betekent. Vezels bij
+    # olijfolie of zetmeel bij appelmoes zeggen niets, dus die slaan we over.
+    _cat = (p.get("categorie") or "").strip().lower()
+
+    uit = []
+    for d in drempels:
+        _cats = d.get("categorieen") or []
+        if _cats and _cat and _cat not in [str(c).strip().lower() for c in _cats]:
+            continue
+        s = d.get("sleutel")
+        w = waarden.get(s)
+        groen_tot = d.get("groen_tot")
+        rood_vanaf = d.get("rood_vanaf")
+
+        if w is None or groen_tot is None or rood_vanaf is None:
+            kleur = "onbekend"
+        elif d.get("richting") == "lager":
+            kleur = "groen" if w <= float(groen_tot) else ("rood" if w >= float(rood_vanaf) else "oranje")
+        else:
+            kleur = "groen" if w >= float(groen_tot) else ("rood" if w <= float(rood_vanaf) else "oranje")
+
+        uit.append({
+            "sleutel": s, "naam": d.get("naam"), "groep": d.get("groep"),
+            "eenheid": d.get("eenheid"), "waarde": w, "kleur": kleur,
+        })
+    return uit
+
+
 @app.post("/api/fuelc/scan-etiket")
 async def scan_etiket(request: Request, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     import json, re
@@ -3950,7 +4046,7 @@ async def scan_etiket(request: Request, user=Depends(get_current_user), supabase
                     },
                     {
                         "type": "text",
-                        "text": 'Analyseer dit voedseletiket. Geef ALLEEN een JSON object terug, geen uitleg. BELANGRIJK: alle voedingswaarden (kcal, kh, suikers, vezels, eiwit, vet, verz, natrium, kalium, calcium, ijzer, magnesium, vitc, vitd, vitb12, omega3) moeten PER 100G zijn, niet per portie. De portie_g en portie_label zijn informatief. Gebruik dit formaat: {"naam":"","categorie":"Granen en brood","portie_g":100,"portie_label":"100g","kcal":0,"kh":0,"suikers":0,"vezels":0,"eiwit":0,"vet":0,"verz":0,"natrium":0,"kalium":0,"calcium":0,"ijzer":0,"magnesium":0,"vitc":0,"vitd":0,"vitb12":0,"omega3":0,"gi":0}'
+                        "text": 'Analyseer dit voedseletiket. Geef ALLEEN een JSON object terug, geen uitleg. BELANGRIJK: alle voedingswaarden (kcal, kh, suikers, vezels, eiwit, vet, verz, natrium, kalium, calcium, ijzer, magnesium, vitc, vitd, vitb12, omega3) moeten PER 100G zijn, niet per portie. De portie_g en portie_label zijn informatief. Neem in het veld ingredienten de volledige ingredientenlijst letterlijk over zoals ze op de verpakking staat. Staat er geen ingredientenlijst op de foto, laat dat veld dan leeg. Gebruik dit formaat: {"naam":"","categorie":"Granen en brood","portie_g":100,"portie_label":"100g","kcal":0,"kh":0,"suikers":0,"vezels":0,"eiwit":0,"vet":0,"verz":0,"natrium":0,"kalium":0,"calcium":0,"ijzer":0,"magnesium":0,"vitc":0,"vitd":0,"vitb12":0,"omega3":0,"gi":0,"zout":0,"ingredienten":""}'
                     }
                 ]
             }]
@@ -3959,7 +4055,14 @@ async def scan_etiket(request: Request, user=Depends(get_current_user), supabase
         match = re.search(r'\{[\s\S]*\}', tekst)
         if not match:
             raise HTTPException(422, f"Claude antwoord: {tekst[:200]}")
-        return json.loads(match.group())
+        _p = json.loads(match.group())
+        # WINKELBUDDY-V1 — het oordeel per onderdeel erbij
+        try:
+            _p["oordeel"] = _winkelbuddy_oordeel(_p, supabase)
+        except Exception as _e:
+            print(f"[WINKELBUDDY-V1] oordeel mislukt: {_e}")
+            _p["oordeel"] = []
+        return _p
     except HTTPException:
         raise
     except Exception as e:
