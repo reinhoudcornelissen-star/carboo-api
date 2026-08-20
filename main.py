@@ -1972,7 +1972,7 @@ def _off_naar_carboo(pr: dict) -> dict:
         "barcode": pr.get("code"),
         "portie_g": pr.get("serving_quantity"),
         "portie_label": pr.get("serving_size"),
-        "kcal": _w("energy-kcal_100g"),
+        "kcal": (round(_w("energy-kcal_100g")) if _w("energy-kcal_100g") is not None else None),
         "kh": _w("carbohydrates_100g"),
         "suikers": _w("sugars_100g"),
         "vezels": _w("fiber_100g"),
@@ -1999,20 +1999,29 @@ def _off_naar_carboo(pr: dict) -> dict:
 # Van specifiek naar algemeen: het eerste fragment dat past, wint. Kaas
 # staat dus voor zuivel, notenpasta voor noten, gevogelte voor vlees.
 
+# CATMAP-VOLGORDE-V2 — Open Food Facts hangt granen onder en:seeds, dus granen
+# moeten boven noten en zaden staan. Wat bovenaan staat, wint.
 _OFF_NAAR_CARBOO = [
-    # zuivel, gesplitst
-    ("cheese", "Kaas"), ("fromage", "Kaas"),
+    # sportvoeding eerst: een gel draagt ook de tag van een snoepje
+    ("sports-nutrition", "Sportvoeding"), ("energy-bar", "Sportvoeding"),
+    ("sports-drink", "Sportvoeding"), ("isotonic", "Sportvoeding"),
+
+    # zuivel, gesplitst — kaas voor zuivel, anders wordt elke kaas melk
+    ("cheese", "Kaas"), ("fromage-frais", "Yoghurt en verse zuivel"),
+    ("fromage", "Kaas"), ("mozzarella", "Kaas"), ("feta", "Kaas"),
     ("yogurt", "Yoghurt en verse zuivel"), ("yoghurt", "Yoghurt en verse zuivel"),
     ("fermented-milk", "Yoghurt en verse zuivel"), ("quark", "Yoghurt en verse zuivel"),
-    ("skyr", "Yoghurt en verse zuivel"), ("fromage-blanc", "Yoghurt en verse zuivel"),
-    ("dairy-desserts", "Yoghurt en verse zuivel"), ("cottage", "Yoghurt en verse zuivel"),
+    ("skyr", "Yoghurt en verse zuivel"), ("dairy-dessert", "Yoghurt en verse zuivel"),
+    ("cottage", "Yoghurt en verse zuivel"),
     ("milk", "Melk"), ("cream", "Melk"), ("dairies", "Melk"),
 
-    # vetten voor noten, anders wordt notenolie een noot
-    ("butters", "Sauzen en spreads"), ("nut-butter", "Sauzen en spreads"),
+    # smeersels voor noten, anders wordt pindakaas een noot
+    ("nut-butter", "Sauzen en spreads"), ("peanut-butter", "Sauzen en spreads"),
     ("spread", "Sauzen en spreads"), ("sauce", "Sauzen en spreads"),
     ("mayonnaise", "Sauzen en spreads"), ("ketchup", "Sauzen en spreads"),
     ("condiment", "Sauzen en spreads"), ("dressing", "Sauzen en spreads"),
+    ("jam", "Sauzen en spreads"),
+
     ("olive-oil", "Vetten en oliën"), ("vegetable-oil", "Vetten en oliën"),
     ("oils", "Vetten en oliën"), ("margarine", "Vetten en oliën"),
     ("fats", "Vetten en oliën"),
@@ -2026,26 +2035,30 @@ _OFF_NAAR_CARBOO = [
     ("meat", "Vlees"), ("beef", "Vlees"), ("pork", "Vlees"),
     ("egg", "Eieren"),
 
-    # plantaardig
-    ("tofu", "Peulvruchten"), ("tempeh", "Peulvruchten"), ("legume", "Peulvruchten"),
-    ("pulses", "Peulvruchten"), ("beans", "Peulvruchten"), ("lentil", "Peulvruchten"),
-    ("chickpea", "Peulvruchten"),
-    ("nuts", "Noten en zaden"), ("seeds", "Noten en zaden"), ("almond", "Noten en zaden"),
+    # maaltijden voor granen, anders wordt een pizza brood
+    ("prepared-meal", "Maaltijden"), ("meals", "Maaltijden"), ("pizza", "Maaltijden"),
+    ("soup", "Maaltijden"), ("sandwich", "Maaltijden"), ("salad", "Maaltijden"),
 
-    # sport voor snacks, anders wordt een gel een snoepje
-    ("sports-nutrition", "Sportvoeding"), ("energy-bar", "Sportvoeding"),
-    ("sports-drink", "Sportvoeding"), ("isotonic", "Sportvoeding"),
-
-    # granen
+    # GRANEN BOVEN NOTEN EN ZADEN: hun tags overlappen met en:seeds
     ("breakfast-cereal", "Granen en brood"), ("cereal", "Granen en brood"),
     ("bread", "Granen en brood"), ("pasta", "Granen en brood"),
     ("rice", "Granen en brood"), ("flour", "Granen en brood"),
     ("oat", "Granen en brood"), ("potato", "Granen en brood"),
     ("couscous", "Granen en brood"), ("quinoa", "Granen en brood"),
+    ("muesli", "Granen en brood"), ("granola", "Granen en brood"),
 
-    # maaltijden voor snacks
-    ("prepared-meal", "Maaltijden"), ("meals", "Maaltijden"), ("pizza", "Maaltijden"),
-    ("soup", "Maaltijden"), ("sandwich", "Maaltijden"), ("salad", "Maaltijden"),
+    # peulvruchten
+    ("tofu", "Peulvruchten"), ("tempeh", "Peulvruchten"), ("legume", "Peulvruchten"),
+    ("pulses", "Peulvruchten"), ("beans", "Peulvruchten"), ("lentil", "Peulvruchten"),
+    ("chickpea", "Peulvruchten"),
+
+    # noten en zaden: specifiek, niet het brede en:seeds
+    ("nuts", "Noten en zaden"), ("almond", "Noten en zaden"),
+    ("walnut", "Noten en zaden"), ("hazelnut", "Noten en zaden"),
+    ("cashew", "Noten en zaden"), ("pistachio", "Noten en zaden"),
+    ("sunflower-seed", "Noten en zaden"), ("pumpkin-seed", "Noten en zaden"),
+    ("sesame", "Noten en zaden"), ("chia", "Noten en zaden"),
+    ("linseed", "Noten en zaden"), ("flaxseed", "Noten en zaden"),
 
     # dranken
     ("water", "Dranken"), ("beverage", "Dranken"), ("soda", "Dranken"),
@@ -2059,7 +2072,7 @@ _OFF_NAAR_CARBOO = [
 
     ("spice", "Kruiden en specerijen"), ("herb", "Kruiden en specerijen"),
 
-    # groenten en fruit als laatste: hun tags zitten op bijna alles
+    # groenten en fruit als laatste: die tags zitten op bijna alles
     ("dried-fruit", "Groenten en fruit"), ("fruit", "Groenten en fruit"),
     ("vegetable", "Groenten en fruit"),
 ]
