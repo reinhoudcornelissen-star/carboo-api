@@ -3952,23 +3952,60 @@ def _winkelbuddy_oordeel(p: dict, supabase: Client) -> list:
     if ingr:
         transvet = 1.0 if any(w in ingr for w in _HARDINGWOORDEN) else 0.0
 
+    # CATDREMPELS-V1 — vezels per 10 g koolhydraten maakt brood, pasta en
+    # ontbijtgranen onderling vergelijkbaar; per portie telt bij ritvoeding.
+    vezels_per_kh = None
+    if kh and vezels is not None and kh > 0:
+        vezels_per_kh = round(vezels / kh * 10, 2)
+
+    kh_per_portie = None
+    try:
+        _portie = float(p.get("portie_g") or 0)
+        if kh is not None and _portie > 0:
+            kh_per_portie = round(kh * _portie / 100, 1)
+    except (TypeError, ValueError):
+        pass
+
+    _nova = p.get("nova")
+    try:
+        _nova = float(_nova) if _nova not in (None, "") else None
+    except (TypeError, ValueError):
+        _nova = None
+
     waarden = {
         "suikers_toegevoegd": toegevoegd,
         "zetmeel_aandeel": zetmeel_aandeel,
         "vezels": vezels,
+        "vezels_per_kh": vezels_per_kh,
         "verz_aandeel": verz_aandeel,
         "verz_absoluut": verz,
+        "vet_totaal": vet,
         "transvet": transvet,
-        "nova": None,           # komt uit Open Food Facts, niet uit een etiket
+        "nova": _nova,
         "zout": zout,
+        "kh_per_portie": kh_per_portie,
     }
 
-    try:
-        drempels = supabase.table("carboo_productdrempels").select("*") \
-            .eq("actief", True).order("volgorde").execute().data or []
-    except Exception as _e:
-        print(f"[WINKELBUDDY-V1] drempels niet opgehaald: {_e}")
-        return []
+    # CATDREMPELS-V1 — eerst de drempels van deze categorie, anders de algemene
+    _cat_gekozen = (p.get("categorie") or "").strip()
+    drempels = []
+    per_categorie = False
+
+    if _cat_gekozen:
+        try:
+            drempels = supabase.table("carboo_categoriedrempels").select("*") \
+                .eq("categorie", _cat_gekozen).order("volgorde").execute().data or []
+            per_categorie = len(drempels) > 0
+        except Exception as _e:
+            print(f"[CATDREMPELS-V1] categoriedrempels niet opgehaald: {_e}")
+
+    if not drempels:
+        try:
+            drempels = supabase.table("carboo_productdrempels").select("*") \
+                .eq("actief", True).order("volgorde").execute().data or []
+        except Exception as _e:
+            print(f"[CATDREMPELS-V1] algemene drempels niet opgehaald: {_e}")
+            return []
 
     # WINKELBUDDY-CAT-V1 — een regel telt alleen waar ze iets betekent. Vezels bij
     # olijfolie of zetmeel bij appelmoes zeggen niets, dus die slaan we over.
@@ -3976,9 +4013,10 @@ def _winkelbuddy_oordeel(p: dict, supabase: Client) -> list:
 
     uit = []
     for d in drempels:
-        _cats = d.get("categorieen") or []
-        if _cats and _cat and _cat not in [str(c).strip().lower() for c in _cats]:
-            continue
+        if not per_categorie:
+            _cats = d.get("categorieen") or []
+            if _cats and _cat and _cat not in [str(c).strip().lower() for c in _cats]:
+                continue
         s = d.get("sleutel")
         w = waarden.get(s)
         groen_tot = d.get("groen_tot")
