@@ -4071,7 +4071,10 @@ async def scan_etiket(request: Request, user=Depends(get_current_user), supabase
         .eq("user_id", user.id).eq("status", "actief").execute().data or []
     _betaald = any((a.get("mollie_payment_id") or "") not in ("trial_auto_7d", "admin_trial") for a in _abos)
 
-    if not _betaald and _aantal >= _MAX_PROEF:
+    # LIMIET-AAN — zet deze op True om de limiet weer in te schakelen
+    _LIMIET_ACTIEF = False
+
+    if _LIMIET_ACTIEF and not _betaald and _aantal >= _MAX_PROEF:
         return {
             "ok": False,
             "limiet": True,
