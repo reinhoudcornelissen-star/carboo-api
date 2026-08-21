@@ -4067,9 +4067,32 @@ async def scan_etiket(request: Request, user=Depends(get_current_user), supabase
     except Exception:
         _aantal = 0
 
-    _abos = supabase.table("carboo_abonnementen").select("mollie_payment_id,status") \
-        .eq("user_id", user.id).eq("status", "actief").execute().data or []
-    _betaald = any((a.get("mollie_payment_id") or "") not in ("trial_auto_7d", "admin_trial") for a in _abos)
+    # SCANLIMIET-V2 — onbeperkt bij een adminrol of een actief pakket.
+    # De oude regel keek alleen naar het betaal-id, waardoor een admin met
+    # een verlopen abonnement en klanten via een coach vastliepen op vijf.
+    _betaald = False
+
+    try:
+        _g2 = supabase.table("carboo_gebruikers").select("*") \
+            .eq("id", user.id).limit(1).execute()
+        _rij = (_g2.data or [{}])[0]
+        for _veld in ("is_admin", "admin", "rol", "role"):
+            _w = _rij.get(_veld)
+            if _w is True or (isinstance(_w, str) and _w.lower() in ("admin", "beheerder")):
+                _betaald = True
+                break
+    except Exception as _e:
+        print(f"[SCANLIMIET-V2] rol niet gelezen: {_e}")
+
+    if not _betaald:
+        _abos = supabase.table("carboo_abonnementen").select("pakket,mollie_payment_id,status") \
+            .eq("user_id", user.id).eq("status", "actief").execute().data or []
+        for _a in _abos:
+            _pakket = (_a.get("pakket") or "").lower()
+            _pid = _a.get("mollie_payment_id") or ""
+            if _pakket in ("alles", "fueling", "coach") and _pid not in ("trial_auto_7d", "admin_trial"):
+                _betaald = True
+                break
 
     if not _betaald and _aantal >= _MAX_PROEF:
         return {
