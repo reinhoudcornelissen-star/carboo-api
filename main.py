@@ -2135,6 +2135,139 @@ async def achterscantje_barcode(code: str, user=Depends(get_current_user),
 # De klant kiest de voedingsgroep zelf. Dat werkt na een streepjescode en
 # na een fotoscan, en het raadwerk uit de tags blijft een voorstel.
 
+# ─── ACHTERSCANTJE-DUIDING-V1 — cijfers omzetten naar iets bruikbaars ────────────────
+# Per 100 g zegt weinig. Wat telt is wat er in je portie zit, en hoeveel
+# dat is van wat je op een dag hoort binnen te krijgen.
+
+_DAGNORM_UIT_NORMEN = {
+    # sleutel in de drempels -> (sleutel in carboo_normen, veld, omzetting)
+    "suikers_toegevoegd": ("suikers_toegevoegd_pct", "norm_max", "energie_kh"),
+    "verz_absoluut": ("verz_pct", "norm_max", "energie_vet"),
+    "vezels": ("vezels", "norm_min", "gram"),
+    "vet_totaal": ("vet_pct", "norm_max", "energie_vet"),
+}
+
+_ZOUT_PER_DAG = 5.0     # HGR 2025: maximaal 5 g zout per dag
+
+
+def _achterscantje_duiding(oordeel: list, product: dict, drempels: list,
+                           user_id: str, supabase: Client) -> tuple:
+    """Vult per regel de portiewaarde en het aandeel van de dagnorm aan,
+    en stelt één zin samen over waar je op let in het schap."""
+
+    # portiegrootte
+    portie = None
+    try:
+        _p = float(product.get("portie_g") or 0)
+        if _p > 0:
+            portie = _p
+    except (TypeError, ValueError):
+        pass
+
+    # energiedoel voor de normen die in procent energie staan
+    e_doel = 0.0
+    try:
+        _pr = supabase.table("fuelc_profielen").select("energie_doel") \
+            .eq("user_id", user_id).limit(1).execute()
+        if _pr.data:
+            e_doel = float(_pr.data[0].get("energie_doel") or 0)
+    except Exception:
+        pass
+
+    normen = {}
+    try:
+        _n = supabase.table("carboo_normen").select("sleutel,norm_min,norm_max") \
+            .eq("actief", True).execute().data or []
+        normen = {r["sleutel"]: r for r in _n}
+    except Exception as _e:
+        print(f"[ACHTERSCANTJE-DUIDING-V1] normen niet opgehaald: {_e}")
+
+    def _dagnorm(sleutel):
+        """De dagnorm in gram voor deze regel, of None."""
+        if sleutel == "zout":
+            return _ZOUT_PER_DAG
+        koppel = _DAGNORM_UIT_NORMEN.get(sleutel)
+        if not koppel:
+            return None
+        norm_sleutel, veld, omzetting = koppel
+        rij = normen.get(norm_sleutel)
+        if not rij or rij.get(veld) is None:
+            return None
+        w = float(rij[veld])
+        if omzetting == "gram":
+            return w
+        if not e_doel:
+            return None
+        if omzetting == "energie_kh":
+            return e_doel * w / 100 / 4
+        if omzetting == "energie_vet":
+            return e_doel * w / 100 / 9
+        return None
+
+    for r in oordeel:
+        s = r.get("sleutel")
+        w = r.get("waarde")
+        if w is None or not isinstance(w, (int, float)):
+            continue
+        eenheid = (r.get("eenheid") or "")
+
+        # alleen regels in gram per 100 g laten zich omrekenen
+        if "100" in eenheid and portie:
+            r["waarde_portie"] = round(w * portie / 100, 1)
+            r["portie_g"] = round(portie)
+
+        basis = r.get("waarde_portie", w if "100" not in eenheid else None)
+        dn = _dagnorm(s)
+        if dn and basis is not None and dn > 0:
+            pct = round(basis / dn * 100)
+            r["dagnorm_pct"] = pct
+            r["dagnorm"] = round(dn, 1)
+            if s == "vezels":
+                r["duiding"] = f"{pct}% van de {round(dn)} g die je per dag zoekt"
+            else:
+                r["duiding"] = f"{pct}% van je dagmaximum van {round(dn)} g"
+
+    # ── waar je op let in het schap ─────────────────────────────────
+    _tips = []
+    for d in drempels:
+        s = d.get("sleutel")
+        if s in ("nova", "transvet"):
+            continue
+        rij = next((r for r in oordeel if r.get("sleutel") == s), None)
+        if not rij or rij.get("kleur") not in ("oranje", "rood"):
+            continue
+        # SCHAPTIP-TAAL-V1 — de eenheid hoort erbij, anders leest 3 als een aantal
+        naam = (d.get("naam") or s).lower()
+        _eh = (d.get("eenheid") or "")
+        if "%" in _eh:
+            _maat = "%"
+        elif "ml" in _eh:
+            _maat = " ml"
+        else:
+            _maat = " g"
+
+        if d.get("richting") == "lager" and d.get("groen_tot") is not None:
+            _tips.append(f"minder dan {_kort(d['groen_tot'])}{_maat} {naam}")
+        elif d.get("richting") == "hoger" and d.get("groen_tot") is not None:
+            _tips.append(f"minstens {_kort(d['groen_tot'])}{_maat} {naam}")
+
+    schaptip = ""
+    if _tips:
+        eenheid = "per 100 ml" if any("100ml" in (r.get("eenheid") or "") for r in oordeel) else "per 100 g"
+        schaptip = "Zoek er een met " + " en ".join(_tips[:3]) + " " + eenheid + "."
+
+    return oordeel, schaptip
+
+
+def _kort(w):
+    """1.5 blijft 1,5 maar 5.0 wordt 5."""
+    try:
+        f = float(w)
+        return str(int(f)) if f == int(f) else str(f).replace(".", ",")
+    except (TypeError, ValueError):
+        return str(w)
+
+
 @app.post("/api/fuelc/achterscantje/oordeel")
 async def achterscantje_oordeel(payload: dict, user=Depends(get_current_user),
                                 supabase: Client = Depends(get_supabase)):
@@ -2151,6 +2284,15 @@ async def achterscantje_oordeel(payload: dict, user=Depends(get_current_user),
         uit["oordeel"] = _winkelbuddy_oordeel(product, supabase)
     except Exception as e:
         print(f"[ACHTERSCANTJE-KEUZE-V1] oordeel mislukt: {e}")
+
+    # ACHTERSCANTJE-DUIDING-V1 — portiewaarden, dagnorm en de schapregel erbij
+    try:
+        _dr = supabase.table("carboo_categoriedrempels").select("*") \
+            .eq("categorie", categorie).order("volgorde").execute().data or []
+        uit["oordeel"], uit["schaptip"] = _achterscantje_duiding(
+            uit["oordeel"], product, _dr, user.id, supabase)
+    except Exception as e:
+        print(f"[ACHTERSCANTJE-DUIDING-V1] duiding mislukt: {e}")
 
     try:
         b = supabase.table("carboo_categorieboodschap").select("boodschap,bron") \
