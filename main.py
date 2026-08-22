@@ -2167,7 +2167,7 @@ def _achterscantje_duiding(oordeel: list, product: dict, drempels: list,
     # energiedoel voor de normen die in procent energie staan
     e_doel = 0.0
     try:
-        _pr = supabase.table("fuelc_profielen").select("energie_doel") \
+        _pr = supabase.table("fuelc_profiel").select("energie_doel") \
             .eq("user_id", user_id).limit(1).execute()
         if _pr.data:
             e_doel = float(_pr.data[0].get("energie_doel") or 0)
