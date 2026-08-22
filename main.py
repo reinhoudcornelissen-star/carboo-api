@@ -2155,14 +2155,25 @@ def _achterscantje_duiding(oordeel: list, product: dict, drempels: list,
     """Vult per regel de portiewaarde en het aandeel van de dagnorm aan,
     en stelt één zin samen over waar je op let in het schap."""
 
-    # portiegrootte
+    # RICHTPORTIE-V1 — portiegrootte, of de richtwaarde van deze categorie
     portie = None
+    portie_geschat = False
     try:
         _p = float(product.get("portie_g") or 0)
         if _p > 0:
             portie = _p
     except (TypeError, ValueError):
         pass
+
+    if portie is None:
+        try:
+            _cp = supabase.table("carboo_categorieportie").select("portie_g") \
+                .eq("categorie", product.get("categorie") or "").limit(1).execute()
+            if _cp.data and _cp.data[0].get("portie_g"):
+                portie = float(_cp.data[0]["portie_g"])
+                portie_geschat = True
+        except Exception as _e:
+            print(f"[RICHTPORTIE-V1] richtportie niet opgehaald: {_e}")
 
     # energiedoel voor de normen die in procent energie staan
     e_doel = 0.0
