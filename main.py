@@ -1,4 +1,7 @@
 ﻿from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
+import hashlib as _hashlib
+import datetime as _dt
+import re as _re
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -2973,6 +2976,206 @@ def _nd_score(v: dict) -> float:
     return round(min(10.0, s), 1)
 
 
+# ── RECEPT-BIJ-INZICHT-V1 ────────────────────────────────────────────
+# De krant stelt vast waar het scheef zit; deze functie zoekt er twee
+# recepten bij. Ze hangt aan dezelfde _kandidaten-lijst die de kop van
+# de krant bepaalt, zodat de tekst en het recept nooit iets anders
+# kunnen beweren.
+#
+# Variatie is bewust ingebouwd:
+#   - niet de winnaar maar een shortlist van acht, allemaal goed genoeg
+#   - wat de laatste zes weken langskwam valt eruit
+#   - de keuze binnen de shortlist wordt geloot met week + user als
+#     zaadje, zodat een bewaarde krant bij heropenen dezelfde recepten
+#     toont maar elke klant een andere volgorde krijgt
+#   - het tweede recept is altijd van een ander type dan het eerste
+
+_AS_NAAR_KOLOM = {
+    "vezels":                ("vezels",  "hoog"),
+    "calcium":               ("calcium", "hoog"),
+    "ijzer":                 ("ijzer",   "hoog"),
+    "omega3":                ("omega3",  "hoog"),
+    "eiwit_g_kg":            ("eiwit",   "hoog"),
+    "eiwit_maaltijd_g_kg":   ("eiwit",   "hoog"),
+    "eiwit_maaltijden_ok":   ("eiwit",   "hoog"),
+    "eiwit_plantaardig_pct": ("plantaardig_eiwit", "hoog"),
+    "groenten":              ("groentegram", "hoog"),
+    "fruit":                 ("groentegram", "hoog"),
+    "verz_pct":              ("vet",     "laag"),
+    "suikers_toegevoegd_pct":("suikers", "laag"),
+    "nutrientdensiteit":     ("vezels",  "hoog"),
+    "kalium":                ("groentegram", "hoog"),
+}
+
+_REDEN = {
+    "vezels":  "Omdat je vezels deze week onder de norm bleven",
+    "calcium": "Omdat je calcium deze week onder de norm bleef",
+    "ijzer":   "Omdat je ijzer deze week onder de norm bleef",
+    "omega3":  "Omdat je omega 3 deze week onder de norm bleef",
+    "eiwit_g_kg": "Omdat je eiwit deze week onder de norm bleef",
+    "eiwit_maaltijd_g_kg": "Omdat je eiwit per maaltijd te laag lag",
+    "eiwit_maaltijden_ok": "Omdat je eiwit niet over de dag verdeeld zat",
+    "eiwit_plantaardig_pct": "Omdat je eiwit vooral van dierlijke bronnen kwam",
+    "groenten": "Omdat je groenten deze week onder de norm bleven",
+    "fruit":    "Omdat je fruit deze week onder de norm bleef",
+    "kalium":   "Omdat je kalium deze week onder de norm bleef",
+    "verz_pct": "Omdat je verzadigd vet deze week boven de grens lag",
+    "suikers_toegevoegd_pct": "Omdat je toegevoegde suikers boven de grens lagen",
+    "nutrientdensiteit": "Omdat je voedingsdichtheid deze week laag lag",
+}
+
+_PLANT = ("Peulvruchten", "Noten en zaden")
+
+
+def _iso_week(datum: str) -> str:
+    try:
+        d = _dt.date.fromisoformat(str(datum)[:10])
+    except Exception:
+        d = _dt.date.today()
+    j, w, _ = d.isocalendar()
+    return f"{j}-W{w:02d}"
+
+
+def _recept_kenmerken(recepten: list, categorie_van: dict) -> None:
+    """Vult per recept de afgeleide assen in: groentegram en plantaardig
+    eiwit per portie. De macro's staan al als kolom."""
+    for r in recepten:
+        porties = max(1, int(r.get("aantal_porties") or 1))
+        groente = 0.0
+        plant = 0.0
+        for i in (r.get("ingredienten") or []):
+            if not isinstance(i, dict):
+                continue
+            g = i.get("gram")
+            if g is None:
+                g = i.get("hoeveelheid_g")
+            try:
+                g = float(g or 0)
+            except Exception:
+                g = 0.0
+            cat = categorie_van.get(str(i.get("naam") or "").strip().lower())
+            if cat == "Groenten en fruit":
+                groente += g
+            if cat in _PLANT:
+                try:
+                    plant += float(i.get("eiwit") or 0) * g / 100
+                except Exception:
+                    pass
+        r["groentegram"] = round(groente / porties, 1)
+        r["plantaardig_eiwit"] = round(plant / porties, 1)
+
+
+def _kies_recepten(user_id: str, res: dict, tot: str, supabase: Client) -> dict:
+    try:
+        kandidaten = res.get("normen_kandidaten") or []
+        onder = sorted([k for k in kandidaten if (k.get("afw") or 0) < 0],
+                       key=lambda k: k.get("afw") or 0)
+        assen = [k.get("sleutel") for k in onder
+                 if k.get("sleutel") in _AS_NAAR_KOLOM]
+        if not assen:
+            assen = ["vezels"]
+
+        rr = supabase.table("fuelc_recepten_eigen") \
+            .select("id,naam,type,aantal_porties,kcal,kh,eiwit,vet,vezels,"
+                    "suikers,calcium,ijzer,omega3,ingredienten") \
+            .or_(f"user_id.eq.{user_id},is_globaal.eq.true") \
+            .in_("type", ["Ontbijt", "Lunch", "Avondmaal"]) \
+            .execute().data or []
+        if not rr:
+            return {"recepten": []}
+
+        namen = set()
+        for r in rr:
+            for i in (r.get("ingredienten") or []):
+                if isinstance(i, dict) and i.get("naam"):
+                    namen.add(str(i["naam"]).strip())
+        categorie_van = {}
+        if namen:
+            bb = supabase.table("fuelc_bibliotheek").select("naam,categorie") \
+                .in_("naam", list(namen)[:400]).execute().data or []
+            categorie_van = {str(b["naam"]).strip().lower(): b.get("categorie")
+                             for b in bb}
+        _recept_kenmerken(rr, categorie_van)
+
+        week = _iso_week(tot)
+        recent = set()
+        try:
+            sug = supabase.table("carboo_recept_suggesties") \
+                .select("recept_id,week").eq("user_id", user_id) \
+                .order("week", desc=True).limit(24).execute().data or []
+            weken = sorted({s["week"] for s in sug}, reverse=True)[:6]
+            recent = {str(s["recept_id"]) for s in sug if s["week"] in weken}
+        except Exception as e:
+            print(f"[RECEPT-BIJ-INZICHT-V1] geen geheugen: {e}")
+
+        def shortlist(kolom, richting, verboden_types):
+            pool = [r for r in rr
+                    if str(r["id"]) not in recent
+                    and r.get("type") not in verboden_types
+                    and r.get(kolom) is not None]
+            if not pool:
+                pool = [r for r in rr
+                        if r.get("type") not in verboden_types
+                        and r.get(kolom) is not None]
+            if not pool:
+                return []
+            omgekeerd = (richting == "hoog")
+            pool.sort(key=lambda r: float(r.get(kolom) or 0), reverse=omgekeerd)
+            return pool[:8]
+
+        def loot(lijst, as_):
+            zaad = _hashlib.md5(f"{user_id}|{week}|{as_}".encode()).hexdigest()
+            return lijst[int(zaad[:8], 16) % len(lijst)]
+
+        gekozen = []
+        gebruikte_types = []
+        for as_ in assen:
+            if len(gekozen) >= 2:
+                break
+            kolom, richting = _AS_NAAR_KOLOM[as_]
+            lijst = shortlist(kolom, richting, gebruikte_types)
+            if not lijst:
+                continue
+            r = loot(lijst, as_)
+            gekozen.append({
+                "id": str(r["id"]), "naam": r.get("naam"), "type": r.get("type"),
+                "aantal_porties": r.get("aantal_porties"),
+                "kcal": r.get("kcal"), "kh": r.get("kh"), "eiwit": r.get("eiwit"),
+                "vezels": r.get("vezels"),
+                "reden": _REDEN.get(as_, "Past bij je week"),
+                "as": as_,
+                "waarde": r.get(kolom), "kolom": kolom,
+            })
+            gebruikte_types.append(r.get("type"))
+
+        # tweede recept aanvullen als er maar een tekort was
+        if len(gekozen) == 1:
+            lijst = shortlist("vezels", "hoog", gebruikte_types)
+            if lijst:
+                r = loot(lijst, "aanvulling")
+                gekozen.append({
+                    "id": str(r["id"]), "naam": r.get("naam"), "type": r.get("type"),
+                    "aantal_porties": r.get("aantal_porties"),
+                    "kcal": r.get("kcal"), "kh": r.get("kh"), "eiwit": r.get("eiwit"),
+                    "vezels": r.get("vezels"),
+                    "reden": "Om je week wat vezelrijker te maken",
+                    "as": "vezels", "waarde": r.get("vezels"), "kolom": "vezels",
+                })
+
+        try:
+            for g in gekozen:
+                supabase.table("carboo_recept_suggesties").insert({
+                    "user_id": user_id, "week": week, "recept_id": g["id"],
+                }).execute()
+        except Exception as e:
+            print(f"[RECEPT-BIJ-INZICHT-V1] bewaren mislukt: {e}")
+
+        return {"recepten": gekozen}
+    except Exception as e:
+        print(f"[RECEPT-BIJ-INZICHT-V1] selectie mislukt: {e}")
+        return {"recepten": []}
+
+
 def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, met_inzichten: bool = True) -> dict:
     # alles in een paar bevragingen, niet een per dag
     dg = supabase.table("fuelc_dagboek").select("*") \
@@ -3185,6 +3388,7 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
 
     try:
         res.update(_bouw_inzichten(res, dagen, profiel, tr))
+        res.update(_kies_recepten(user_id, res, tot, supabase))
     except Exception as e:
         res.update({"kop": "", "standfirst": "", "inzichten_kwaliteit": [],
                     "inzichten_macros": [], "inzichten_fout": str(e)})
@@ -3545,6 +3749,7 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
                 _ver = _pct if _richting != "lager" else -_pct
 
             _kandidaten.append({
+                "sleutel": _s,
                 "naam": _n.get("naam"), "eenheid": _n.get("eenheid"),
                 "waarde": _w, "norm": _min if _richting != "lager" else _max,
                 "richting": _richting, "afw": round(_afw, 1),
@@ -3591,6 +3796,7 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         "inzichten_kwaliteit": kwaliteit[:4],
         "inzichten_macros": macros[:3],
         "inzichten_trainingen": trainingen_inz[:4],
+        "normen_kandidaten": locals().get("_kandidaten") or [],
     }
 
 
@@ -3708,6 +3914,119 @@ async def voeg_boodschap_toe(payload: dict, user=Depends(get_current_user), supa
     if rijen:
         supabase.table("carboo_boodschappen").insert(rijen).execute()
     return {"ok": True, "toegevoegd": len(rijen)}
+
+# ── BOODSCHAPPEN-VAN-RECEPT-V1 ───────────────────────────────────────
+# Een heel recept naar de boodschappenlijst. De server zoekt de
+# ingredienten op, schaalt naar het aantal porties, hangt er een
+# categorie aan uit de bibliotheek en telt op bij wat er al op de lijst
+# staat in plaats van een tweede rij te maken.
+def _norm_naam(t) -> str:
+    return " ".join(str(t or "").strip().lower().split())
+
+
+def _gram_uit(i: dict) -> float:
+    g = i.get("gram")
+    if g is None:
+        g = i.get("hoeveelheid_g")
+    try:
+        return float(g or 0)
+    except Exception:
+        return 0.0
+
+
+def _tel_op(bestaand: str, erbij_g: float) -> str:
+    """Telt twee hoeveelheden op als ze allebei in gram staan; anders
+    zet het ze naast elkaar zodat er niets verloren gaat."""
+    nieuw = f"{erbij_g:g} g"
+    if not bestaand:
+        return nieuw
+    m = _re.fullmatch(r"\s*([\d.,]+)\s*g\s*", str(bestaand), _re.I)
+    if m:
+        try:
+            return f"{float(m.group(1).replace(',', '.')) + erbij_g:g} g"
+        except Exception:
+            pass
+    return f"{bestaand} + {nieuw}"
+
+
+@app.post("/api/fuelc/boodschappen/recept")
+async def boodschappen_van_recept(payload: dict,
+                                  user=Depends(get_current_user),
+                                  supabase: Client = Depends(get_supabase)):
+    recept_id = str(payload.get("recept_id") or "").strip()
+    if not recept_id:
+        raise HTTPException(status_code=400, detail="recept_id ontbreekt")
+
+    rr = supabase.table("fuelc_recepten_eigen") \
+        .select("id,naam,aantal_porties,ingredienten") \
+        .eq("id", recept_id).limit(1).execute().data or []
+    if not rr:
+        raise HTTPException(status_code=404, detail="recept niet gevonden")
+    recept = rr[0]
+
+    basis = max(1, int(recept.get("aantal_porties") or 1))
+    try:
+        porties = float(payload.get("porties") or basis)
+    except Exception:
+        porties = basis
+    schaal = porties / basis if basis else 1.0
+
+    ingredienten = [i for i in (recept.get("ingredienten") or [])
+                    if isinstance(i, dict) and i.get("naam")]
+    if not ingredienten:
+        return {"ok": True, "toegevoegd": 0, "opgeteld": 0}
+
+    namen = [str(i["naam"]).strip() for i in ingredienten]
+    categorie_van = {}
+    try:
+        bb = supabase.table("fuelc_bibliotheek").select("naam,categorie") \
+            .in_("naam", namen).execute().data or []
+        categorie_van = {_norm_naam(b["naam"]): b.get("categorie") for b in bb}
+    except Exception as e:
+        print(f"[BOODSCHAPPEN-VAN-RECEPT-V1] categorie zoeken mislukt: {e}")
+
+    huidig = supabase.table("carboo_boodschappen") \
+        .select("id,naam,hoeveelheid,afgevinkt") \
+        .eq("user_id", user.id).execute().data or []
+    bestaand = {}
+    for h in huidig:
+        if not h.get("afgevinkt"):
+            bestaand.setdefault(_norm_naam(h.get("naam")), h)
+
+    nieuwe, opgeteld = [], 0
+    for i in ingredienten:
+        naam = str(i["naam"]).strip()
+        gram = round(_gram_uit(i) * schaal)
+        if gram <= 0:
+            continue
+        sleutel = _norm_naam(naam)
+        cat = categorie_van.get(sleutel)
+        if cat in ("Groenten en fruit",):
+            cat = "Groenten en fruit"
+        rij = bestaand.get(sleutel)
+        if rij:
+            try:
+                supabase.table("carboo_boodschappen") \
+                    .update({"hoeveelheid": _tel_op(rij.get("hoeveelheid"), gram)}) \
+                    .eq("id", rij["id"]).eq("user_id", user.id).execute()
+                opgeteld += 1
+                continue
+            except Exception as e:
+                print(f"[BOODSCHAPPEN-VAN-RECEPT-V1] optellen mislukt: {e}")
+        nieuwe.append({
+            "user_id": user.id,
+            "naam": naam,
+            "hoeveelheid": f"{gram:g} g",
+            "categorie": cat,
+            "bron_recept": recept.get("naam"),
+        })
+
+    if nieuwe:
+        supabase.table("carboo_boodschappen").insert(nieuwe).execute()
+
+    return {"ok": True, "recept": recept.get("naam"),
+            "toegevoegd": len(nieuwe), "opgeteld": opgeteld}
+
 
 
 @app.patch("/api/fuelc/boodschappen/{item_id}")
