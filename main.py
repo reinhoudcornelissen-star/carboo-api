@@ -3115,12 +3115,44 @@ def _kies_recepten(user_id: str, res: dict, tot: str, supabase: Client) -> dict:
         _recept_kenmerken(rr, categorie_van)
 
         week = _iso_week(tot)
+
+        # Is er voor deze week al gekozen? Dan die keuze tonen. Anders
+        # zou elke keer dat de klant zijn krant opent opnieuw geloot
+        # worden, en zou de vorige keuze bovendien in de uitsluitingslijst
+        # belanden. De krant hoort per week vast te liggen.
+        try:
+            vast = supabase.table("carboo_recept_suggesties") \
+                .select("recept_id,as_sleutel,reden").eq("user_id", user_id) \
+                .eq("week", week).execute().data or []
+        except Exception as e:
+            vast = []
+            print(f"[RECEPT-BIJ-INZICHT-V1] vaste keuze lezen mislukt: {e}")
+        if vast:
+            per_id = {str(x["id"]): x for x in rr}
+            uit = []
+            for v in vast[:2]:
+                r = per_id.get(str(v.get("recept_id")))
+                if not r:
+                    continue
+                as_ = v.get("as_sleutel") or "vezels"
+                kolom = _AS_NAAR_KOLOM.get(as_, ("vezels", "hoog"))[0]
+                uit.append({
+                    "id": str(r["id"]), "naam": r.get("naam"), "type": r.get("type"),
+                    "aantal_porties": r.get("aantal_porties"),
+                    "kcal": r.get("kcal"), "kh": r.get("kh"), "eiwit": r.get("eiwit"),
+                    "vezels": r.get("vezels"),
+                    "reden": v.get("reden") or _REDEN.get(as_, "Past bij je week"),
+                    "as": as_, "waarde": r.get(kolom), "kolom": kolom,
+                })
+            if uit:
+                return {"recepten": uit}
+
         recent = set()
         try:
             sug = supabase.table("carboo_recept_suggesties") \
                 .select("recept_id,week").eq("user_id", user_id) \
                 .order("week", desc=True).limit(24).execute().data or []
-            weken = sorted({s["week"] for s in sug}, reverse=True)[:6]
+            weken = sorted({s["week"] for s in sug if s["week"] != week}, reverse=True)[:6]
             recent = {str(s["recept_id"]) for s in sug if s["week"] in weken}
         except Exception as e:
             print(f"[RECEPT-BIJ-INZICHT-V1] geen geheugen: {e}")
@@ -3183,6 +3215,7 @@ def _kies_recepten(user_id: str, res: dict, tot: str, supabase: Client) -> dict:
             for g in gekozen:
                 supabase.table("carboo_recept_suggesties").insert({
                     "user_id": user_id, "week": week, "recept_id": g["id"],
+                    "as_sleutel": g.get("as"), "reden": g.get("reden"),
                 }).execute()
         except Exception as e:
             print(f"[RECEPT-BIJ-INZICHT-V1] bewaren mislukt: {e}")
