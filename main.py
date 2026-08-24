@@ -3000,7 +3000,7 @@ _AS_NAAR_KOLOM = {
     "eiwit_maaltijden_ok":   ("eiwit",   "hoog"),
     "eiwit_plantaardig_pct": ("plantaardig_eiwit", "hoog"),
     "groenten":              ("groentegram", "hoog"),
-    "fruit":                 ("groentegram", "hoog"),
+    "fruit":                 ("fruitgram",   "hoog"),
     "verz_pct":              ("vet",     "laag"),
     "suikers_toegevoegd_pct":("suikers", "laag"),
     "nutrientdensiteit":     ("vezels",  "hoog"),
@@ -3027,6 +3027,18 @@ _REDEN = {
 _PLANT = ("Peulvruchten", "Noten en zaden")
 
 
+# Je bibliotheek kent een categorie "Groenten en fruit" maar geen
+# onderscheid tussen de twee. Voor de as "fruit" telt enkel fruit,
+# anders wint een groenterijke schotel een fruittekort.
+_FRUITWOORDEN = (
+    "appel", "peer", "banaan", "bes", "bessen", "sinaasappel", "kiwi",
+    "mango", "druif", "druiven", "aardbei", "framboos", "meloen",
+    "perzik", "abrikoos", "ananas", "mandarijn", "pruim", "kers",
+    "granaatappel", "nectarine", "vijg", "dadel", "rozijn", "grapefruit",
+    "watermeloen", "fruit",
+)
+
+
 def _iso_week(datum: str) -> str:
     try:
         d = _dt.date.fromisoformat(str(datum)[:10])
@@ -3043,6 +3055,7 @@ def _recept_kenmerken(recepten: list, categorie_van: dict) -> None:
         porties = max(1, int(r.get("aantal_porties") or 1))
         groente = 0.0
         plant = 0.0
+        fruit = 0.0
         for i in (r.get("ingredienten") or []):
             if not isinstance(i, dict):
                 continue
@@ -3056,12 +3069,16 @@ def _recept_kenmerken(recepten: list, categorie_van: dict) -> None:
             cat = categorie_van.get(str(i.get("naam") or "").strip().lower())
             if cat == "Groenten en fruit":
                 groente += g
+                _kleine = str(i.get("naam") or "").lower()
+                if any(w in _kleine for w in _FRUITWOORDEN):
+                    fruit += g
             if cat in _PLANT:
                 try:
                     plant += float(i.get("eiwit") or 0) * g / 100
                 except Exception:
                     pass
         r["groentegram"] = round(groente / porties, 1)
+        r["fruitgram"] = round(fruit / porties, 1)
         r["plantaardig_eiwit"] = round(plant / porties, 1)
 
 
@@ -3121,7 +3138,7 @@ def _kies_recepten(user_id: str, res: dict, tot: str, supabase: Client) -> dict:
                 return []
             omgekeerd = (richting == "hoog")
             pool.sort(key=lambda r: float(r.get(kolom) or 0), reverse=omgekeerd)
-            return pool[:8]
+            return pool[:4]
 
         def loot(lijst, as_):
             zaad = _hashlib.md5(f"{user_id}|{week}|{as_}".encode()).hexdigest()
