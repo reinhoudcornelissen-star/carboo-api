@@ -4035,7 +4035,7 @@ async def boodschappen_van_recept(payload: dict,
             "naam": naam,
             "hoeveelheid": f"{gram:g} g",
             "categorie": cat,
-            "bron_recept": recept.get("naam"),
+            "bron_recept": recept.get("id"),
         })
 
     if nieuwe:
