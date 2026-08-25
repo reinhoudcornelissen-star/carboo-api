@@ -3555,6 +3555,31 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
              (str(d["vezels"]) + " gram per dag, boven de richtlijn van " +
               str(round(_n_vezels)) + "."))
 
+    # VOCHT-KWALITEIT-V1 — vocht hoort bij de kwaliteit van een dag, niet
+    # alleen bij de trainingen. Zwijgt wanneer er te weinig gelogd is:
+    # zonder drankdagen zou iedereen "te weinig" te horen krijgen, ook wie
+    # genoeg drinkt maar het niet bijhoudt. Dezelfde drempel van vier dagen
+    # als bij de normvergelijking in de kop.
+    _drankdagen_k = len([1 for _dg in dagen.values()
+                         if (_dg.get("vocht") or _dg.get("vocht_ml") or 0) > 0])
+    _vocht = d.get("vocht") or d.get("vocht_ml") or 0
+    if _vocht and _drankdagen_k >= 4:
+        _n_vocht_min = _norm("vocht_dag", "norm_min", 2000)
+        _n_vocht_max = _norm("vocht_dag", "norm_max", 2500)
+        _lt = str(round(_vocht / 1000, 1)).replace(".", ",")
+        if _vocht < _n_vocht_min:
+            voeg(kwaliteit, "geel", "Je drinkt te weinig",
+                 (_lt + " liter per dag, tegenover 2 tot 2,5 liter als richtlijn. "
+                  "Een extra glas bij elke maaltijd sluit dat gat meestal al. Reken "
+                  "daarbovenop wat je tijdens een training verliest."))
+        elif _vocht > _n_vocht_max * 1.6:
+            voeg(kwaliteit, "groen", "Je drinkt ruim",
+                 (_lt + " liter per dag, boven de richtlijn van 2 tot 2,5 liter. "
+                  "Dat mag, zolang je plas licht van kleur blijft."))
+        else:
+            voeg(kwaliteit, "groen", "Je vochtinname zit goed",
+                 (_lt + " liter per dag, binnen de richtlijn van 2 tot 2,5 liter."))
+
     # ── macro's ─────────────────────────────────────────────────────
     e_doel = float(profiel.get("energie_doel") or 0)
     kh_pct = float(profiel.get("kh_doel_pct") or 50)
@@ -3843,7 +3868,7 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         "standfirst": (_standfirst(res["dagen_gelogd"], laagste_dag or "één dag")
                        if not kern else
                        (str(res["dagen_gelogd"]) + " van de zeven dagen gelogd. " + kern)),
-        "inzichten_kwaliteit": kwaliteit[:4],
+        "inzichten_kwaliteit": kwaliteit[:5],
         "inzichten_macros": macros[:3],
         "inzichten_trainingen": trainingen_inz[:4],
         "normen_kandidaten": locals().get("_kandidaten") or [],
