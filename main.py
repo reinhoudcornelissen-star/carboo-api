@@ -3952,7 +3952,13 @@ async def get_welzijn(van: str, tot: str, user=Depends(get_current_user), supaba
 
 @app.post("/api/fuelc/welzijn")
 async def sla_welzijn_op(welzijn: WelzijnData, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    data = welzijn.dict()
+    # WELZIJN-DEELOPSLAG-V1 — alleen wegschrijven wat de app meestuurde.
+    # welzijn.dict() gaf ook de niet-ingevulde velden terug als None, en de
+    # upsert wiste daarmee wat er die dag al stond.
+    try:
+        data = welzijn.dict(exclude_unset=True)
+    except TypeError:
+        data = welzijn.model_dump(exclude_unset=True)
     data["user_id"] = user.id
     supabase.table("fuelc_dagboek_welzijn").upsert(data, on_conflict="user_id,datum").execute()
     return {"status": "opgeslagen"}
