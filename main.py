@@ -4363,6 +4363,100 @@ async def get_zones(sport: str, user=Depends(get_current_user), supabase: Client
     r = supabase.table("fuelc_zones").select("*").eq("user_id", user.id).eq("sport", sport).execute()
     return {"zones": r.data[0] if r.data else {}}
 
+# ─── OEFENINGEN-V1 — de bibliotheek voor krachttraining ─────────────────
+@app.get("/api/fuelc/oefeningen")
+async def get_oefeningen(user=Depends(get_current_user),
+                         supabase: Client = Depends(get_supabase)):
+    """De globale oefeningen plus de eigen oefeningen van deze klant."""
+    r = supabase.table("carboo_oefeningen") \
+        .select("id,naam,naam_nl,spiergroep,type,belasting,met,is_globaal") \
+        .or_(f"is_globaal.eq.true,user_id.eq.{user.id}") \
+        .order("spiergroep").order("naam").execute()
+    return {"oefeningen": r.data or []}
+
+
+@app.post("/api/fuelc/oefeningen")
+async def voeg_oefening_toe(payload: dict,
+                            user=Depends(get_current_user),
+                            supabase: Client = Depends(get_supabase)):
+    """Een eigen oefening. Komt niet in de globale lijst terecht.
+
+    Zonder MET valt hij terug op 3,5: dat is code 02054 uit het Compendium,
+    meerdere oefeningen met 8 tot 15 herhalingen. De veiligste aanname voor
+    een oefening waarvan we niets weten."""
+    naam = (payload.get("naam") or "").strip()
+    if not naam:
+        raise HTTPException(status_code=400, detail="naam ontbreekt")
+
+    try:
+        met = float(payload.get("met") or 3.5)
+    except (TypeError, ValueError):
+        met = 3.5
+    met = min(max(met, 1.0), 20.0)
+
+    rij = {
+        "user_id": user.id,
+        "is_globaal": False,
+        "naam": naam,
+        "naam_nl": (payload.get("naam_nl") or "").strip() or None,
+        "spiergroep": (payload.get("spiergroep") or "Overig").strip(),
+        "type": (payload.get("type") or "compound").strip(),
+        "belasting": (payload.get("belasting") or "gewicht").strip(),
+        "met": met,
+        "bron_code": payload.get("bron_code") or None,
+    }
+    try:
+        r = supabase.table("carboo_oefeningen").insert(rij).execute()
+    except Exception as e:
+        if "duplicate" in str(e).lower():
+            raise HTTPException(status_code=409, detail="die oefening staat er al")
+        raise
+    return {"ok": True, "oefening": (r.data or [None])[0]}
+
+
+@app.get("/api/fuelc/oefeningen/{oefening_id}/historiek")
+async def oefening_historiek(oefening_id: str,
+                             user=Depends(get_current_user),
+                             supabase: Client = Depends(get_supabase)):
+    """De laatste keren dat deze klant deze oefening deed.
+
+    Zo kan de bouwer tonen waar iemand vorige week stond. De oefeningen
+    zitten in het veld segmenten van een training, dus we halen de recente
+    krachttrainingen op en zoeken er de oefening in."""
+    try:
+        tr = supabase.table("fuelc_trainingen") \
+            .select("datum,segmenten") \
+            .eq("user_id", user.id) \
+            .order("datum", desc=True).limit(60).execute().data or []
+    except Exception as e:
+        print(f"[OEFENINGEN-V1] historiek ophalen mislukt: {e}")
+        return {"historiek": []}
+
+    uit = []
+    for t in tr:
+        for sg in (t.get("segmenten") or []):
+            if not isinstance(sg, dict):
+                continue
+            k = sg.get("kracht")
+            if not isinstance(k, dict):
+                continue
+            if str(k.get("oefening_id") or "") != str(oefening_id):
+                continue
+            uit.append({
+                "datum": t.get("datum"),
+                "sets": k.get("sets"),
+                "reps": k.get("reps"),
+                "gewicht": k.get("gewicht"),
+                "volume": round((float(k.get("sets") or 0)
+                                 * float(k.get("reps") or 0)
+                                 * float(k.get("gewicht") or 0))),
+            })
+            break
+        if len(uit) >= 8:
+            break
+    return {"historiek": uit}
+
+
 @app.post("/api/fuelc/zones")
 async def sla_zones_op(data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     data["user_id"] = user.id
