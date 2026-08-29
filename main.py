@@ -543,6 +543,97 @@ async def admin_verwijder_coach(coach_id: str, user=Depends(get_current_user), s
     supabase.table("carboo_coaches").update({"verified": False}).eq("id", coach_id).execute()
     return {"ok": True}
 
+# ─── ADMIN-COACH-DETAIL-V1 — wie zijn de klanten van deze coach ─────────
+@app.get("/api/admin/coach/{coach_id}/klanten")
+async def admin_coach_klanten(coach_id: str,
+                              user=Depends(get_current_user),
+                              supabase: Client = Depends(get_supabase)):
+    """De klanten van een coach, met hoe ze binnenkwamen en wat ze zelf hebben.
+
+    invite_token gevuld betekent dat de klant een uitnodigingslink kreeg.
+    Is dat veld leeg, dan heeft de coach het account rechtstreeks aangemaakt
+    en staat er ook een coaching_eind, want die termijn wordt alleen daar
+    gekozen."""
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+
+    rels = supabase.table("carboo_coach_klanten") \
+        .select("id,klant_id,klant_email,status,invite_token,coaching_eind,aangemaakt") \
+        .eq("coach_id", coach_id).order("aangemaakt", desc=True).execute().data or []
+
+    ids = [r["klant_id"] for r in rels if r.get("klant_id")]
+    namen, abos = {}, {}
+    if ids:
+        try:
+            for g in (supabase.table("carboo_gebruikers")
+                      .select("id,naam,email").in_("id", ids).execute().data or []):
+                namen[g["id"]] = g
+        except Exception as e:
+            print(f"[ADMIN-COACH-DETAIL-V1] namen ophalen mislukt: {e}")
+        try:
+            for a in (supabase.table("carboo_abonnementen")
+                      .select("user_id,pakket,status,verval_datum,mollie_payment_id")
+                      .in_("user_id", ids).eq("status", "actief").execute().data or []):
+                abos.setdefault(a["user_id"], []).append(a)
+        except Exception as e:
+            print(f"[ADMIN-COACH-DETAIL-V1] abonnementen ophalen mislukt: {e}")
+
+    uit = []
+    for r in rels:
+        kid = r.get("klant_id")
+        g = namen.get(kid, {})
+        eigen = abos.get(kid, [])
+        proef = [a for a in eigen if str(a.get("mollie_payment_id") or "").startswith("trial")]
+        uit.append({
+            "id": r["id"],
+            "klant_id": kid,
+            "naam": g.get("naam") or None,
+            "email": g.get("email") or r.get("klant_email"),
+            "status": r.get("status"),
+            "herkomst": "uitnodiging" if r.get("invite_token") else "door coach aangemaakt",
+            "coaching_eind": r.get("coaching_eind"),
+            "gekoppeld_op": r.get("aangemaakt"),
+            "pakketten": sorted({a.get("pakket") for a in eigen if a.get("pakket")}),
+            "in_proefperiode": bool(proef),
+        })
+    return {"klanten": uit}
+
+
+@app.delete("/api/admin/coach/{coach_id}/definitief")
+async def admin_verwijder_coach_definitief(coach_id: str,
+                                           user=Depends(get_current_user),
+                                           supabase: Client = Depends(get_supabase)):
+    """De coach echt verwijderen.
+
+    Alleen wanneer er geen actieve klanten meer aan hangen. Anders blijven
+    er klantrelaties achter die naar een coach verwijzen die niet bestaat,
+    en dat merk je pas weken later. Wie klanten heeft, trek je in: dan kan
+    hij niemand nieuw uitnodigen maar blijft alles werken."""
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
+
+    actief = supabase.table("carboo_coach_klanten") \
+        .select("id", count="exact").eq("coach_id", coach_id) \
+        .eq("status", "actief").execute()
+    n = actief.count or 0
+    if n > 0:
+        raise HTTPException(
+            409, f"Deze coach heeft nog {n} actieve klant(en). "
+                 "Beeindig die relaties eerst, of trek de licentie in.")
+
+    # wat aan de coach hangt eerst opruimen, anders blijven er wezen achter
+    for tabel in ("carboo_coach_klanten", "carboo_coach_opmerkingen",
+                  "carboo_coach_notities", "carboo_coach_berichten",
+                  "carboo_coach_privacy", "fuelc_coach_voedingstips"):
+        try:
+            supabase.table(tabel).delete().eq("coach_id", coach_id).execute()
+        except Exception as e:
+            print(f"[ADMIN-COACH-DETAIL-V1] opruimen {tabel}: {e}")
+
+    supabase.table("carboo_coaches").delete().eq("id", coach_id).execute()
+    return {"ok": True, "verwijderd": coach_id}
+
+
 @app.get("/api/coach/dashboard")
 async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Gebundeld: alle coach-zone data in EEN request. DASHBOARD-PARALLEL: queries in golven.
