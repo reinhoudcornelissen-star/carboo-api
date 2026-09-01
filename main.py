@@ -372,6 +372,9 @@ class CoachProfiel(BaseModel):
     bio: Optional[str] = ""
     specialisatie: Optional[str] = ""
     email: str
+    # COACH-PAKKETTEN-V1 — welke modules de coach zelf krijgt
+    pakketten: Optional[List[str]] = None
+    duur_maanden: Optional[int] = 12
 
 class PrivacyInstellingen(BaseModel):
     relatie_id: str
@@ -514,7 +517,43 @@ async def admin_maak_coach(item: CoachProfiel, user=Depends(get_current_user), s
         supabase.table("carboo_coaches").update({"verified": True, "naam": item.naam, "email": item.email}).eq("user_id", klant_id).execute()
     else:
         supabase.table("carboo_coaches").insert({"user_id": klant_id, "naam": item.naam, "email": item.email, "bio": item.bio or "", "specialisatie": item.specialisatie or "", "verified": True}).execute()
-    return {"ok": True}
+    # ── COACH-PAKKETTEN-V1 ────────────────────────────────────────────
+    # Een coach aanmaken en hem meteen zijn abonnementen geven, in een
+    # handeling. Voorheen moest dat in twee stappen: eerst de coachrij,
+    # dan apart een abonnement toewijzen.
+    #
+    # Standaard krijgt hij coach. Vink je alles aan, dan kan hij ook zelf
+    # loggen, raceplannen maken en Train the Gut doorlopen. Dat is geen
+    # weggegeven omzet maar een investering: een coach die de modules zelf
+    # gebruikt, legt ze beter uit aan zijn atleten.
+    pakketten = item.pakketten or ["coach"]
+    if isinstance(pakketten, str):
+        pakketten = [pakketten]
+    pakketten = [p for p in pakketten if p in ("coach", "alles", "fueling", "race", "gut")]
+    if not pakketten:
+        pakketten = ["coach"]
+
+    duur = max(1, min(120, int(item.duur_maanden or 12)))
+    from datetime import date as _d, timedelta as _td
+    verval = (_d.today() + _td(days=30 * duur)).isoformat()
+
+    gegeven = []
+    for pak in pakketten:
+        try:
+            supabase.table("carboo_abonnementen").upsert({
+                "user_id": klant_id,
+                "pakket": pak,
+                "status": "actief",
+                "prijs": 0,
+                "start_datum": _d.today().isoformat(),
+                "verval_datum": verval,
+                "mollie_payment_id": f"admin_coach_{user.id}",
+            }).execute()
+            gegeven.append(pak)
+        except Exception as e:
+            print(f"[COACH-PAKKETTEN-V1] {pak} toewijzen mislukt: {e}")
+
+    return {"ok": True, "pakketten": gegeven, "verval_datum": verval}
 
 @app.get("/api/admin/coaches")
 async def admin_lijst_coaches(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
