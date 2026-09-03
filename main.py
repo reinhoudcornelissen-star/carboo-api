@@ -935,29 +935,47 @@ async def klant_direct_toevoegen(data: dict, user=Depends(get_current_user), sup
                 "race_plannen": False, "train_gut": False, "dossier": False
             }).execute()
 
-    # Geef de klant toegang tot de modules voor de duur van de coaching (pakket 'alles')
-    # coach_klant_abo: abonnement gekoppeld aan coaching-termijn, geen Mollie, geen auto-verleng
-    try:
-        bestaand_abo = supabase.table("carboo_abonnementen").select("id").eq("user_id", klant_id).eq("pakket", "alles").execute()
-        abo_payload = {
-            "user_id": klant_id,
-            "pakket": "alles",
-            "status": "actief",
-            "prijs": 0,
-            "start_datum": date.today().isoformat(),
-            "verval_datum": coaching_eind,
-            "mollie_payment_id": f"coach_klant_abo_{coach_id}",
-        }
-        if bestaand_abo.data:
-            supabase.table("carboo_abonnementen").update({
-                "status": "actief", "verval_datum": coaching_eind, "bijgewerkt": "now()"
-            }).eq("id", bestaand_abo.data[0]["id"]).execute()
-        else:
-            supabase.table("carboo_abonnementen").insert(abo_payload).execute()
-    except Exception as e:
-        print(f"[coach klant abo] fout: {e}")
+    # ── KLANT-PAKKETTEN-V1 ────────────────────────────────────────────
+    # De coach kiest zelf welke modules zijn klant krijgt, voor de duur van
+    # de coaching. Voorheen lag dat vast op 'alles'.
+    #
+    # De markering coach_klant_abo_<coach_id> blijft, want daarop wordt
+    # gefactureerd: zo is per coach te zien wat hij heeft uitgedeeld.
+    pakketten = data.get("pakketten") or ["alles"]
+    if isinstance(pakketten, str):
+        pakketten = [pakketten]
+    pakketten = [p for p in pakketten if p in ("alles", "fueling", "race", "gut")]
+    if not pakketten:
+        pakketten = ["alles"]
 
-    return {"ok": True, "klant_id": klant_id, "nieuwe_gebruiker": nieuwe_gebruiker, "coaching_eind": coaching_eind, "relatie_id": rel_id}
+    gegeven = []
+    for pak in pakketten:
+        try:
+            bestaand_abo = supabase.table("carboo_abonnementen") \
+                .select("id").eq("user_id", klant_id).eq("pakket", pak).execute()
+            if bestaand_abo.data:
+                supabase.table("carboo_abonnementen").update({
+                    "status": "actief",
+                    "verval_datum": coaching_eind,
+                    "mollie_payment_id": f"coach_klant_abo_{coach_id}",
+                    "bijgewerkt": "now()",
+                }).eq("id", bestaand_abo.data[0]["id"]).execute()
+            else:
+                supabase.table("carboo_abonnementen").insert({
+                    "user_id": klant_id,
+                    "pakket": pak,
+                    "status": "actief",
+                    "prijs": 0,
+                    "start_datum": date.today().isoformat(),
+                    "verval_datum": coaching_eind,
+                    "mollie_payment_id": f"coach_klant_abo_{coach_id}",
+                }).execute()
+            gegeven.append(pak)
+        except Exception as e:
+            print(f"[KLANT-PAKKETTEN-V1] {pak} toewijzen mislukt: {e}")
+
+    return {"ok": True, "klant_id": klant_id, "nieuwe_gebruiker": nieuwe_gebruiker,
+            "coaching_eind": coaching_eind, "relatie_id": rel_id, "pakketten": gegeven}
 
 @app.get("/api/coach/invite/{token}")
 async def get_invite_info(token: str, supabase: Client = Depends(get_supabase)):
