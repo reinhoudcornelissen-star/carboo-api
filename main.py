@@ -4511,6 +4511,135 @@ async def get_zones(sport: str, user=Depends(get_current_user), supabase: Client
     r = supabase.table("fuelc_zones").select("*").eq("user_id", user.id).eq("sport", sport).execute()
     return {"zones": r.data[0] if r.data else {}}
 
+# ─── BORD-MAAND-V1 — hoe zag het bord er deze maand uit ────────────────
+BORD_MOMENTEN = {
+    0: "Ontbijt", 1: "Voormiddag", 2: "Lunch",
+    3: "Namiddag", 4: "Avondmaal", 5: "Avond",
+}
+
+# Wat het bord vult. Vocht, kruiden, vetstof en sportvoeding tellen niet
+# mee in de verhouding: water weegt zwaar en olie weegt niets, en geen van
+# beide zegt iets over hoe je bord verdeeld was.
+BORD_ROLLEN = ("groente", "zetmeel", "eiwit", "fruit", "zuivel", "noten", "rest")
+
+
+@app.get("/api/fuelc/bord")
+async def get_bord(maand: str,
+                   user=Depends(get_current_user),
+                   supabase: Client = Depends(get_supabase)):
+    """Per dagdeel de verdeling van het bord over een maand, in grammen.
+
+    maand in de vorm 2026-08.
+
+    De bordrol wordt in drie stappen opgezocht, van betrouwbaar naar minder:
+    eerst via product_id, dan op naam, en pas als beide falen op de
+    categorie die in het dagboek zelf staat. Dat laatste is nodig omdat
+    oudere registraties geen product_id hebben."""
+    from datetime import date as _d
+    import calendar as _cal
+
+    try:
+        jaar, mnd = int(maand[:4]), int(maand[5:7])
+        van = _d(jaar, mnd, 1).isoformat()
+        tot = _d(jaar, mnd, _cal.monthrange(jaar, mnd)[1]).isoformat()
+    except Exception:
+        raise HTTPException(400, "Geef de maand op als 2026-08")
+
+    items = supabase.table("fuelc_dagboek") \
+        .select("datum,moment,product_id,naam,hoeveelheid_g,categorie") \
+        .eq("user_id", user.id).gte("datum", van).lte("datum", tot) \
+        .lt("moment", 90).execute().data or []
+
+    if not items:
+        return {"maand": maand, "dagen": 0, "dagdelen": []}
+
+    # bibliotheek eenmalig inlezen: op id en op naam
+    op_id, op_naam = {}, {}
+    try:
+        for b in (supabase.table("fuelc_bibliotheek")
+                  .select("id,naam,bordrol,categorie").execute().data or []):
+            if b.get("bordrol"):
+                op_id[str(b["id"])] = b["bordrol"]
+                op_naam.setdefault(str(b.get("naam") or "").strip().lower(), b["bordrol"])
+    except Exception as e:
+        print(f"[BORD-MAAND-V1] bibliotheek inlezen mislukt: {e}")
+
+    # laatste redmiddel: de categorie in het dagboek
+    CAT = {
+        "Groenten en fruit": "groente", "Granen en brood": "zetmeel",
+        "Vlees": "eiwit", "Vis": "eiwit", "Gevogelte": "eiwit",
+        "Eieren": "eiwit", "Peulvruchten": "eiwit",
+        "Schaal- en schelpdieren": "eiwit",
+        "Melk": "zuivel", "Yoghurt en verse zuivel": "zuivel",
+        "Zuivel": "zuivel", "Kaas": "zuivel",
+        "Noten en zaden": "noten", "Snacks": "rest",
+        "Vetten en oliën": "vetstof", "Dranken": "vocht",
+        "Kruiden en specerijen": "kruiden", "Sportvoeding": "sport",
+    }
+
+    def rol_van(it):
+        pid = it.get("product_id")
+        if pid and str(pid) in op_id:
+            return op_id[str(pid)]
+        n = str(it.get("naam") or "").strip().lower()
+        if n in op_naam:
+            return op_naam[n]
+        return CAT.get(it.get("categorie") or "")
+
+    per_moment, dagen, onbekend = {}, set(), 0
+    for it in items:
+        m = it.get("moment")
+        if m is None:
+            continue
+        dagen.add(it.get("datum"))
+        rol = rol_van(it)
+        if not rol:
+            onbekend += 1
+            continue
+        gram = float(it.get("hoeveelheid_g") or 0)
+        if gram <= 0:
+            continue
+        vak = per_moment.setdefault(int(m), {"rollen": {}, "namen": {}, "dagen": set()})
+        vak["dagen"].add(it.get("datum"))
+        vak["rollen"][rol] = vak["rollen"].get(rol, 0) + gram
+        if rol in BORD_ROLLEN:
+            sleutel = (rol, str(it.get("naam") or "").strip())
+            vak["namen"][sleutel] = vak["namen"].get(sleutel, 0) + gram
+
+    uit = []
+    for m in sorted(per_moment):
+        vak = per_moment[m]
+        bord = {r: g for r, g in vak["rollen"].items() if r in BORD_ROLLEN}
+        totaal = sum(bord.values())
+        if totaal <= 0:
+            continue
+
+        # per bordrol de drie zwaarste producten, voor de namen op het bord
+        namen = {}
+        for (rol, naam), g in vak["namen"].items():
+            namen.setdefault(rol, []).append((naam, g))
+        for rol in namen:
+            namen[rol] = [n for n, _ in sorted(namen[rol], key=lambda x: -x[1])[:3]]
+
+        uit.append({
+            "moment": m,
+            "naam": BORD_MOMENTEN.get(m, f"Moment {m}"),
+            "dagen": len(vak["dagen"]),
+            "delen": sorted([
+                {"rol": r,
+                 "gram": round(g),
+                 "pct": round(g / totaal * 100),
+                 "producten": namen.get(r, [])}
+                for r, g in bord.items()
+            ], key=lambda x: -x["pct"]),
+            "buiten_bord": {r: round(g) for r, g in vak["rollen"].items()
+                            if r not in BORD_ROLLEN},
+        })
+
+    return {"maand": maand, "dagen": len(dagen),
+            "niet_ingedeeld": onbekend, "dagdelen": uit}
+
+
 # ─── OEFENINGEN-V1 — de bibliotheek voor krachttraining ─────────────────
 @app.get("/api/fuelc/oefeningen")
 async def get_oefeningen(user=Depends(get_current_user),
