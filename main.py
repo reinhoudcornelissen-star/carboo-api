@@ -4546,7 +4546,7 @@ async def get_bord(maand: str,
         raise HTTPException(400, "Geef de maand op als 2026-08")
 
     items = supabase.table("fuelc_dagboek") \
-        .select("datum,moment,product_id,naam,hoeveelheid_g,categorie") \
+        .select("datum,moment,product_id,recept_id,naam,hoeveelheid_g,categorie") \
         .eq("user_id", user.id).gte("datum", van).lte("datum", tot) \
         .lt("moment", 90).execute().data or []
 
@@ -4586,12 +4586,73 @@ async def get_bord(maand: str,
             return op_naam[n]
         return CAT.get(it.get("categorie") or "")
 
+    # ── BORD-RECEPTEN-V1 — een recept uitpakken naar zijn ingredienten ──
+    # Een gelogd recept heeft geen bordrol: pasta carbonara is zetmeel,
+    # eiwit en zuivel tegelijk. We halen daarom de ingredienten op en
+    # tellen die elk bij hun eigen rol.
+    #
+    # hoeveelheid_g is bij een recept geen gewicht maar een portiemaat:
+    # 100 staat voor een portie, 50 voor een halve. Het werkelijke gewicht
+    # van een ingredient is dus:
+    #
+    #   gram_in_recept / aantal_porties * (hoeveelheid_g / 100)
+    recept_ids = {str(it["recept_id"]) for it in items if it.get("recept_id")}
+    recepten = {}
+    if recept_ids:
+        try:
+            for r in (supabase.table("fuelc_recepten_eigen")
+                      .select("id,naam,aantal_porties,ingredienten")
+                      .in_("id", list(recept_ids)).execute().data or []):
+                recepten[str(r["id"])] = r
+        except Exception as e:
+            print(f"[BORD-RECEPTEN-V1] recepten ophalen mislukt: {e}")
+
+    def rol_van_naam(n):
+        n = str(n or "").strip().lower()
+        return op_naam.get(n)
+
+    def pak_uit(it):
+        """Geeft een lijst (bordrol, gram) voor een gelogd recept."""
+        r = recepten.get(str(it.get("recept_id") or ""))
+        if not r:
+            return []
+        porties = float(r.get("aantal_porties") or 1) or 1
+        deel = float(it.get("hoeveelheid_g") or 100) / 100.0
+        uit_ing = []
+        for ing in (r.get("ingredienten") or []):
+            if not isinstance(ing, dict):
+                continue
+            g = float(ing.get("gram") or ing.get("hoeveelheid_g") or 0)
+            if g <= 0:
+                continue
+            rol = rol_van_naam(ing.get("naam"))
+            if rol:
+                uit_ing.append((rol, g / porties * deel))
+        return uit_ing
+
     per_moment, dagen, onbekend = {}, set(), 0
     for it in items:
         m = it.get("moment")
         if m is None:
             continue
         dagen.add(it.get("datum"))
+        vak = per_moment.setdefault(int(m), {"rollen": {}, "namen": {}, "dagen": set()})
+        vak["dagen"].add(it.get("datum"))
+
+        # een recept telt mee als zijn ingredienten, een product als zichzelf
+        if it.get("recept_id"):
+            delen_van_recept = pak_uit(it)
+            if not delen_van_recept:
+                onbekend += 1
+                continue
+            naam_recept = str(it.get("naam") or "").strip().lstrip("\U0001F37D ").strip()
+            for rol, gram in delen_van_recept:
+                vak["rollen"][rol] = vak["rollen"].get(rol, 0) + gram
+                if rol in BORD_ROLLEN:
+                    sleutel = (rol, naam_recept)
+                    vak["namen"][sleutel] = vak["namen"].get(sleutel, 0) + gram
+            continue
+
         rol = rol_van(it)
         if not rol:
             onbekend += 1
@@ -4599,8 +4660,6 @@ async def get_bord(maand: str,
         gram = float(it.get("hoeveelheid_g") or 0)
         if gram <= 0:
             continue
-        vak = per_moment.setdefault(int(m), {"rollen": {}, "namen": {}, "dagen": set()})
-        vak["dagen"].add(it.get("datum"))
         vak["rollen"][rol] = vak["rollen"].get(rol, 0) + gram
         if rol in BORD_ROLLEN:
             sleutel = (rol, str(it.get("naam") or "").strip())
