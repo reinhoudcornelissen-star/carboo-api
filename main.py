@@ -4685,6 +4685,46 @@ def _gut_alternatief(supabase, uitgesloten: str, kh_doel: int):
         return None
 
 
+
+# ─── GUT-TESTMOMENTEN-API-V1 ───────────────────────────────────────────
+@app.get("/api/gut/testmomenten")
+async def lijst_testmomenten(user=Depends(get_current_user),
+                             supabase: Client = Depends(get_supabase)):
+    """De testmomenten van deze sporter, op volgorde."""
+    r = supabase.table("carboo_gut_testmomenten").select("*") \
+        .eq("user_id", user.id).order("nummer").execute()
+    return {"momenten": r.data or []}
+
+
+@app.post("/api/gut/testmomenten")
+async def maak_testmoment(data: dict,
+                          user=Depends(get_current_user),
+                          supabase: Client = Depends(get_supabase)):
+    """Een testmoment toevoegen. Zonder opgegeven dosis komt er tien gram
+    bij het laatste; dat is de stapgrootte uit de literatuur."""
+    bestaand = supabase.table("carboo_gut_testmomenten") \
+        .select("nummer,doel_kh_uur").eq("user_id", user.id) \
+        .order("nummer", desc=True).limit(1).execute().data or []
+    volgende = (bestaand[0]["nummer"] + 1) if bestaand else 1
+    vorige_dosis = bestaand[0]["doel_kh_uur"] if bestaand else 30
+
+    dosis = data.get("doel_kh_uur")
+    dosis = int(dosis) if dosis else int(vorige_dosis) + GUT_STAP
+
+    rij = {
+        "user_id": user.id,
+        "nummer": volgende,
+        "doel_kh_uur": max(15, min(120, dosis)),
+        "intensiteit": data.get("intensiteit") or "lage",
+        "min_duur_min": int(data.get("min_duur_min") or GUT_MIN_DUUR),
+        "type_training": data.get("type_training") or "Duurtraining",
+        "status": "open",
+        "poging": int(data.get("poging") or 1),
+    }
+    r = supabase.table("carboo_gut_testmomenten").insert(rij).execute()
+    return {"ok": True, "moment": (r.data[0] if r.data else rij)}
+
+
 @app.post("/api/gut/testmoment/{moment_id}/beoordeel")
 async def beoordeel_testmoment(moment_id: str, data: dict,
                                user=Depends(get_current_user),
