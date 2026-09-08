@@ -4398,6 +4398,434 @@ async def zet_profielfoto(data: dict,
         raise HTTPException(500, f"Kon de foto niet bewaren: {e}")
     return {"ok": True, "foto_url": url}
 
+# ─── GUT-BESLISBOOM-V1 ─────────────────────────────────────────────────
+# Wat er na een testmoment gebeurt. De volgorde van de vragen is niet
+# willekeurig: ze gaat van de goedkoopste verklaring naar de duurste.
+# Een maaltijd verschuiven kost niets, een product wisselen kost een
+# testmoment, een stap terug kost weken.
+
+GUT_PLAFOND = {"Fietsen": 120, "Lopen": 115, "Triatlon": 115}
+GUT_STAP = 10
+GUT_MIN_DUUR = 75
+GUT_COMFORT_GRENS = 6
+GUT_DOSIS_MARGE = 0.9   # 90 procent van het doel volstaat
+# ── GUT-MIX-V2 ─────────────────────────────────────────────────────
+# De verhouding telt over de MIX, niet per product. Iemand die een
+# maltodextrinedrank combineert met een gel op 2:1 zit samen goed,
+# ook al is die drank op zichzelf enkelvoudig.
+#
+# Hoe het plafond volgt uit de verhouding: de glucoseweg verzadigt
+# rond 60 g per uur. Wat er via fructose bij kan, bepaalt hoeveel
+# verder je komt. Bij 1 op 0,3 is dat 60 plus 18, dus 78 g per uur.
+#
+# De hoeveelheid en de duur spelen hier geen rol: de verhouding is
+# een breuk, en die verandert niet of iemand nu een of drie uur
+# bezig is.
+FRUCTOSE_AANDEEL = {
+    "1:0.8": 0.8 / 1.8, "1:1": 0.5,
+    "2:1": 1 / 3, "circa 2:1": 1 / 3, "circa 1:1": 0.5,
+    "circa 4:1": 0.2, "circa 5:1": 1 / 6,
+}
+
+
+def _gut_plafond_product(supabase, user_id: str):
+    """Het hoogste plafond dat de producten van deze sporter toelaten.
+
+    Onder de 60 g per uur doet de samenstelling er niet toe; daarboven
+    verzadigt de glucoseweg en is fructose nodig. Kent de app de
+    verhouding niet, dan blokkeert ze niet maar waarschuwt ze."""
+    try:
+        prot = supabase.table("carboo_gut_protocol") \
+            .select("gebruikte_producten").eq("user_id", user_id).limit(1).execute()
+        namen = []
+        for p in ((prot.data[0].get("gebruikte_producten") if prot.data else None) or []):
+            if isinstance(p, dict) and p.get("naam"):
+                namen.append(str(p["naam"]).strip().lower())
+        if not namen:
+            return 999, "onbekend"
+
+        bib = supabase.table("fuelc_bibliotheek") \
+            .select("naam,kh_type,kh_verhouding") \
+            .eq("categorie", "Sportvoeding").execute().data or []
+        beste, hoe = 60, "enkelvoudig"
+        for b in bib:
+            if str(b.get("naam") or "").strip().lower() not in namen:
+                continue
+            t, v = b.get("kh_type"), (b.get("kh_verhouding") or "")
+            if t == "meervoudig" and v in ("1:0.8", "1:1"):
+                if 120 > beste: beste, hoe = 120, v
+            elif t == "meervoudig" and v.startswith("2:1"):
+                if 90 > beste: beste, hoe = 90, v
+            elif t == "meervoudig":
+                if 999 > beste: beste, hoe = 999, "onbekend"
+            elif t == "glucoserijk":
+                if 75 > beste: beste, hoe = 75, "glucoserijk"
+        return beste, hoe
+    except Exception as e:
+        print(f"[GUT-BESLISBOOM-V1] plafond bepalen mislukt: {e}")
+        return 999, "onbekend"
+
+
+def _gut_verdacht_product(supabase, user_id: str, producten: list):
+    """Zoekt een verklaring in de samenstelling van wat hij nam.
+
+    Geeft (productnaam, reden, advies) terug, of None wanneer er niets
+    opvalt. De volgorde van de controles is de volgorde waarin ze een
+    klacht waarschijnlijk verklaren."""
+    if not producten:
+        return None
+    try:
+        prot = supabase.table("carboo_gut_protocol") \
+            .select("last_met_welke").eq("user_id", user_id).limit(1).execute()
+        eerder = [s.strip().lower() for s in
+                  ((prot.data[0].get("last_met_welke") if prot.data else "") or "").split(" | ")
+                  if s.strip()]
+
+        bib = {str(b.get("naam") or "").strip().lower(): b
+               for b in (supabase.table("fuelc_bibliotheek")
+                         .select("naam,kh_type,kh_verhouding,kh_glucosebron,"
+                                 "concentratie,viscositeit,water_nodig_ml,fructosevrij")
+                         .eq("categorie", "Sportvoeding").execute().data or [])}
+
+        for naam in producten:
+            n = str(naam).strip().lower()
+            if n in eerder:
+                return (naam, "stond al bij je klachten",
+                        "Tweede keer mis met hetzelfde product. Wissel het.")
+            b = bib.get(n)
+            if not b:
+                continue
+            if b.get("kh_type") == "enkelvoudig":
+                return (naam, "alleen glucose of maltodextrine",
+                        "Boven 60 g per uur is fructose nodig. Dit product kan dat niet.")
+            if b.get("concentratie") == "geconcentreerd" and (b.get("water_nodig_ml") or 0) >= 150:
+                return (naam, "geconcentreerd product",
+                        f"Neem er {b['water_nodig_ml']} ml water bij, of kies een dunner product.")
+            if b.get("kh_verhouding") in ("1:0.8", "1:1"):
+                return (naam, "veel fructose",
+                        "Verdraag je fructose slecht, probeer dan een fructosevrij product.")
+            if "glucosestroop" in str(b.get("kh_glucosebron") or ""):
+                return (naam, "glucosestroop in plaats van maltodextrine",
+                        "Maltodextrine ligt lichter op de maag bij dezelfde grammen.")
+        return None
+    except Exception as e:
+        print(f"[GUT-BESLISBOOM-V1] productcontrole mislukt: {e}")
+        return None
+
+
+
+def _gut_mix_plafond(supabase, user_id: str, sport: str):
+    """Het plafond van de mix die deze sporter gebruikt.
+
+    Geeft (plafond, verhouding, reden) terug. Twee grenzen begrenzen
+    elkaar en de laagste wint:
+
+      het SPORTPLAFOND ligt vast op 120 voor fietsen en 115 voor lopen
+      en triatlon; dat is wat een getraind lichaam aankan
+
+      het PRODUCTPLAFOND volgt uit de gecombineerde verhouding; dat is
+      wat zijn producten leveren
+
+    Het onderscheid bepaalt het advies: bij het eerste zit hij aan zijn
+    maximum, bij het tweede kan zijn darm meer maar zijn producten niet."""
+    sportmax = GUT_PLAFOND.get(sport, 115)
+    try:
+        prot = supabase.table("carboo_gut_protocol") \
+            .select("gebruikte_producten").eq("user_id", user_id).limit(1).execute()
+        gebruikt = []
+        for p in ((prot.data[0].get("gebruikte_producten") if prot.data else None) or []):
+            if isinstance(p, dict) and p.get("naam"):
+                gebruikt.append((str(p["naam"]).strip().lower(),
+                                 float(p.get("kh") or 0) or 30))
+        if not gebruikt:
+            return sportmax, None, "geen producten ingevuld"
+
+        bib = {str(b.get("naam") or "").strip().lower(): b
+               for b in (supabase.table("fuelc_bibliotheek")
+                         .select("naam,kh_type,kh_verhouding")
+                         .eq("categorie", "Sportvoeding").execute().data or [])}
+
+        glucose, fructose, onbekend = 0.0, 0.0, False
+        for naam, kh in gebruikt:
+            b = bib.get(naam)
+            if not b:
+                onbekend = True
+                continue
+            v = b.get("kh_verhouding") or ""
+            if b.get("kh_type") == "enkelvoudig":
+                glucose += kh
+            elif v in FRUCTOSE_AANDEEL:
+                aandeel = FRUCTOSE_AANDEEL[v]
+                fructose += kh * aandeel
+                glucose += kh * (1 - aandeel)
+            else:
+                onbekend = True
+                glucose += kh
+
+        if glucose <= 0:
+            return sportmax, None, "kon de verhouding niet berekenen"
+
+        # 60 g glucose is de bovengrens van SGLT1; fructose komt daar bovenop
+        verhouding = fructose / glucose
+        productmax = int(min(120, round(60 * (1 + verhouding))))
+
+        if onbekend:
+            return min(sportmax, productmax), verhouding, "verhouding deels onbekend"
+        if productmax < sportmax:
+            return productmax, verhouding, "product"
+        return sportmax, verhouding, "sport"
+    except Exception as e:
+        print(f"[GUT-MIX-V2] plafond berekenen mislukt: {e}")
+        return sportmax, None, "berekening mislukt"
+
+
+def _gut_rangschik_verdachten(supabase, user_id: str, producten: list):
+    """Rangschikt de producten van een sessie op verdenking.
+
+    Bij drie producten en een klacht zijn er drie kandidaten. Alles
+    tegelijk wisselen leert je niets, dus we wisselen er een: die met
+    de hoogste verdenking.
+
+      1  stond al bij zijn klachten
+      2  vandaag voor het eerst gebruikt
+      3  heeft een bekend bezwaar uit de bibliotheek
+      4  eerder gebruikt zonder klachten: vrijgepleit"""
+    if not producten:
+        return []
+    try:
+        prot = supabase.table("carboo_gut_protocol") \
+            .select("last_met_welke").eq("user_id", user_id).limit(1).execute()
+        eerder_mis = {s.strip().lower() for s in
+                      ((prot.data[0].get("last_met_welke") if prot.data else "") or "").split(" | ")
+                      if s.strip()}
+
+        geslaagd = set()
+        try:
+            for s in (supabase.table("carboo_gut_sessies")
+                      .select("gebruikte_producten").eq("user_id", user_id)
+                      .gte("maagcomfort", GUT_COMFORT_GRENS).execute().data or []):
+                for p in (s.get("gebruikte_producten") or []):
+                    if isinstance(p, dict) and p.get("naam"):
+                        geslaagd.add(str(p["naam"]).strip().lower())
+        except Exception:
+            pass
+
+        bib = {str(b.get("naam") or "").strip().lower(): b
+               for b in (supabase.table("fuelc_bibliotheek")
+                         .select("naam,kh_type,kh_verhouding,kh_glucosebron,"
+                                 "concentratie,water_nodig_ml")
+                         .eq("categorie", "Sportvoeding").execute().data or [])}
+
+        uit = []
+        for naam in producten:
+            n = str(naam).strip().lower()
+            b = bib.get(n) or {}
+            if n in eerder_mis:
+                uit.append((1, naam, "stond al bij je klachten",
+                            "Tweede keer mis met hetzelfde product is geen toeval."))
+            elif n not in geslaagd:
+                bezwaar = _gut_bezwaar(b)
+                uit.append((2, naam, "vandaag voor het eerst gebruikt",
+                            bezwaar or "Nieuw product, dus de meest waarschijnlijke oorzaak."))
+            else:
+                bezwaar = _gut_bezwaar(b)
+                if bezwaar:
+                    uit.append((3, naam, "bekend bezwaar", bezwaar))
+                else:
+                    uit.append((4, naam, "eerder gebruikt zonder klachten",
+                                "Dit product ging al eens goed."))
+        uit.sort(key=lambda x: x[0])
+        return uit
+    except Exception as e:
+        print(f"[GUT-MIX-V2] rangschikken mislukt: {e}")
+        return []
+
+
+def _gut_bezwaar(b: dict):
+    """Wat er aan een product op kan vallen, uit de bibliotheek."""
+    if not b:
+        return None
+    if b.get("kh_type") == "enkelvoudig":
+        return "Alleen glucose of maltodextrine: boven 60 g per uur loopt dat vast."
+    if b.get("concentratie") == "geconcentreerd" and (b.get("water_nodig_ml") or 0) >= 150:
+        return (f"Geconcentreerd product. Neem er {b['water_nodig_ml']} ml water bij, "
+                f"of kies iets dunners.")
+    if b.get("kh_verhouding") in ("1:0.8", "1:1"):
+        return "Veel fructose. Verdraag je dat slecht, kies dan een fructosevrij product."
+    if "glucosestroop" in str(b.get("kh_glucosebron") or ""):
+        return "Glucosestroop in plaats van maltodextrine: dat ligt zwaarder op de maag."
+    return None
+
+
+def _gut_alternatief(supabase, uitgesloten: str, kh_doel: int):
+    """Een product uit de bibliotheek dat het gevonden bezwaar niet heeft."""
+    try:
+        bib = supabase.table("fuelc_bibliotheek") \
+            .select("naam,kh_100g,portie_g,portie_label,kh_verhouding,concentratie") \
+            .eq("categorie", "Sportvoeding").eq("kh_type", "meervoudig") \
+            .in_("kh_verhouding", ["1:0.8", "2:1", "1:1"]).execute().data or []
+        uit = str(uitgesloten or "").strip().lower()
+        kandidaten = []
+        for b in bib:
+            if str(b.get("naam") or "").strip().lower() == uit:
+                continue
+            if b.get("concentratie") == "geconcentreerd":
+                continue
+            kh = round((b.get("kh_100g") or 0) * (b.get("portie_g") or 100) / 100)
+            if kh <= 0:
+                continue
+            kandidaten.append((abs(kh - kh_doel), b["naam"], kh))
+        if not kandidaten:
+            return None
+        kandidaten.sort()
+        _, naam, kh = kandidaten[0]
+        return f"{naam} ({kh} g per portie)"
+    except Exception as e:
+        print(f"[GUT-BESLISBOOM-V1] alternatief zoeken mislukt: {e}")
+        return None
+
+
+@app.post("/api/gut/testmoment/{moment_id}/beoordeel")
+async def beoordeel_testmoment(moment_id: str, data: dict,
+                               user=Depends(get_current_user),
+                               supabase: Client = Depends(get_supabase)):
+    """Loopt de beslisboom door en geeft het advies terug.
+
+    Verwacht in data: duur_min, kh_per_uur, maagcomfort, zware_klacht,
+    externe_factor, maaltijd_uren_voor, producten (lijst namen)."""
+    m = supabase.table("carboo_gut_testmomenten").select("*") \
+        .eq("id", moment_id).eq("user_id", user.id).limit(1).execute()
+    if not m.data:
+        raise HTTPException(404, "Testmoment niet gevonden")
+    moment = m.data[0]
+    doel = int(moment.get("doel_kh_uur") or 0)
+
+    duur = float(data.get("duur_min") or 0)
+    kh_uur = float(data.get("kh_per_uur") or 0)
+    comfort = data.get("maagcomfort")
+    comfort = int(comfort) if comfort not in (None, "") else None
+    producten = data.get("producten") or []
+
+    def bewaar(soort, tekst, status):
+        supabase.table("carboo_gut_testmomenten").update({
+            "status": status, "advies": tekst, "advies_soort": soort,
+            "bijgewerkt": "now()",
+        }).eq("id", moment_id).execute()
+        return {"soort": soort, "advies": tekst, "status": status,
+                "doel_nu": doel}
+
+    # 1. externe factor
+    if data.get("externe_factor"):
+        return bewaar("telt_niet",
+            f"Je gaf aan dat er iets bijzonders was. Deze sessie blijft in je "
+            f"logboek maar telt niet mee. Herhaal {doel} g per uur onder "
+            f"gewone omstandigheden.", "telt_niet")
+
+    # 2. minimumduur
+    if duur < GUT_MIN_DUUR:
+        return bewaar("telt_niet",
+            f"Deze sessie duurde {int(duur)} minuten. Onder {GUT_MIN_DUUR} "
+            f"minuten zegt een testmoment weinig over je darm.", "telt_niet")
+
+    # 3. zware klacht: de klachtentak
+    if data.get("zware_klacht"):
+        uren = data.get("maaltijd_uren_voor")
+        if uren is not None and float(uren) < 2:
+            return bewaar("telt_niet",
+                f"Je startte {uren} uur na je laatste maaltijd. Dat verklaart "
+                f"de klachten waarschijnlijk beter dan de dosis. Eet minstens "
+                f"twee uur voor je vertrekt en herhaal {doel} g per uur.",
+                "telt_niet")
+
+        rang = _gut_rangschik_verdachten(supabase, user.id, producten)
+        gevonden = None
+        if rang and rang[0][0] <= 3:
+            _, _naam, _reden, _uitleg = rang[0]
+            gevonden = (_naam, _reden, _uitleg)
+        if gevonden:
+            naam, reden, uitleg = gevonden
+            alt = _gut_alternatief(supabase, naam, doel // max(1, len(producten)))
+            tekst = f"{naam}: {reden}. {uitleg}"
+            if alt:
+                tekst += f" Probeer bijvoorbeeld {alt}."
+            tekst += (f" De dosis blijft {doel} g per uur. Wil je toch verder "
+                      f"met dit product, test het dan nog een keer.")
+            return bewaar("product", tekst, "mislukt")
+
+        nieuw = max(15, doel - GUT_STAP)
+        return bewaar("omlaag",
+            f"Een zware klacht zonder aanwijsbare oorzaak in je maaltijd of je "
+            f"producten. Ga terug naar {nieuw} g per uur.", "mislukt")
+
+    # 4. dosis gehaald
+    if kh_uur < doel * GUT_DOSIS_MARGE:
+        return bewaar("herhaal",
+            f"Je haalde {round(kh_uur)} van de {doel} g per uur. Herhaal "
+            f"hetzelfde testmoment en probeer de dosis wel te halen.", "mislukt")
+
+    # 5. maagcomfort
+    if comfort is not None and comfort < GUT_COMFORT_GRENS:
+        vorige = supabase.table("carboo_gut_sessies") \
+            .select("maagcomfort").eq("user_id", user.id) \
+            .eq("testmoment_id", moment_id) \
+            .order("datum", desc=True).limit(3).execute().data or []
+        laag = sum(1 for v in vorige
+                   if v.get("maagcomfort") is not None
+                   and int(v["maagcomfort"]) < GUT_COMFORT_GRENS)
+        if laag >= 1:
+            nieuw = max(15, doel - GUT_STAP)
+            return bewaar("omlaag",
+                f"Twee keer een maagcomfort onder {GUT_COMFORT_GRENS} op "
+                f"{doel} g per uur. Ga terug naar {nieuw} en probeer meteen "
+                f"een ander product.", "mislukt")
+        return bewaar("herhaal",
+            f"Maagcomfort {comfort} op {doel} g per uur. Herhaal dezelfde "
+            f"dosis; gaat het weer onder {GUT_COMFORT_GRENS}, dan zakken we.",
+            "mislukt")
+
+    # 6. geslaagd: tweede op rij?
+    eerder = supabase.table("carboo_gut_testmomenten") \
+        .select("nummer,doel_kh_uur,status").eq("user_id", user.id) \
+        .eq("doel_kh_uur", doel).eq("status", "geslaagd").execute().data or []
+    if len(eerder) < 1:
+        return bewaar("herhaal",
+            f"Geslaagd op {doel} g per uur. Bevestig het nog een keer voor we "
+            f"omhoog gaan.", "geslaagd")
+
+    # 7. de poort bij 60
+    nieuw = doel + GUT_STAP
+    sport = (moment.get("type_training") or "")
+    prot = supabase.table("carboo_gut_protocol").select("sport") \
+        .eq("user_id", user.id).limit(1).execute().data or []
+    sport = (prot[0].get("sport") if prot else "") or "Lopen"
+    plafond_sport = GUT_PLAFOND.get(sport, 115)
+
+    if nieuw > plafond_sport:
+        return bewaar("herhaal",
+            f"Je zit op {doel} g per uur, en dat is het plafond voor {sport.lower()}. "
+            f"Verder gaan is niet nodig.", "geslaagd")
+
+    if nieuw > 60:
+        plafond_prod, verh, waarom = _gut_mix_plafond(supabase, user.id, sport)
+        hoe = "onbekend" if waarom == "verhouding deels onbekend" else waarom
+        if nieuw > plafond_prod:
+            return bewaar("product",
+                f"Twee keer geslaagd op {doel} g per uur, dus je darm kan meer. "
+                f"Maar je mix laat maximaal {plafond_prod} g toe"
+                + (f" bij een verhouding van 1 op {verh:.1f}" if verh else "") + ": je zit "
+                f"op het plafond van je product, niet op dat van je darm. Kies "
+                f"een product met glucose en fructose in 2:1 of 1:0,8.",
+                "geslaagd")
+        if hoe == "onbekend":
+            return bewaar("omhoog",
+                f"Twee keer geslaagd. Ga naar {nieuw} g per uur. Let op: van een "
+                f"van je producten kennen we de verhouding niet. Boven 60 g per "
+                f"uur heb je glucose met fructose nodig.", "geslaagd")
+
+    return bewaar("omhoog",
+        f"Twee keer geslaagd op {doel} g per uur. Ga naar {nieuw}.", "geslaagd")
+
+
 
 @app.post("/api/fuelc/bibliotheek")
 async def voeg_product_toe(product: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
