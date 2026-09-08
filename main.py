@@ -4365,6 +4365,40 @@ async def get_bibliotheek(user=Depends(get_current_user), supabase: Client = Dep
     r = supabase.table("fuelc_bibliotheek").select("*").or_(f"user_id.eq.{user.id},is_globaal.eq.true").order("naam").execute()
     return {"producten": r.data or []}
 
+# ─── PROFIELFOTO-V1 — een foto per gebruiker ───────────────────────────
+# De foto staat op carboo_gebruikers en niet op een van de profieltabellen,
+# want het is een kenmerk van de persoon en niet van zijn voeding of zijn
+# darmtraining. Zo is dezelfde foto beschikbaar in Fueling, Train the Gut,
+# de coach-zone en straks de feed.
+#
+# Het uploaden gebeurt in de browser, rechtstreeks naar Supabase Storage,
+# zoals bij het prikbord en het forum. Deze routes bewaren alleen de URL.
+
+@app.get("/api/profielfoto")
+async def get_profielfoto(user=Depends(get_current_user),
+                          supabase: Client = Depends(get_supabase)):
+    try:
+        r = supabase.table("carboo_gebruikers").select("foto_url") \
+            .eq("id", user.id).limit(1).execute()
+        return {"foto_url": (r.data[0].get("foto_url") if r.data else None)}
+    except Exception as e:
+        print(f"[PROFIELFOTO-V1] ophalen mislukt: {e}")
+        return {"foto_url": None}
+
+
+@app.post("/api/profielfoto")
+async def zet_profielfoto(data: dict,
+                          user=Depends(get_current_user),
+                          supabase: Client = Depends(get_supabase)):
+    url = (data.get("foto_url") or "").strip() or None
+    try:
+        supabase.table("carboo_gebruikers").update({"foto_url": url}) \
+            .eq("id", user.id).execute()
+    except Exception as e:
+        raise HTTPException(500, f"Kon de foto niet bewaren: {e}")
+    return {"ok": True, "foto_url": url}
+
+
 @app.post("/api/fuelc/bibliotheek")
 async def voeg_product_toe(product: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     product["user_id"] = user.id
