@@ -4823,6 +4823,26 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             f"dosis; gaat het weer onder {GUT_COMFORT_GRENS}, dan zakken we.",
             "mislukt")
 
+    # ── GUT-SMAAK-V1 ───────────────────────────────────────────────────
+    # Smaak telt vanaf 6, net als maagcomfort. Maar anders dan bij comfort
+    # wachten we hier niet op een tweede bevestiging: smaak verandert niet.
+    # Wie het na een lange sessie beu is, is het na twee sessies nog steeds.
+    #
+    # De dosis blijft ongewijzigd. Er is niets mis met de hoeveelheid,
+    # alleen met wat erin zit.
+    smaak = data.get("smaak")
+    smaak = int(smaak) if smaak not in (None, "") else None
+    if smaak is not None and smaak < GUT_COMFORT_GRENS:
+        alt = _gut_alternatief(supabase, (producten[0] if producten else ""),
+                               doel // max(1, len(producten) or 1))
+        tekst = (f"Je gaf de smaak {smaak} op 10. Fysiologisch ging deze sessie "
+                 f"goed, maar wat je niet meer door krijgt neem je in een "
+                 f"wedstrijd ook niet. Wissel van product; de dosis blijft "
+                 f"{doel} g per uur.")
+        if alt:
+            tekst += f" Probeer bijvoorbeeld {alt}."
+        return bewaar("product", tekst, "geslaagd")
+
     # 6. geslaagd: tweede op rij?
     eerder = supabase.table("carboo_gut_testmomenten") \
         .select("nummer,doel_kh_uur,status").eq("user_id", user.id) \
