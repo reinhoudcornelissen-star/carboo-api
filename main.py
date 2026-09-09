@@ -4818,8 +4818,17 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             "status": status, "advies": tekst, "advies_soort": soort,
             "bijgewerkt": "now()",
         }).eq("id", moment_id).execute()
+        # welke dosis het volgende testmoment krijgt, zodat de knop het
+        # kan tonen voor je erop drukt. Zelfde berekening als in de route
+        # die het moment aanmaakt.
+        if soort == "omhoog":
+            volgende = min(120, doel + GUT_STAP)
+        elif soort == "omlaag":
+            volgende = max(15, doel - GUT_STAP)
+        else:
+            volgende = doel
         return {"soort": soort, "advies": tekst, "status": status,
-                "doel_nu": doel}
+                "doel_nu": doel, "doel_volgende": volgende}
 
     # 1. externe factor
     if data.get("externe_factor"):
