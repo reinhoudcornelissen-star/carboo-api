@@ -4725,6 +4725,73 @@ async def maak_testmoment(data: dict,
     return {"ok": True, "moment": (r.data[0] if r.data else rij)}
 
 
+
+# ─── GUT-VOLGEND-MOMENT-V1 ─────────────────────────────────────────────
+# Het advies bepaalt het volgende testmoment, niet de sporter.
+#
+# Testmomenten horen niet vooraf te bestaan. Er is er een: waar je nu
+# staat. Pas na de evaluatie weet je wat er daarna komt, en met welke
+# dosis:
+#
+#   omhoog            +10 g per uur
+#   omlaag            -10 g per uur
+#   herhaal           dezelfde dosis, poging telt op
+#   product wisselen  dezelfde dosis, ander product
+#   telt niet mee     dezelfde dosis, poging telt niet op
+#
+# Deze route maakt dat volgende moment aan. Ze weigert als er al een
+# volgend moment bestaat, zodat er niet per ongeluk een reeks ontstaat.
+
+@app.post("/api/gut/testmoment/{moment_id}/volgende")
+async def maak_volgend_testmoment(moment_id: str,
+                                  user=Depends(get_current_user),
+                                  supabase: Client = Depends(get_supabase)):
+    m = supabase.table("carboo_gut_testmomenten").select("*") \
+        .eq("id", moment_id).eq("user_id", user.id).limit(1).execute()
+    if not m.data:
+        raise HTTPException(404, "Testmoment niet gevonden")
+    moment = m.data[0]
+
+    soort = moment.get("advies_soort")
+    if not soort:
+        raise HTTPException(400, "Dit testmoment is nog niet beoordeeld")
+
+    # bestaat er al een volgende?
+    later = supabase.table("carboo_gut_testmomenten") \
+        .select("id,nummer").eq("user_id", user.id) \
+        .gt("nummer", moment["nummer"]).limit(1).execute().data or []
+    if later:
+        return {"ok": True, "bestond_al": True,
+                "moment": None,
+                "melding": "Er staat al een volgend testmoment klaar."}
+
+    doel = int(moment.get("doel_kh_uur") or 0)
+    poging = int(moment.get("poging") or 1)
+
+    if soort == "omhoog":
+        nieuw_doel, nieuwe_poging = doel + GUT_STAP, 1
+    elif soort == "omlaag":
+        nieuw_doel, nieuwe_poging = max(15, doel - GUT_STAP), 1
+    elif soort in ("herhaal", "product"):
+        nieuw_doel, nieuwe_poging = doel, poging + 1
+    else:  # telt_niet
+        nieuw_doel, nieuwe_poging = doel, poging
+
+    rij = {
+        "user_id": user.id,
+        "nummer": int(moment["nummer"]) + 1,
+        "doel_kh_uur": min(120, nieuw_doel),
+        "intensiteit": moment.get("intensiteit") or "laag",
+        "min_duur_min": int(moment.get("min_duur_min") or GUT_MIN_DUUR),
+        "type_training": moment.get("type_training") or "Duurtraining",
+        "status": "open",
+        "poging": nieuwe_poging,
+    }
+    r = supabase.table("carboo_gut_testmomenten").insert(rij).execute()
+    return {"ok": True, "bestond_al": False,
+            "moment": (r.data[0] if r.data else rij)}
+
+
 @app.post("/api/gut/testmoment/{moment_id}/beoordeel")
 async def beoordeel_testmoment(moment_id: str, data: dict,
                                user=Depends(get_current_user),
