@@ -4742,6 +4742,53 @@ async def maak_testmoment(data: dict,
 # Deze route maakt dat volgende moment aan. Ze weigert als er al een
 # volgend moment bestaat, zodat er niet per ongeluk een reeks ontstaat.
 
+
+# ─── GUT-GEEN-TERUGSTAP-V2 ─────────────────────────────────────────────
+# Drie wijzigingen aan de beslisboom.
+#
+# EEN. GEEN TERUGSTAP MEER. Een stap terug kost vier tot zes weken om
+# terug te winnen, en dat is een zware prijs voor een klacht waarvan we
+# de oorzaak niet vonden. De literatuur zegt het ook: pas eerst het
+# formaat aan, niet de dosis. De darm verdraagt dezelfde grammen vaak
+# anders geleverd.
+#
+# TWEE. NA DRIE PRODUCTWISSELS OP DEZELFDE DOSIS stopt het zoeken. Dan
+# is er iets anders aan de hand dan het product, en verwijst de app naar
+# de coach in plaats van de dosis te verlagen.
+#
+# DRIE. GEEN MERKNAMEN IN HET ADVIES. Een merknaam lijkt op reclame en
+# beperkt de sporter tot wat toevallig in de bibliotheek staat. In de
+# plaats komt de EIGENSCHAP: een dunnere gel, een isotone drank, een
+# product met glucose en fructose. Dat is leerzamer: hij leert waar hij
+# op moet letten in plaats van welk merk hij moet kopen.
+
+def _gut_vorm_advies(bezwaar: str):
+    """Van een gevonden bezwaar naar een vorm, niet naar een merk."""
+    v = (bezwaar or "").lower()
+    if "enkelvoudig" in v or "alleen glucose" in v or "maltodextrine" in v and "alleen" in v:
+        return "een product met glucose EN fructose erin"
+    if "geconcentreerd" in v:
+        return "een dunnere gel of een isotone drank, of dezelfde gel met meer water erbij"
+    if "fructose" in v:
+        return "een fructosevrij product, dus alleen glucose of maltodextrine"
+    if "glucosestroop" in v:
+        return "een product op maltodextrine in plaats van glucosestroop"
+    if "vet" in v or "vezel" in v or "eiwit" in v:
+        return "iets zonder vet of vezels, bijvoorbeeld een gel of een drank"
+    return "een andere vorm: een drank in plaats van een gel, of omgekeerd"
+
+
+def _gut_aantal_wissels(supabase, user_id: str, doel: int):
+    """Hoeveel keer er al van product gewisseld is op deze dosis."""
+    try:
+        r = supabase.table("carboo_gut_testmomenten") \
+            .select("advies_soort").eq("user_id", user_id) \
+            .eq("doel_kh_uur", doel).eq("advies_soort", "product").execute()
+        return len(r.data or [])
+    except Exception:
+        return 0
+
+
 @app.post("/api/gut/testmoment/{moment_id}/volgende")
 async def maak_volgend_testmoment(moment_id: str,
                                   user=Depends(get_current_user),
@@ -4860,18 +4907,26 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             gevonden = (_naam, _reden, _uitleg)
         if gevonden:
             naam, reden, uitleg = gevonden
-            alt = _gut_alternatief(supabase, naam, doel // max(1, len(producten)))
+            alt = _gut_vorm_advies(reden)
             tekst = f"{naam}: {reden}. {uitleg}"
             if alt:
-                tekst += f" Probeer bijvoorbeeld {alt}."
+                tekst += f" Probeer {alt}."
             tekst += (f" De dosis blijft {doel} g per uur. Wil je toch verder "
                       f"met dit product, test het dan nog een keer.")
             return bewaar("product", tekst, "mislukt")
 
-        nieuw = max(15, doel - GUT_STAP)
-        return bewaar("omlaag",
+        wissels = _gut_aantal_wissels(supabase, user.id, doel)
+        if wissels >= 3:
+            return bewaar("coach",
+                f"Je probeerde al drie verschillende producten op {doel} g per uur "
+                f"en het blijft misgaan. Dat is geen productprobleem meer. Neem "
+                f"contact op met je coach om samen te kijken wat er speelt.",
+                "mislukt")
+        return bewaar("product",
             f"Een zware klacht zonder aanwijsbare oorzaak in je maaltijd of je "
-            f"producten. Ga terug naar {nieuw} g per uur.", "mislukt")
+            f"producten. De dosis blijft {doel} g per uur; probeer het met een "
+            f"andere vorm. Een drank in plaats van een gel, of omgekeerd.",
+            "mislukt")
 
     # 4. dosis gehaald
     if kh_uur < doel * GUT_DOSIS_MARGE:
@@ -4889,11 +4944,17 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
                    if v.get("maagcomfort") is not None
                    and int(v["maagcomfort"]) < GUT_COMFORT_GRENS)
         if laag >= 1:
-            nieuw = max(15, doel - GUT_STAP)
-            return bewaar("omlaag",
-                f"Twee keer een maagcomfort onder {GUT_COMFORT_GRENS} op "
-                f"{doel} g per uur. Ga terug naar {nieuw} en probeer meteen "
-                f"een ander product.", "mislukt")
+            wissels = _gut_aantal_wissels(supabase, user.id, doel)
+            if wissels >= 3:
+                return bewaar("coach",
+                    f"Twee keer een onrustige maag op {doel} g per uur, en je "
+                    f"probeerde al drie producten. Neem contact op met je coach.",
+                    "mislukt")
+            return bewaar("product",
+                f"Twee keer een maagcomfort onder {GUT_COMFORT_GRENS} op {doel} g "
+                f"per uur. De dosis blijft; probeer een dunnere vorm of meer "
+                f"water bij wat je neemt.",
+                "mislukt")
         return bewaar("herhaal",
             f"Maagcomfort {comfort} op {doel} g per uur. Herhaal dezelfde "
             f"dosis; gaat het weer onder {GUT_COMFORT_GRENS}, dan zakken we.",
@@ -4909,14 +4970,18 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     smaak = data.get("smaak")
     smaak = int(smaak) if smaak not in (None, "") else None
     if smaak is not None and smaak < GUT_COMFORT_GRENS:
-        alt = _gut_alternatief(supabase, (producten[0] if producten else ""),
-                               doel // max(1, len(producten) or 1))
+        alt = _gut_vorm_advies("smaak")
         tekst = (f"Je gaf de smaak {smaak} op 10. Fysiologisch ging deze sessie "
                  f"goed, maar wat je niet meer door krijgt neem je in een "
                  f"wedstrijd ook niet. Wissel van product; de dosis blijft "
                  f"{doel} g per uur.")
         if alt:
-            tekst += f" Probeer bijvoorbeeld {alt}."
+            tekst += f" Probeer {alt}."
+        if _gut_aantal_wissels(supabase, user.id, doel) >= 3:
+            return bewaar("coach",
+                f"Je probeerde al drie producten op {doel} g per uur en de smaak "
+                f"blijft tegenvallen. Overleg met je coach welke vorm wel werkt.",
+                "geslaagd")
         return bewaar("product", tekst, "geslaagd")
 
     # 6. geslaagd: tweede op rij?
