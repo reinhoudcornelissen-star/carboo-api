@@ -1921,6 +1921,7 @@ async def keur_gut_concept_goed(user=Depends(get_current_user), supabase: Client
         raise HTTPException(404, "Geen concept gevonden")
     supabase.table("carboo_gut_protocol").delete().eq("user_id", user.id).eq("status", "actief").execute()
     supabase.table("carboo_gut_protocol").update({"status": "actief", "actief": True, "week_huidig": 1, "bijgewerkt": "now()"}).eq("user_id", user.id).eq("status", "concept").execute()
+    _gut_t1_bijwerken(supabase, user.id, item.max_kh_per_uur, item.ervaring)
     return {"ok": True}
 
 
@@ -4992,6 +4993,37 @@ def _gut_vorm_smaak_advies(supabase, producten: list):
         punten.append("Probeer een andere smaak van dezelfde soort, of een andere vorm.")
     return " ".join(punten[:2])
 
+
+# ─── GUT-T1-MEELOOPT-V1 ────────────────────────────────────────────────
+# T1 volgt de hoogste inname zonder klachten uit het profiel, zolang hij
+# nog openstaat. Zodra er iets beoordeeld is ligt de dosis vast: dan wil
+# je niet dat het protocol resets omdat iemand een cijfer bijstelt.
+def _gut_t1_bijwerken(supabase, user_id: str, max_kh, ervaring: str):
+    try:
+        beoordeeld = supabase.table("carboo_gut_testmomenten") \
+            .select("id").eq("user_id", user_id) \
+            .not_.is_("advies_soort", "null").limit(1).execute()
+        if beoordeeld.data:
+            return  # er is al getest, de dosis ligt vast
+
+        t1 = supabase.table("carboo_gut_testmomenten").select("id,nummer") \
+            .eq("user_id", user_id).eq("nummer", 1).limit(1).execute()
+        if not t1.data:
+            return
+
+        try:
+            dosis = int(float(max_kh)) if max_kh not in (None, "") else None
+        except (TypeError, ValueError):
+            dosis = None
+        if dosis is None:
+            dosis = {"Ervaren": 60, "Gevorderd": 40}.get(ervaring or "", 20)
+        dosis = max(15, min(120, dosis))
+
+        supabase.table("carboo_gut_testmomenten") \
+            .update({"doel_kh_uur": dosis, "bijgewerkt": "now()"}) \
+            .eq("id", t1.data[0]["id"]).execute()
+    except Exception as e:
+        print(f"[GUT-T1-MEELOOPT-V1] T1 bijwerken mislukt: {e}")
 
 @app.post("/api/gut/testmoment/{moment_id}/beoordeel")
 async def beoordeel_testmoment(moment_id: str, data: dict,
