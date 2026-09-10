@@ -1518,6 +1518,10 @@ class GutProtocol(BaseModel):
     heeft_last: Optional[bool] = None
     last_met_welke: Optional[str] = None
     last_omstandigheden: Optional[str] = None
+    # de verwachte wedstrijdduur bepaalt het doel in g per uur
+    wedstrijd_duur_uur: Optional[float] = None
+    # of het protocol stuurt, of de sporter zelf bepaalt
+    protocol_aan: Optional[bool] = None
 
 class GutSessie(BaseModel):
     datum: Optional[str] = None
