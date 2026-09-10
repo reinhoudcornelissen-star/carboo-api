@@ -4759,10 +4759,18 @@ def _gut_alternatief(supabase, uitgesloten: str, kh_doel: int):
 @app.get("/api/gut/testmomenten")
 async def lijst_testmomenten(user=Depends(get_current_user),
                              supabase: Client = Depends(get_supabase)):
-    """De testmomenten van deze sporter, op volgorde."""
-    r = supabase.table("carboo_gut_testmomenten").select("*") \
-        .eq("user_id", user.id).order("nummer").execute()
-    return {"momenten": r.data or []}
+    """De testmomenten van deze sporter, op volgorde.
+
+    Alles komt terug, want het logboek toont de hele geschiedenis. Welke
+    reeks de lopende is bepaalt de server, niet het scherm: elke rij
+    krijgt gegarandeerd een reeks mee, ook als de kolom nog niet bestaat.
+    Zo kan Testing er nooit naast zitten."""
+    rijen, reeks_nu, heeft_kolom = _gut_momenten(supabase, user.id)
+    return {
+        "momenten": rijen,
+        "reeks_nu": reeks_nu,
+        "reeks_kolom": heeft_kolom,
+    }
 
 
 @app.post("/api/gut/testmomenten")
@@ -4890,6 +4898,7 @@ def _gut_momenten(supabase, user_id: str):
     heeft_kolom = bool(rijen) and "reeks" in rijen[0]
     for r in rijen:
         r["reeks"] = int(r.get("reeks") or 1)
+    rijen.sort(key=lambda r: (r["reeks"], int(r.get("nummer") or 0)))
     nu = max((r["reeks"] for r in rijen), default=1)
     return rijen, nu, heeft_kolom
 
