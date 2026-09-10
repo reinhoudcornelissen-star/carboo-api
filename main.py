@@ -4909,6 +4909,90 @@ GUT_BEIDE_TIPS = (
 )
 
 
+
+# ─── GUT-VOCHT-VORM-V1 ─────────────────────────────────────────────────
+# Bij maagcomfort kijkt de app naar DRIE dingen, niet naar een:
+#
+#   samenstelling   welke suikers, welke verhouding, welke bron
+#   spreiding       om de 20 of om de 30 minuten
+#   vocht           hoeveel ml per uur naast de grammen
+#
+# Dat laatste is vaak de belangrijkste. Zestig gram met 200 ml water
+# geeft een veel hogere concentratie in de maag dan dezelfde zestig met
+# 700 ml. Fysiologisch weegt dat zwaarder dan de verhouding glucose op
+# fructose.
+#
+# Bij smaak kijkt ze naar drie andere dingen:
+#
+#   viscositeit   stroperig of vloeiend
+#   vorm          gel, drank, chews of reep
+#   afwisseling   na drie uur gaat zoet tegenstaan
+
+GUT_VOCHT_MIN = 500   # ml per uur, ondergrens
+GUT_VOCHT_MAX = 900   # ml per uur, bovengrens
+
+
+def _gut_vocht_advies(momenten: list, duur_min: float, doel: int):
+    """Kijkt of er genoeg vocht bij de koolhydraten ging."""
+    try:
+        ml = 0
+        for m in (momenten or []):
+            if isinstance(m, dict):
+                ml += float(m.get("volume_ml") or m.get("hoeveelheid_ml_g") or 0)
+        if duur_min <= 0:
+            return None
+        per_uur = round(ml / duur_min * 60)
+        if per_uur == 0:
+            return ("Je noteerde geen vocht. Bij 60 g of meer per uur heb je 500 tot "
+                    "750 ml nodig om het te verdunnen.")
+        if per_uur < GUT_VOCHT_MIN:
+            tekort = GUT_VOCHT_MIN - per_uur
+            return (f"Je dronk {per_uur} ml per uur bij {doel} g koolhydraten. Dat is "
+                    f"weinig: je maag moet dan vocht uit je darm halen om het te "
+                    f"verdunnen. Probeer er {tekort} ml per uur bij te doen.")
+        if per_uur > GUT_VOCHT_MAX:
+            return (f"Je dronk {per_uur} ml per uur. Dat is veel; een volle maag "
+                    f"klotst en vertraagt de opname. Rond de 700 ml is genoeg.")
+        return None
+    except Exception as e:
+        print(f"[GUT-VOCHT-VORM-V1] vocht berekenen mislukt: {e}")
+        return None
+
+
+def _gut_vorm_smaak_advies(supabase, producten: list):
+    """Bij smaak: viscositeit, vorm en afwisseling."""
+    punten = []
+    try:
+        bib = {str(b.get("naam") or "").strip().lower(): b
+               for b in (supabase.table("fuelc_bibliotheek")
+                         .select("naam,viscositeit,concentratie")
+                         .eq("categorie", "Sportvoeding").execute().data or [])}
+        vormen = set()
+        stroperig = False
+        for naam in (producten or []):
+            b = bib.get(str(naam).strip().lower())
+            if not b:
+                continue
+            if b.get("viscositeit") == "stroperig":
+                stroperig = True
+            v = b.get("concentratie")
+            if v:
+                vormen.add(v)
+
+        if stroperig:
+            punten.append("Een van je producten is stroperig. Iets vloeiends drinkt "
+                          "makkelijker weg als je moe wordt.")
+        if len(vormen) <= 1:
+            punten.append("Je nam alles in dezelfde vorm. Wissel eens af: chews of een "
+                          "reep naast je gel.")
+    except Exception as e:
+        print(f"[GUT-VOCHT-VORM-V1] vorm nakijken mislukt: {e}")
+
+    if not punten:
+        punten.append("Probeer een andere smaak van dezelfde soort, of een andere vorm.")
+    return " ".join(punten[:2])
+
+
 @app.post("/api/gut/testmoment/{moment_id}/beoordeel")
 async def beoordeel_testmoment(moment_id: str, data: dict,
                                user=Depends(get_current_user),
@@ -5035,6 +5119,11 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
                        if v.get("maagcomfort") is not None
                        and int(v["maagcomfort"]) < GUT_COMFORT_GRENS)
             tip = _gut_advies_comfort(supabase, user.id, doel, producten)
+            # vocht weegt vaak zwaarder dan de suikers: hetzelfde aantal
+            # grammen met te weinig water trekt vocht uit je darm
+            _vocht = _gut_vocht_advies(data.get("momenten") or [], duur, doel)
+            if _vocht:
+                tip = _vocht + " " + tip
             if laag >= 1:
                 return bewaar("product",
                     f"Twee keer een maagcomfort onder de {GUT_COMFORT_GRENS} op {doel} g "
@@ -5048,7 +5137,8 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         return bewaar("product",
             f"Je gaf de smaak {smaak} op 10. Fysiologisch ging deze sessie goed, maar "
             f"wat je niet meer door krijgt neem je in een wedstrijd ook niet. De dosis "
-            f"en de samenstelling blijven; het gaat om de vorm. {GUT_SMAAK_TIPS}",
+            f"en de samenstelling blijven; het gaat om de vorm. "
+            f"{_gut_vorm_smaak_advies(supabase, producten)}",
             "geslaagd")
     # 6. geslaagd: tweede op rij?
     eerder = supabase.table("carboo_gut_testmomenten") \
