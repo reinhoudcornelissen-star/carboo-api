@@ -4839,6 +4839,66 @@ async def maak_volgend_testmoment(moment_id: str,
             "moment": (r.data[0] if r.data else rij)}
 
 
+
+# ─── GUT-COMFORT-SMAAK-V3 ──────────────────────────────────────────────
+# Comfort en smaak zijn twee verschillende problemen.
+#
+#   Comfort laag  ->  het zit in de SAMENSTELLING
+#   Smaak laag    ->  het zit in de VORM
+#   Allebei laag  ->  zoek iets dat op twee vlakken verschilt
+#
+# Iemand met een onrustige maag heeft niets aan het advies om een andere
+# smaak te kiezen. En iemand die zijn gel niet meer door krijgt heeft
+# niets aan uitleg over transporters.
+
+def _gut_advies_comfort(supabase, user_id: str, doel: int, producten: list):
+    """Wat er aan de samenstelling kan schelen. Kijkt naar de producten
+    die hij gebruikte en noemt de eerste die opvalt."""
+    punten = []
+    try:
+        bib = {str(b.get("naam") or "").strip().lower(): b
+               for b in (supabase.table("fuelc_bibliotheek")
+                         .select("naam,kh_type,kh_verhouding,kh_glucosebron,"
+                                 "concentratie,water_nodig_ml")
+                         .eq("categorie", "Sportvoeding").execute().data or [])}
+        for naam in (producten or []):
+            b = bib.get(str(naam).strip().lower())
+            if not b:
+                continue
+            if b.get("kh_type") == "enkelvoudig" and doel > 60:
+                punten.append("Zit er alleen maltodextrine of glucose in? Boven 60 g per "
+                              "uur loopt dat vast; daar heb je fructose bij nodig.")
+            if b.get("kh_verhouding") in ("1:0.8", "1:1"):
+                punten.append("Zit je op 1 op 0,8 of 1 op 1? Dat is veel fructose. "
+                              "Probeer eens 2 op 1.")
+            if b.get("concentratie") == "geconcentreerd":
+                punten.append(f"Is het geconcentreerd? Neem er {b.get('water_nodig_ml') or 175} "
+                              f"ml water bij, of kies een isotone vorm.")
+            if "glucosestroop" in str(b.get("kh_glucosebron") or ""):
+                punten.append("Glucosestroop in plaats van maltodextrine? Maltodextrine "
+                              "ligt lichter op de maag.")
+    except Exception as e:
+        print(f"[GUT-COMFORT-SMAAK-V3] samenstelling nakijken mislukt: {e}")
+
+    if punten:
+        return " ".join(punten[:2])
+    return ("Kijk naar de samenstelling van wat je neemt: de verhouding glucose op "
+            "fructose, en of het niet te geconcentreerd is.")
+
+
+GUT_SMAAK_TIPS = (
+    "Probeer een andere smaak van dezelfde soort, of een andere vorm: chews of een "
+    "reep in plaats van een gel. Na drie uur gaat zoet vaak tegenstaan; iets hartigs "
+    "afwisselen helpt dan meer dan nog een gel."
+)
+
+GUT_BEIDE_TIPS = (
+    "Zoek iets dat op twee vlakken verschilt: een andere verhouding glucose op fructose "
+    "en een andere vorm. Liefst geen variant van hetzelfde merk, want die delen vaak "
+    "dezelfde basis. En neem er wat meer water bij, wat je ook kiest."
+)
+
+
 @app.post("/api/gut/testmoment/{moment_id}/beoordeel")
 async def beoordeel_testmoment(moment_id: str, data: dict,
                                user=Depends(get_current_user),
@@ -4934,56 +4994,52 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             f"Je haalde {round(kh_uur)} van de {doel} g per uur. Herhaal "
             f"hetzelfde testmoment en probeer de dosis wel te halen.", "mislukt")
 
-    # 5. maagcomfort
-    if comfort is not None and comfort < GUT_COMFORT_GRENS:
-        vorige = supabase.table("carboo_gut_sessies") \
-            .select("maagcomfort").eq("user_id", user.id) \
-            .eq("testmoment_id", moment_id) \
-            .order("datum", desc=True).limit(3).execute().data or []
-        laag = sum(1 for v in vorige
-                   if v.get("maagcomfort") is not None
-                   and int(v["maagcomfort"]) < GUT_COMFORT_GRENS)
-        if laag >= 1:
-            wissels = _gut_aantal_wissels(supabase, user.id, doel)
-            if wissels >= 3:
-                return bewaar("coach",
-                    f"Twee keer een onrustige maag op {doel} g per uur, en je "
-                    f"probeerde al drie producten. Neem contact op met je coach.",
-                    "mislukt")
-            return bewaar("product",
-                f"Twee keer een maagcomfort onder {GUT_COMFORT_GRENS} op {doel} g "
-                f"per uur. De dosis blijft; probeer een dunnere vorm of meer "
-                f"water bij wat je neemt.",
-                "mislukt")
-        return bewaar("herhaal",
-            f"Maagcomfort {comfort} op {doel} g per uur. Herhaal dezelfde "
-            f"dosis; gaat het weer onder {GUT_COMFORT_GRENS}, dan zakken we.",
-            "mislukt")
-
-    # ── GUT-SMAAK-V1 ───────────────────────────────────────────────────
-    # Smaak telt vanaf 6, net als maagcomfort. Maar anders dan bij comfort
-    # wachten we hier niet op een tweede bevestiging: smaak verandert niet.
-    # Wie het na een lange sessie beu is, is het na twee sessies nog steeds.
+    # 5. maagcomfort en smaak samen
     #
-    # De dosis blijft ongewijzigd. Er is niets mis met de hoeveelheid,
-    # alleen met wat erin zit.
+    # Comfort zit in de samenstelling, smaak in de vorm. Zijn ze allebei
+    # laag, dan is het product op twee vlakken verkeerd.
     smaak = data.get("smaak")
     smaak = int(smaak) if smaak not in (None, "") else None
-    if smaak is not None and smaak < GUT_COMFORT_GRENS:
-        alt = _gut_vorm_advies("smaak")
-        tekst = (f"Je gaf de smaak {smaak} op 10. Fysiologisch ging deze sessie "
-                 f"goed, maar wat je niet meer door krijgt neem je in een "
-                 f"wedstrijd ook niet. Wissel van product; de dosis blijft "
-                 f"{doel} g per uur.")
-        if alt:
-            tekst += f" Probeer {alt}."
-        if _gut_aantal_wissels(supabase, user.id, doel) >= 3:
-            return bewaar("coach",
-                f"Je probeerde al drie producten op {doel} g per uur en de smaak "
-                f"blijft tegenvallen. Overleg met je coach welke vorm wel werkt.",
-                "geslaagd")
-        return bewaar("product", tekst, "geslaagd")
+    comfort_laag = comfort is not None and comfort < GUT_COMFORT_GRENS
+    smaak_laag = smaak is not None and smaak < GUT_COMFORT_GRENS
 
+    if comfort_laag or smaak_laag:
+        wissels = _gut_aantal_wissels(supabase, user.id, doel) if "_gut_aantal_wissels" in globals() else 0
+        if wissels >= 3:
+            return bewaar("coach",
+                f"Je probeerde al drie producten op {doel} g per uur en het blijft "
+                f"tegenvallen. Dat is geen productprobleem meer. Neem contact op met "
+                f"je coach om samen te kijken wat er speelt.", "mislukt")
+
+        if comfort_laag and smaak_laag:
+            return bewaar("product",
+                f"Maagcomfort {comfort} en smaak {smaak} op {doel} g per uur. Zowel je "
+                f"maag als je smaak geven aan dat dit product niet bij je past. De dosis "
+                f"blijft. {GUT_BEIDE_TIPS}", "mislukt")
+
+        if comfort_laag:
+            vorige = supabase.table("carboo_gut_sessies") \
+                .select("maagcomfort").eq("user_id", user.id) \
+                .order("datum", desc=True).limit(3).execute().data or []
+            laag = sum(1 for v in vorige
+                       if v.get("maagcomfort") is not None
+                       and int(v["maagcomfort"]) < GUT_COMFORT_GRENS)
+            tip = _gut_advies_comfort(supabase, user.id, doel, producten)
+            if laag >= 1:
+                return bewaar("product",
+                    f"Twee keer een maagcomfort onder de {GUT_COMFORT_GRENS} op {doel} g "
+                    f"per uur. De dosis blijft; het zit in wat je neemt. {tip}", "mislukt")
+            return bewaar("herhaal",
+                f"Maagcomfort {comfort} op {doel} g per uur. Herhaal dezelfde dosis. "
+                f"Gaat het weer onder de {GUT_COMFORT_GRENS}, kijk dan naar de "
+                f"samenstelling: {tip}", "mislukt")
+
+        # alleen de smaak
+        return bewaar("product",
+            f"Je gaf de smaak {smaak} op 10. Fysiologisch ging deze sessie goed, maar "
+            f"wat je niet meer door krijgt neem je in een wedstrijd ook niet. De dosis "
+            f"en de samenstelling blijven; het gaat om de vorm. {GUT_SMAAK_TIPS}",
+            "geslaagd")
     # 6. geslaagd: tweede op rij?
     eerder = supabase.table("carboo_gut_testmomenten") \
         .select("nummer,doel_kh_uur,status").eq("user_id", user.id) \
