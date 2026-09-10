@@ -1537,6 +1537,13 @@ class GutSessie(BaseModel):
     wil_doorgaan: Optional[bool] = None
     dosis_aanpassen: Optional[str] = "Zelfde"
     producten: Optional[list] = []
+    # de twee scores die de beslisboom gebruikt: 10 is goed
+    maagcomfort: Optional[int] = None
+    smaak_score: Optional[int] = None
+    # wat er bijzonder was, of leeg
+    externe_factor: Optional[str] = None
+    # aan welk testmoment deze sessie hangt
+    testmoment_id: Optional[str] = None
 
 class WinkelmandjeItem(BaseModel):
     naam: str
@@ -1749,6 +1756,10 @@ async def sla_sessie_op(item: GutSessie, user=Depends(get_current_user), supabas
         "vochtigheid_pct": item.vochtigheid_pct,
         "notitie": item.notitie or "",
         "energie_score": item.energie_score,
+        "maagcomfort": item.maagcomfort,
+        "smaak_score": item.smaak_score,
+        "externe_factor": item.externe_factor,
+        "testmoment_id": item.testmoment_id,
         "prestatie_score": item.prestatie_score,
         "wil_doorgaan": item.wil_doorgaan,
         "dosis_aanpassen": item.dosis_aanpassen or "Zelfde",
@@ -1855,6 +1866,10 @@ async def sla_trainingssessie_op(item: TrainingSessie, user=Depends(get_current_
         "week_nummer": week,
         "maagcomfort": item.maagcomfort,
         "energie_score": item.energie_score,
+        "maagcomfort": item.maagcomfort,
+        "smaak_score": item.smaak_score,
+        "externe_factor": item.externe_factor,
+        "testmoment_id": item.testmoment_id,
         "kh_per_uur": kh_uur,
         "vocht_ml_per_uur": vocht_uur,
         "notitie": item.notitie or "",
