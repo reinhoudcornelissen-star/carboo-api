@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 import hashlib as _hashlib
 import datetime as _dt
 import re as _re
@@ -1544,6 +1544,8 @@ class GutSessie(BaseModel):
     externe_factor: Optional[str] = None
     # aan welk testmoment deze sessie hangt
     testmoment_id: Optional[str] = None
+    # totaal vocht over de sessie: de beslisboom weegt dit mee bij maagcomfort
+    vocht_ml: Optional[int] = None
 
 class WinkelmandjeItem(BaseModel):
     naam: str
@@ -1722,9 +1724,27 @@ async def sla_protocol_op(item: GutProtocol, user=Depends(get_current_user), sup
         supabase.table("carboo_gut_protocol").update(data).eq("user_id", user.id).eq("status", "actief").execute()
     else:
         supabase.table("carboo_gut_protocol").insert(data).execute()
-        # T1 volgt de hoogste inname zolang er nog niets beoordeeld is
-        _gut_t1_bijwerken(supabase, user.id, item.max_kh_per_uur, item.ervaring)
+    # Ook bij een update: wie zijn profiel bijwerkt voor de eerste test
+    # hoort dat getal terug te zien in T1. Stond dit alleen op de tak
+    # hierboven, dan liep het nooit, want T1 bestond op dat moment nog niet.
+    _gut_t1_verzeker(supabase, user.id, dosis["startdosis"], item.protocol_aan)
     return {"ok": True, "dosis": dosis}
+
+# ─── GUT-TOGGLE-V1 ─────────────────────────────────────────────────────
+# Aan: het protocol stuurt, en de beslisboom geeft na elke evaluatie
+# advies. Uit: de sporter bepaalt zijn eigen dosis, intensiteit en duur,
+# maakt zelf testmomenten aan, en krijgt geen advies. Wat hij invult wordt
+# in beide standen bewaard en geevalueerd.
+
+@app.post("/api/gut/protocol/aan")
+async def zet_protocol_aan(data: dict, user=Depends(get_current_user),
+                           supabase: Client = Depends(get_supabase)):
+    aan = bool(data.get("aan"))
+    supabase.table("carboo_gut_protocol") \
+        .update({"protocol_aan": aan, "bijgewerkt": "now()"}) \
+        .eq("user_id", user.id).eq("status", "actief").execute()
+    return {"ok": True, "protocol_aan": aan}
+
 
 @app.get("/api/gut/sessies")
 async def get_sessies(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -1760,6 +1780,7 @@ async def sla_sessie_op(item: GutSessie, user=Depends(get_current_user), supabas
         "smaak_score": item.smaak_score,
         "externe_factor": item.externe_factor,
         "testmoment_id": item.testmoment_id,
+        "vocht_ml": item.vocht_ml,
         "prestatie_score": item.prestatie_score,
         "wil_doorgaan": item.wil_doorgaan,
         "dosis_aanpassen": item.dosis_aanpassen or "Zelfde",
@@ -1799,6 +1820,11 @@ class TrainingSessie(BaseModel):
     energie_score: Optional[int] = None
     duur_min: Optional[int] = None
     notitie: Optional[str] = None
+    # dezelfde vier velden als bij een protocolsessie: zonder deze regels
+    # gooit het model weg wat de route hieronder wel wegschrijft
+    smaak_score: Optional[int] = None
+    externe_factor: Optional[str] = None
+    testmoment_id: Optional[str] = None
 
 
 _DRANK_WOORDEN = ("water", "sportdrank", "isotoon", "thee", "koffie",
@@ -1866,20 +1892,36 @@ async def sla_trainingssessie_op(item: TrainingSessie, user=Depends(get_current_
         "week_nummer": week,
         "maagcomfort": item.maagcomfort,
         "energie_score": item.energie_score,
-        "maagcomfort": item.maagcomfort,
         "smaak_score": item.smaak_score,
         "externe_factor": item.externe_factor,
         "testmoment_id": item.testmoment_id,
         "kh_per_uur": kh_uur,
+        "vocht_ml": round(vocht_ml) or None,
         "vocht_ml_per_uur": vocht_uur,
         "notitie": item.notitie or "",
     }
 
     try:
         r = supabase.table("carboo_gut_sessies").insert(data).execute()
+        sessie_id = r.data[0]["id"] if r.data else None
+        # Wat er tijdens de training binnenging hoort in het logboek te staan.
+        # Fueling noteert geen tijdstip, dus alles gaat op nul: verspreid.
+        if sessie_id:
+            for rij in rijen:
+                if not rij.get("naam"):
+                    continue
+                supabase.table("carboo_gut_producten").insert({
+                    "sessie_id": sessie_id,
+                    "user_id": user.id,
+                    "naam": rij.get("naam") or "",
+                    "categorie": rij.get("categorie") or "",
+                    "kh_gram": round(float(rij.get("kh_g") or 0)),
+                    "hoeveelheid_ml_g": rij.get("hoeveelheid_g"),
+                    "tijdstip_min": 0,
+                }).execute()
         return {
             "ok": True,
-            "sessie_id": r.data[0]["id"] if r.data else None,
+            "sessie_id": sessie_id,
             "kh_per_uur": kh_uur,
             "vocht_ml_per_uur": vocht_uur,
         }
@@ -4729,11 +4771,11 @@ async def maak_testmoment(data: dict,
                           supabase: Client = Depends(get_supabase)):
     """Een testmoment toevoegen. Zonder opgegeven dosis komt er tien gram
     bij het laatste; dat is de stapgrootte uit de literatuur."""
-    bestaand = supabase.table("carboo_gut_testmomenten") \
-        .select("nummer,doel_kh_uur").eq("user_id", user.id) \
-        .order("nummer", desc=True).limit(1).execute().data or []
-    volgende = (bestaand[0]["nummer"] + 1) if bestaand else 1
-    vorige_dosis = bestaand[0]["doel_kh_uur"] if bestaand else 30
+    alle, reeks_nu, heeft_kolom = _gut_momenten(supabase, user.id)
+    huidig = [m for m in alle if m["reeks"] == reeks_nu]
+    laatste = huidig[-1] if huidig else None
+    volgende = (int(laatste["nummer"]) + 1) if laatste else 1
+    vorige_dosis = laatste["doel_kh_uur"] if laatste else 30
 
     dosis = data.get("doel_kh_uur")
     dosis = int(dosis) if dosis else int(vorige_dosis) + GUT_STAP
@@ -4748,9 +4790,35 @@ async def maak_testmoment(data: dict,
         "status": "open",
         "poging": int(data.get("poging") or 1),
     }
+    if heeft_kolom:
+        rij["reeks"] = reeks_nu
     r = supabase.table("carboo_gut_testmomenten").insert(rij).execute()
     return {"ok": True, "moment": (r.data[0] if r.data else rij)}
 
+
+
+@app.patch("/api/gut/testmoment/{moment_id}")
+async def pas_testmoment_aan(moment_id: str, data: dict,
+                             user=Depends(get_current_user),
+                             supabase: Client = Depends(get_supabase)):
+    """Zelfstandig testen: de sporter bepaalt dosis, intensiteit en duur."""
+    velden = {}
+    if data.get("doel_kh_uur") not in (None, ""):
+        velden["doel_kh_uur"] = max(15, min(120, int(data["doel_kh_uur"])))
+    if data.get("intensiteit"):
+        velden["intensiteit"] = str(data["intensiteit"])
+    if data.get("min_duur_min") not in (None, ""):
+        velden["min_duur_min"] = max(20, min(600, int(data["min_duur_min"])))
+    if data.get("type_training"):
+        velden["type_training"] = str(data["type_training"])
+    if not velden:
+        return {"ok": True, "moment": None}
+    velden["bijgewerkt"] = "now()"
+    r = supabase.table("carboo_gut_testmomenten").update(velden) \
+        .eq("id", moment_id).eq("user_id", user.id).execute()
+    if not r.data:
+        raise HTTPException(404, "Testmoment niet gevonden")
+    return {"ok": True, "moment": r.data[0]}
 
 
 # ─── GUT-VOLGEND-MOMENT-V1 ─────────────────────────────────────────────
@@ -4805,13 +4873,38 @@ def _gut_vorm_advies(bezwaar: str):
     return "een andere vorm: een drank in plaats van een gel, of omgekeerd"
 
 
-def _gut_aantal_wissels(supabase, user_id: str, doel: int):
-    """Hoeveel keer er al van product gewisseld is op deze dosis."""
+# ─── GUT-REEKS-V1 ──────────────────────────────────────────────────────
+# Verandert de hoogste inname zonder klachten in het profiel, dan begint
+# de testreeks opnieuw vanaf dat getal. De oude momenten blijven staan als
+# geschiedenis, maar tellen niet meer mee: geen geslaagde poging en geen
+# productwissel uit een vorige reeks stuurt de nieuwe.
+#
+# De scheiding zit in de kolom reeks. Bestaat die kolom nog niet, dan telt
+# alles als reeks 1 en gedraagt de module zich als voorheen; ze gaat er
+# niet van stuk.
+
+def _gut_momenten(supabase, user_id: str):
+    """Alle testmomenten, hun reeksnummer, en of de kolom reeks bestaat."""
+    rijen = (supabase.table("carboo_gut_testmomenten").select("*")
+             .eq("user_id", user_id).order("nummer").execute().data) or []
+    heeft_kolom = bool(rijen) and "reeks" in rijen[0]
+    for r in rijen:
+        r["reeks"] = int(r.get("reeks") or 1)
+    nu = max((r["reeks"] for r in rijen), default=1)
+    return rijen, nu, heeft_kolom
+
+
+def _gut_aantal_wissels(supabase, user_id: str, doel: int, reeks: int = 1):
+    """Hoeveel keer er al van product gewisseld is op deze dosis.
+
+    Alleen binnen de lopende reeks; een wissel van voor een herstart zegt
+    niets over de dosis waar de sporter nu op zit."""
     try:
-        r = supabase.table("carboo_gut_testmomenten") \
-            .select("advies_soort").eq("user_id", user_id) \
-            .eq("doel_kh_uur", doel).eq("advies_soort", "product").execute()
-        return len(r.data or [])
+        rijen, _, _ = _gut_momenten(supabase, user_id)
+        return len([m for m in rijen
+                    if m["reeks"] == reeks
+                    and int(m.get("doel_kh_uur") or 0) == int(doel)
+                    and m.get("advies_soort") == "product"])
     except Exception:
         return 0
 
@@ -4831,9 +4924,11 @@ async def maak_volgend_testmoment(moment_id: str,
         raise HTTPException(400, "Dit testmoment is nog niet beoordeeld")
 
     # bestaat er al een volgende?
-    later = supabase.table("carboo_gut_testmomenten") \
-        .select("id,nummer").eq("user_id", user.id) \
-        .gt("nummer", moment["nummer"]).limit(1).execute().data or []
+    reeks = int(moment.get("reeks") or 1)
+    alle, _nu, heeft_kolom = _gut_momenten(supabase, user.id)
+    later = [m for m in alle
+             if m["reeks"] == reeks
+             and int(m["nummer"]) > int(moment["nummer"])]
     if later:
         return {"ok": True, "bestond_al": True,
                 "moment": None,
@@ -4861,6 +4956,8 @@ async def maak_volgend_testmoment(moment_id: str,
         "status": "open",
         "poging": nieuwe_poging,
     }
+    if heeft_kolom:
+        rij["reeks"] = reeks
     r = supabase.table("carboo_gut_testmomenten").insert(rij).execute()
     return {"ok": True, "bestond_al": False,
             "moment": (r.data[0] if r.data else rij)}
@@ -5014,32 +5111,73 @@ def _gut_vorm_smaak_advies(supabase, producten: list):
 # T1 volgt de hoogste inname zonder klachten uit het profiel, zolang hij
 # nog openstaat. Zodra er iets beoordeeld is ligt de dosis vast: dan wil
 # je niet dat het protocol resets omdat iemand een cijfer bijstelt.
-def _gut_t1_bijwerken(supabase, user_id: str, max_kh, ervaring: str):
-    try:
-        beoordeeld = supabase.table("carboo_gut_testmomenten") \
-            .select("id").eq("user_id", user_id) \
-            .not_.is_("advies_soort", "null").limit(1).execute()
-        if beoordeeld.data:
-            return  # er is al getest, de dosis ligt vast
+def _gut_t1_verzeker(supabase, user_id: str, startdosis: int, protocol_aan=True):
+    """Houdt de testreeks gelijk aan het profiel.
 
-        t1 = supabase.table("carboo_gut_testmomenten").select("id,nummer") \
-            .eq("user_id", user_id).eq("nummer", 1).limit(1).execute()
-        if not t1.data:
+    Er is nog niets      -> T1 komt er met de startdosis uit het profiel.
+    Nog niets beoordeeld -> T1 loopt mee met het profiel.
+    Al wel beoordeeld    -> verandert het profielgetal, dan begint er een
+                            nieuwe reeks vanaf dat getal. De oude momenten
+                            blijven staan; ze zijn geschiedenis en tellen
+                            niet meer mee in wat de beslisboom afweegt.
+
+    Stuurt het protocol niet, dan blijft de sporter zelf de baas over zijn
+    dosis en raakt deze functie zijn momenten niet aan.
+    """
+    try:
+        dosis = max(15, min(120, int(startdosis or 0) or 20))
+        alle, reeks_nu, heeft_kolom = _gut_momenten(supabase, user_id)
+
+        if not alle:
+            supabase.table("carboo_gut_testmomenten").insert({
+                "user_id": user_id,
+                "nummer": 1,
+                "doel_kh_uur": dosis,
+                "intensiteit": "lage",
+                "min_duur_min": GUT_MIN_DUUR,
+                "type_training": "Duurtraining",
+                "status": "open",
+                "poging": 1,
+            }).execute()
             return
 
-        try:
-            dosis = int(float(max_kh)) if max_kh not in (None, "") else None
-        except (TypeError, ValueError):
-            dosis = None
-        if dosis is None:
-            dosis = {"Ervaren": 60, "Gevorderd": 40}.get(ervaring or "", 20)
-        dosis = max(15, min(120, dosis))
+        if protocol_aan is False:
+            return
 
-        supabase.table("carboo_gut_testmomenten") \
-            .update({"doel_kh_uur": dosis, "bijgewerkt": "now()"}) \
-            .eq("id", t1.data[0]["id"]).execute()
+        huidig = [m for m in alle if m["reeks"] == reeks_nu]
+        if not huidig:
+            return
+        eerste = huidig[0]
+        begon_op = int(eerste.get("doel_kh_uur") or 0)
+
+        if begon_op == dosis:
+            return  # het profiel zegt hetzelfde als waar de reeks mee begon
+
+        if not any(m.get("advies_soort") for m in huidig):
+            (supabase.table("carboo_gut_testmomenten")
+             .update({"doel_kh_uur": dosis, "bijgewerkt": "now()"})
+             .eq("id", eerste["id"]).execute())
+            return
+
+        # Er is al getest en het getal is veranderd: opnieuw beginnen.
+        if not heeft_kolom:
+            print("[GUT-REEKS-V1] kolom reeks ontbreekt, geen herstart. "
+                  "Draai gut-testmomenten-reeks.sql")
+            return
+
+        supabase.table("carboo_gut_testmomenten").insert({
+            "user_id": user_id,
+            "nummer": 1,
+            "reeks": reeks_nu + 1,
+            "doel_kh_uur": dosis,
+            "intensiteit": "lage",
+            "min_duur_min": GUT_MIN_DUUR,
+            "type_training": "Duurtraining",
+            "status": "open",
+            "poging": 1,
+        }).execute()
     except Exception as e:
-        print(f"[GUT-T1-MEELOOPT-V1] T1 bijwerken mislukt: {e}")
+        print(f"[GUT-T1-MEELOOPT-V2] T1 verzekeren mislukt: {e}")
 
 @app.post("/api/gut/testmoment/{moment_id}/beoordeel")
 async def beoordeel_testmoment(moment_id: str, data: dict,
@@ -5055,6 +5193,7 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         raise HTTPException(404, "Testmoment niet gevonden")
     moment = m.data[0]
     doel = int(moment.get("doel_kh_uur") or 0)
+    reeks = int(moment.get("reeks") or 1)
 
     duur = float(data.get("duur_min") or 0)
     kh_uur = float(data.get("kh_per_uur") or 0)
@@ -5117,7 +5256,7 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
                       f"met dit product, test het dan nog een keer.")
             return bewaar("product", tekst, "mislukt")
 
-        wissels = _gut_aantal_wissels(supabase, user.id, doel)
+        wissels = _gut_aantal_wissels(supabase, user.id, doel, reeks)
         if wissels >= 3:
             return bewaar("coach",
                 f"Je probeerde al drie verschillende producten op {doel} g per uur "
@@ -5146,7 +5285,7 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     smaak_laag = smaak is not None and smaak < GUT_COMFORT_GRENS
 
     if comfort_laag or smaak_laag:
-        wissels = _gut_aantal_wissels(supabase, user.id, doel) if "_gut_aantal_wissels" in globals() else 0
+        wissels = _gut_aantal_wissels(supabase, user.id, doel, reeks)
         if wissels >= 3:
             return bewaar("coach",
                 f"Je probeerde al drie producten op {doel} g per uur en het blijft "
@@ -5189,9 +5328,12 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             f"{_gut_vorm_smaak_advies(supabase, producten)}",
             "geslaagd")
     # 6. geslaagd: tweede op rij?
-    eerder = supabase.table("carboo_gut_testmomenten") \
-        .select("nummer,doel_kh_uur,status").eq("user_id", user.id) \
-        .eq("doel_kh_uur", doel).eq("status", "geslaagd").execute().data or []
+    _alle, _nu, _heeft = _gut_momenten(supabase, user.id)
+    eerder = [m for m in _alle
+              if m["reeks"] == reeks
+              and int(m.get("doel_kh_uur") or 0) == doel
+              and m.get("status") == "geslaagd"
+              and m.get("id") != moment_id]
     if len(eerder) < 1:
         return bewaar("herhaal",
             f"Geslaagd op {doel} g per uur. Bevestig het nog een keer voor we "
