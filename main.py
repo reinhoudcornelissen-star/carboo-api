@@ -1715,6 +1715,8 @@ async def sla_protocol_op(item: GutProtocol, user=Depends(get_current_user), sup
         supabase.table("carboo_gut_protocol").update(data).eq("user_id", user.id).eq("status", "actief").execute()
     else:
         supabase.table("carboo_gut_protocol").insert(data).execute()
+        # T1 volgt de hoogste inname zolang er nog niets beoordeeld is
+        _gut_t1_bijwerken(supabase, user.id, item.max_kh_per_uur, item.ervaring)
     return {"ok": True, "dosis": dosis}
 
 @app.get("/api/gut/sessies")
@@ -1921,7 +1923,6 @@ async def keur_gut_concept_goed(user=Depends(get_current_user), supabase: Client
         raise HTTPException(404, "Geen concept gevonden")
     supabase.table("carboo_gut_protocol").delete().eq("user_id", user.id).eq("status", "actief").execute()
     supabase.table("carboo_gut_protocol").update({"status": "actief", "actief": True, "week_huidig": 1, "bijgewerkt": "now()"}).eq("user_id", user.id).eq("status", "concept").execute()
-    _gut_t1_bijwerken(supabase, user.id, item.max_kh_per_uur, item.ervaring)
     return {"ok": True}
 
 
