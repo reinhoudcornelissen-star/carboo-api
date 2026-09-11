@@ -1740,10 +1740,12 @@ async def sla_protocol_op(item: GutProtocol, user=Depends(get_current_user), sup
 async def zet_protocol_aan(data: dict, user=Depends(get_current_user),
                            supabase: Client = Depends(get_supabase)):
     aan = bool(data.get("aan"))
-    supabase.table("carboo_gut_protocol") \
-        .update({"protocol_aan": aan, "bijgewerkt": "now()"}) \
-        .eq("user_id", user.id).eq("status", "actief").execute()
-    return {"ok": True, "protocol_aan": aan}
+    (supabase.table("carboo_gut_protocol")
+     .update({"protocol_aan": aan, "bijgewerkt": "now()"})
+     .eq("user_id", user.id).eq("status", "actief").execute())
+    # GUT-MAAG-V2 — liep het protocol vast, dan gaat het verder op die dosis
+    opgepakt = _gut_draad_oppakken(supabase, user.id) if aan else None
+    return {"ok": True, "protocol_aan": aan, "moment": opgepakt}
 
 
 @app.get("/api/gut/sessies")
@@ -4661,8 +4663,10 @@ async def lijst_testmomenten(user=Depends(get_current_user),
         # een moment van voor de kolom, of zonder beoordeling: expliciet leeg,
         # zodat het scherm terugvalt op de korte adviestekst
         x.setdefault("advies_kaart", None)
-    afgerond = any(x["reeks"] == reeks_nu and x["fase"] == "wedstrijd"
-                   and x.get("status") == "geslaagd" for x in rijen)
+    huidig = [x for x in rijen if x["reeks"] == reeks_nu]
+    afgerond = any(x["fase"] == "wedstrijd" and x.get("status") == "geslaagd" for x in huidig)
+    # GUT-MAAG-V2 — het laatste moment liep vast op maagcomfort
+    vast = bool(huidig) and huidig[-1].get("advies_soort") == "maag_vast"
     return {
         "momenten": rijen,
         "reeks_nu": reeks_nu,
@@ -4670,6 +4674,7 @@ async def lijst_testmomenten(user=Depends(get_current_user),
         # alleen of er iets te trainen is; het doel zelf blijft binnen
         "protocol_nodig": _gut_protocol_doel(supabase, user.id)["nodig"],
         "protocol_afgerond": afgerond,
+        "protocol_vast": vast,
     }
 
 
@@ -4710,7 +4715,16 @@ async def maak_testmoment(data: dict,
 async def pas_testmoment_aan(moment_id: str, data: dict,
                              user=Depends(get_current_user),
                              supabase: Client = Depends(get_supabase)):
-    """Zelfstandig testen: de sporter bepaalt dosis, intensiteit en duur."""
+    """Zelfstandig testen: de sporter bepaalt dosis, intensiteit en duur.
+
+    Een testmoment dat het protocol al beoordeeld heeft, blijft zoals het was:
+    het staat in de geschiedenis met zijn advieskaart."""
+    huidig = (supabase.table("carboo_gut_testmomenten").select("advies_soort")
+              .eq("id", moment_id).eq("user_id", user.id).limit(1).execute().data) or []
+    if not huidig:
+        raise HTTPException(404, "Testmoment niet gevonden")
+    if huidig[0].get("advies_soort"):
+        raise HTTPException(400, "Dit testmoment is al beoordeeld en blijft zoals het was")
     velden = {}
     if data.get("doel_kh_uur") not in (None, ""):
         velden["doel_kh_uur"] = max(15, min(120, int(data["doel_kh_uur"])))
@@ -4723,8 +4737,8 @@ async def pas_testmoment_aan(moment_id: str, data: dict,
     if not velden:
         return {"ok": True, "moment": None}
     velden["bijgewerkt"] = "now()"
-    r = supabase.table("carboo_gut_testmomenten").update(velden) \
-        .eq("id", moment_id).eq("user_id", user.id).execute()
+    r = (supabase.table("carboo_gut_testmomenten").update(velden)
+         .eq("id", moment_id).eq("user_id", user.id).execute())
     if not r.data:
         raise HTTPException(404, "Testmoment niet gevonden")
     return {"ok": True, "moment": r.data[0]}
@@ -4934,6 +4948,9 @@ async def maak_volgend_testmoment(moment_id: str,
         raise HTTPException(400, "Dit testmoment is nog niet beoordeeld")
     if soort == "afgerond":
         raise HTTPException(400, "Het protocol is afgerond")
+    if soort == "maag_vast":
+        # geen nieuw testmoment tot de sporter zelf verder zoekt
+        raise HTTPException(400, "Het protocol loopt vast op deze dosis")
 
     # bestaat er al een volgende?
     reeks = int(moment.get("reeks") or 1)
@@ -4955,7 +4972,7 @@ async def maak_volgend_testmoment(moment_id: str,
             doel, doel_wedstrijd["grens"] or 120), 1
     elif soort == "omlaag":
         nieuw_doel, nieuwe_poging = max(15, doel - GUT_STAP), 1
-    elif soort in ("herhaal", "product"):
+    elif soort in ("herhaal", "product", "maag_herhaal", "maag_formaat"):
         nieuw_doel, nieuwe_poging = doel, poging + 1
     elif soort.startswith("fase_"):
         nieuw_doel, nieuwe_poging = doel, 1
@@ -5230,6 +5247,126 @@ def _gut_verklaring(regels: list):
     }
 
 
+# ─── GUT-MAAG-V2 ───────────────────────────────────────────────────────
+# Laag maagcomfort op dezelfde dosis. De regel is: pas eerst het formaat
+# aan, niet de dosis.
+#
+#   eerste keer   herhaal; klopt alles wat gelogd is, dan de uitleg dat de
+#                 darm nog moet wennen
+#   tweede keer   ander formaat: iets vloeibaarders in plaats van vast, of
+#                 meer water erbij. Altijd een concrete instructie, ook als
+#                 alles correct gelogd is
+#   derde keer    het protocol loopt op deze dosis vast. Er komt geen nieuw
+#                 testmoment; de kaart biedt een knop om zelf verder te
+#                 zoeken, en die zet het protocol uit
+#
+# De telling gaat over mislukte pogingen door maagcomfort op dezelfde
+# dosis, niet over adviezen met de naam "product". Een tegenvallende smaak
+# telt niet mee. Zet de sporter het protocol weer aan, dan gaat het verder
+# op de dosis waar het vastliep, met de telling op nul.
+#
+# Een doorverwijzing naar de coach staat niet meer in wat de sporter ziet.
+# _gut_aantal_wissels blijft bestaan, zodat een coachoptie later terug kan.
+
+GUT_MAAG_SOORTEN = ("maag_herhaal", "maag_formaat", "maag_vast")
+
+
+def _gut_maag_pogingen(momenten: list, doel: int, moment_id: str) -> int:
+    """Eerdere mislukte pogingen door maagcomfort op deze dosis in de reeks.
+
+    Het huidige moment telt niet mee: slaSessionOp slaat de sessie op voor
+    de beoordeling, en de vorige telling zag het huidige lage maagcomfort
+    daardoor al als een eerdere keer. Er wordt ook niet geteld over een
+    vastgelopen dosis heen."""
+    rij = sorted(momenten or [], key=lambda x: int(x.get("nummer") or 0))
+    vanaf = 0
+    for x in rij:
+        if x.get("advies_soort") == "maag_vast" and x.get("id") != moment_id:
+            vanaf = int(x.get("nummer") or 0)
+    return len([x for x in rij
+                if int(x.get("nummer") or 0) > vanaf
+                and x.get("id") != moment_id
+                and int(x.get("doel_kh_uur") or 0) == int(doel)
+                and x.get("advies_soort") in GUT_MAAG_SOORTEN])
+
+
+def _gut_regel_formaat(momenten: list, duur_min: float):
+    """Tweede keer laag maagcomfort: een concrete instructie over het formaat."""
+    vormen, ml = [], 0.0
+    for m in (momenten or []):
+        if not isinstance(m, dict):
+            continue
+        ml += float(m.get("volume_ml") or m.get("hoeveelheid_ml_g") or 0)
+        if float(m.get("kh_gram") or 0) <= 0:
+            continue
+        c = str(m.get("categorie") or "").strip().lower()
+        if c in ("gel", "vast", "drank") and c not in vormen:
+            vormen.append(c)
+    per_uur = round(ml / duur_min * 60) if duur_min and duur_min > 0 else 0
+
+    vast = [v for v in vormen if v in ("vast", "gel")]
+    if vast:
+        namen = {"vast": "vaste voeding", "gel": "gels"}
+        welke = " en ".join(namen[v] for v in vast)
+        return _gut_regel("Formaat", False, " + ".join(vormen),
+                          f"Vervang je {welke} door een drank: vloeibaar gaat makkelijker "
+                          f"door een darm die nog moet wennen.")
+    gelogd = f"alles drank · {per_uur} ml/uur" if vormen else f"{per_uur} ml/uur"
+    if per_uur < 700:
+        return _gut_regel("Formaat", False, gelogd,
+                          "Verdun je drank: dezelfde koolhydraten met meer water erbij, "
+                          "richting 700 ml per uur.")
+    return _gut_regel("Formaat", False, gelogd,
+                      "Neem dezelfde koolhydraten in kleinere slokken, vaker verspreid over het uur.")
+
+
+def _gut_vastgelopen(doel: int) -> dict:
+    """Derde keer laag maagcomfort: geen oordeel maar een vaststelling."""
+    return {
+        "type": "vastgelopen",
+        "label": "",
+        "goed": None,
+        "gelogd": "",
+        "instructie": "",
+        "tekst": (f"Drie keer een laag maagcomfort op {doel} g per uur. Het protocol "
+                  f"loopt op deze dosis vast. Ga zelfstandig aan de slag: jij kiest je "
+                  f"koolhydraten, intensiteit en duur, zonder advies van de app. Klik de "
+                  f"toggle op zelfstandig."),
+    }
+
+
+def _gut_draad_oppakken(supabase, user_id: str):
+    """Zet de sporter het protocol weer aan nadat het vastliep, dan komt er een
+    testmoment op de dosis waar het vastliep. De telling staat dan op nul en
+    de reeks begint niet opnieuw bij T1."""
+    try:
+        alle, reeks_nu, heeft_kolom = _gut_momenten(supabase, user_id)
+        huidig = [x for x in alle if x["reeks"] == reeks_nu]
+        vast = [x for x in huidig if x.get("advies_soort") == "maag_vast"]
+        if not vast:
+            return None
+        v = vast[-1]
+        laatste = huidig[-1]
+        dosis = int(v.get("doel_kh_uur") or 0)
+        if (laatste.get("id") != v.get("id") and laatste.get("status") == "open"
+                and not laatste.get("advies_soort")
+                and int(laatste.get("doel_kh_uur") or 0) == dosis):
+            return None  # er staat al een open moment op die dosis klaar
+        fase = v.get("fase") or "opbouw"
+        rij = {"user_id": user_id, "nummer": int(laatste.get("nummer") or 0) + 1,
+               "doel_kh_uur": dosis, "status": "open", "poging": 1}
+        rij.update(_gut_fase_parameters(fase, _gut_protocol_doel(supabase, user_id).get("duur_uur")))
+        if heeft_kolom:
+            rij["reeks"] = reeks_nu
+        if _gut_fase_kolom(supabase):
+            rij["fase"] = fase
+        r = supabase.table("carboo_gut_testmomenten").insert(rij).execute()
+        return r.data[0] if r.data else rij
+    except Exception as e:
+        print(f"[GUT-MAAG-V2] draad oppakken mislukt: {e}")
+        return None
+
+
 # ─── GUT-T1-MEELOOPT-V1 ────────────────────────────────────────────────
 # T1 volgt de hoogste inname zonder klachten uit het profiel, zolang hij
 # nog openstaat. Zodra er iets beoordeeld is ligt de dosis vast: dan wil
@@ -5339,6 +5476,9 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     producten = data.get("producten") or []
     gelogde_momenten = data.get("momenten") or []
 
+    _alle, _nu, _heeft = _gut_momenten(supabase, user.id)
+    in_reeks = [x for x in _alle if x["reeks"] == reeks]
+
     def bewaar(soort, tekst, status, regels=None):
         # welke dosis het volgende testmoment krijgt, zodat de kaart het
         # kan tonen voor je op de knop drukt.
@@ -5349,10 +5489,12 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         else:
             volgende_dosis = doel
 
-        if soort in ("coach", "afgerond"):
-            volgende = {"label": ("overleg met je coach" if soort == "coach"
-                                  else "protocol afgerond"),
-                        "dosis": None, "herhaling": False,
+        if soort == "afgerond":
+            volgende = {"label": "protocol afgerond", "dosis": None, "herhaling": False,
+                        "fase": None, "nieuwe_fase": False}
+        elif soort == "maag_vast":
+            # geen volgend testmoment: de sporter zoekt zelf verder
+            volgende = {"label": "zelf verder zoeken", "dosis": None, "herhaling": False,
                         "fase": None, "nieuwe_fase": False}
         else:
             # Het label van het volgende moment is wat de reeks tot nu toe
@@ -5420,50 +5562,51 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     comfort_laag = comfort is not None and comfort < GUT_COMFORT_GRENS
     smaak_laag = smaak is not None and smaak < GUT_COMFORT_GRENS
 
-    if comfort_laag or smaak_laag:
-        kaart = []
-        if comfort_laag:
-            kaart.append(_gut_regel_timing(gelogde_momenten, duur))
-            kaart.append(_gut_regel_samenstelling(supabase, producten, doel))
-            kaart.append(_gut_regel_vocht(gelogde_momenten, duur))
-            if comfort <= 1:
-                kaart.append(_gut_regel_maaltijd(data.get("maaltijd_uren_voor")))
-        comfort_regels = len(kaart)
-        if smaak_laag:
-            kaart.extend(_gut_regels_smaak(supabase, producten, gelogde_momenten))
+    if comfort_laag:
+        # GUT-MAAG-V2 — de hoeveelste keer laag maagcomfort op deze dosis,
+        # zonder het huidige moment dubbel te tellen
+        keer = _gut_maag_pogingen(in_reeks, doel, moment_id) + 1
+        kaart = [_gut_regel_timing(gelogde_momenten, duur),
+                 _gut_regel_samenstelling(supabase, producten, doel),
+                 _gut_regel_vocht(gelogde_momenten, duur)]
+        if comfort <= 1:
+            kaart.append(_gut_regel_maaltijd(data.get("maaltijd_uren_voor")))
+        comfort_regels = list(kaart)
+        smaak_regels = (_gut_regels_smaak(supabase, producten, gelogde_momenten)
+                        if smaak_laag else [])
 
-        wissels = _gut_aantal_wissels(supabase, user.id, doel, reeks)
-        if wissels >= 3:
-            return bewaar("coach",
-                f"Drie producten geprobeerd op {doel} g per uur zonder resultaat.",
-                "mislukt", kaart)
+        if keer == 1:
+            # Klopt alles wat gelogd is, dan geen fout maar training. Klopt er
+            # iets niet, dan wijst de kaart dat aan en zegt de korte tekst niet
+            # dat het aan de darm ligt.
+            alles_klopt = all(r.get("goed") for r in comfort_regels)
+            if alles_klopt:
+                kaart.append(_gut_verklaring(comfort_regels))
+            return bewaar("maag_herhaal",
+                f"Maagcomfort {comfort} op {doel} g per uur. "
+                + ("Herhaal: je darm moet nog wennen." if alles_klopt
+                   else "Herhaal en pas aan wat de kaart aangeeft."),
+                "mislukt", kaart + smaak_regels)
 
-        # Alles wat gelogd is klopt en toch is het maagcomfort laag: geen
-        # fout om te herstellen, dus een verklaring onder die regels. Niet
-        # bij de coach hierboven, want die zegt iets anders dan herhalen.
-        if comfort_laag and comfort_regels and all(
-                r.get("goed") for r in kaart[:comfort_regels]):
-            kaart.insert(comfort_regels, _gut_verklaring(kaart[:comfort_regels]))
+        if keer == 2:
+            # eerst het formaat aanpassen, niet de dosis
+            kaart.append(_gut_regel_formaat(gelogde_momenten, duur))
+            return bewaar("maag_formaat",
+                f"Tweede keer maagcomfort onder de {GUT_COMFORT_GRENS} op {doel} g per uur. "
+                f"Pas het formaat aan.",
+                "mislukt", kaart + smaak_regels)
 
-        if comfort_laag and smaak_laag:
-            return bewaar("product",
-                f"Maagcomfort {comfort} en smaak {smaak} op {doel} g per uur.",
-                "mislukt", kaart)
+        return bewaar("maag_vast",
+            f"Derde keer maagcomfort onder de {GUT_COMFORT_GRENS} op {doel} g per uur. "
+            f"Het protocol loopt hier vast.",
+            "mislukt", kaart + smaak_regels + [_gut_vastgelopen(doel)])
 
-        if comfort_laag:
-            vorige = (supabase.table("carboo_gut_sessies")
-                      .select("maagcomfort").eq("user_id", user.id)
-                      .order("datum", desc=True).limit(3).execute().data) or []
-            laag = sum(1 for v in vorige
-                       if v.get("maagcomfort") is not None
-                       and int(v["maagcomfort"]) < GUT_COMFORT_GRENS)
-            soort = "product" if laag >= 1 else "herhaal"
-            return bewaar(soort,
-                f"Maagcomfort {comfort} op {doel} g per uur.", "mislukt", kaart)
-
-        # alleen de smaak: fysiologisch ging het goed
+    if smaak_laag:
+        # alleen de smaak: fysiologisch ging het goed, dus een ander product.
+        # Telt niet mee in de pogingen op maagcomfort.
         return bewaar("product",
-            f"Smaak {smaak} op {doel} g per uur.", "geslaagd", kaart)
+            f"Smaak {smaak} op {doel} g per uur.", "geslaagd",
+            _gut_regels_smaak(supabase, producten, gelogde_momenten))
 
     # 4. geslaagd: genoeg bevestigingen?
     #
@@ -5472,8 +5615,6 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     # wedstrijdsimulatie volstaat er telkens een. Alleen geslaagde momenten
     # in dezelfde fase tellen mee.
     nodig = _gut_bevestigingen(doel) if fase_nu == "opbouw" else 1
-    _alle, _nu, _heeft = _gut_momenten(supabase, user.id)
-    in_reeks = [x for x in _alle if x["reeks"] == reeks]
     eerder = [x for x in in_reeks
               if int(x.get("doel_kh_uur") or 0) == doel
               and x["fase"] == fase_nu
@@ -5525,9 +5666,6 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     #
     # Alleen als het doel boven de 60 ligt. Is het doel 60, dan valt de
     # tussentest samen met de bevestiging en doen ze twee keer hetzelfde.
-    # Die situatie wordt hierboven al opgevangen (de stap geeft dan geen
-    # hogere dosis), maar de regel staat hier ook voluit, zodat hij niet
-    # afhangt van de volgorde van deze blokken.
     tussentest_gedaan = any(x["fase"] == "tussentest" and x.get("status") == "geslaagd"
                             for x in in_reeks)
     if (fase_nu == "opbouw" and doel == GUT_POORT and grens > GUT_POORT
