@@ -4683,6 +4683,48 @@ async def pas_testmoment_aan(moment_id: str, data: dict,
 # alles als reeks 1 en gedraagt de module zich als voorheen; ze gaat er
 # niet van stuk.
 
+# ─── GUT-LABELS-V1 ─────────────────────────────────────────────────────
+# Stijgt of daalt de dosis, dan een nieuw cijfer. Blijft de dosis gelijk
+# (een herhaling, een productwissel, een sessie die niet meetelde), dan
+# hetzelfde cijfer met een volgletter: T3, T3b, T3c, T4.
+#
+# Het label wordt afgeleid uit de volgorde en de dosis binnen de reeks, en
+# niet opgeslagen. Het nummer in de database blijft de interne volgorde.
+# Zo krijgen bestaande reeksen meteen de juiste labels, en klopt het label
+# ook als de sporter bij zelfstandig testen de dosis achteraf aanpast.
+
+GUT_LETTERS = "bcdefghijklmnopqrstuvwxyz"
+
+
+def _gut_label(stap: int, herhaling: int) -> str:
+    if herhaling <= 0:
+        return f"T{stap}"
+    if herhaling <= len(GUT_LETTERS):
+        return f"T{stap}{GUT_LETTERS[herhaling - 1]}"
+    return f"T{stap}-{herhaling + 1}"
+
+
+def _gut_nummer_labels(rijen: list):
+    """Zet stap, herhaling en label op elke rij. Verwacht de rijen
+    gesorteerd op reeks en nummer, met een genormaliseerde reeks."""
+    vorige = {}
+    for r in rijen:
+        reeks = int(r.get("reeks") or 1)
+        doel = int(r.get("doel_kh_uur") or 0)
+        v = vorige.get(reeks)
+        if v is None:
+            stap, herhaling = 1, 0
+        elif doel == v[2]:
+            stap, herhaling = v[0], v[1] + 1
+        else:
+            stap, herhaling = v[0] + 1, 0
+        vorige[reeks] = (stap, herhaling, doel)
+        r["stap"] = stap
+        r["herhaling"] = herhaling
+        r["label"] = _gut_label(stap, herhaling)
+    return rijen
+
+
 def _gut_momenten(supabase, user_id: str):
     """Alle testmomenten, hun reeksnummer, en of de kolom reeks bestaat."""
     rijen = (supabase.table("carboo_gut_testmomenten").select("*")
@@ -4691,6 +4733,7 @@ def _gut_momenten(supabase, user_id: str):
     for r in rijen:
         r["reeks"] = int(r.get("reeks") or 1)
     rijen.sort(key=lambda r: (r["reeks"], int(r.get("nummer") or 0)))
+    _gut_nummer_labels(rijen)
     nu = max((r["reeks"] for r in rijen), default=1)
     return rijen, nu, heeft_kolom
 
@@ -5103,11 +5146,18 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             volgende_dosis = doel
 
         if soort == "coach":
-            volgende = {"label": "overleg met je coach", "dosis": None}
-        elif soort in ("omhoog", "omlaag"):
-            volgende = {"label": f"T{nummer + 1}", "dosis": volgende_dosis}
+            volgende = {"label": "overleg met je coach", "dosis": None,
+                        "herhaling": False}
         else:
-            volgende = {"label": f"herhaal T{nummer}", "dosis": volgende_dosis}
+            # Het label van het volgende moment is wat de reeks tot nu toe
+            # plus een moment op de volgende dosis zou opleveren.
+            eerder = [x for x in _gut_momenten(supabase, user.id)[0]
+                      if x["reeks"] == reeks
+                      and int(x.get("nummer") or 0) <= nummer]
+            proef = eerder + [{"reeks": reeks, "doel_kh_uur": volgende_dosis}]
+            _gut_nummer_labels(proef)
+            volgende = {"label": proef[-1]["label"], "dosis": volgende_dosis,
+                        "herhaling": proef[-1]["herhaling"] > 0}
 
         scores = []
         if comfort is not None:
