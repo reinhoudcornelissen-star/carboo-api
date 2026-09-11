@@ -4657,6 +4657,10 @@ async def lijst_testmomenten(user=Depends(get_current_user),
     krijgt gegarandeerd een reeks en een fase mee, ook als de kolommen nog
     niet bestaan. Zo kan Testing er nooit naast zitten."""
     rijen, reeks_nu, heeft_kolom = _gut_momenten(supabase, user.id)
+    for x in rijen:
+        # een moment van voor de kolom, of zonder beoordeling: expliciet leeg,
+        # zodat het scherm terugvalt op de korte adviestekst
+        x.setdefault("advies_kaart", None)
     afgerond = any(x["reeks"] == reeks_nu and x["fase"] == "wedstrijd"
                    and x.get("status") == "geslaagd" for x in rijen)
     return {
@@ -4871,6 +4875,15 @@ def _gut_fase_kolom(supabase) -> bool:
     """Of carboo_gut_testmomenten een kolom fase heeft."""
     try:
         supabase.table("carboo_gut_testmomenten").select("fase").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def _gut_kaart_kolom(supabase) -> bool:
+    """Of carboo_gut_testmomenten een kolom advies_kaart heeft."""
+    try:
+        supabase.table("carboo_gut_testmomenten").select("advies_kaart").limit(1).execute()
         return True
     except Exception:
         return False
@@ -5327,10 +5340,6 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     gelogde_momenten = data.get("momenten") or []
 
     def bewaar(soort, tekst, status, regels=None):
-        supabase.table("carboo_gut_testmomenten").update({
-            "status": status, "advies": tekst, "advies_soort": soort,
-            "bijgewerkt": "now()",
-        }).eq("id", moment_id).execute()
         # welke dosis het volgende testmoment krijgt, zodat de kaart het
         # kan tonen voor je op de knop drukt.
         if soort == "omhoog":
@@ -5366,10 +5375,28 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             scores.append({"label": "Smaak", "waarde": smaak,
                            "goed": smaak >= GUT_COMFORT_GRENS})
 
-        return {"soort": soort, "advies": tekst, "status": status,
-                "doel_nu": doel, "doel_volgende": volgende_dosis,
-                "scores": scores, "regels": regels or [],
-                "volgende": volgende}
+        uit = {"soort": soort, "advies": tekst, "status": status,
+               "doel_nu": doel, "doel_volgende": volgende_dosis,
+               "scores": scores, "regels": regels or [],
+               "volgende": volgende}
+
+        # GUT-GESCHIEDENIS-V1 — de kaart zoals de sporter hem nu ziet. Een oud
+        # testmoment toont later precies dit, en wordt nooit opnieuw berekend
+        # met de regels van een latere dag. Ontbreekt de kolom, dan gaat de
+        # beoordeling wel door, maar zegt het antwoord dat de kaart niet
+        # bewaard is en staat het in de log.
+        velden = {"status": status, "advies": tekst, "advies_soort": soort,
+                  "bijgewerkt": "now()"}
+        kaart_bewaard = _gut_kaart_kolom(supabase)
+        if kaart_bewaard:
+            velden["advies_kaart"] = dict(uit)
+        else:
+            print("[GUT-GESCHIEDENIS-V1] kolom advies_kaart ontbreekt; "
+                  "draai gut-testmomenten-advieskaart.sql")
+        (supabase.table("carboo_gut_testmomenten").update(velden)
+         .eq("id", moment_id).execute())
+        uit["kaart_bewaard"] = kaart_bewaard
+        return uit
 
     # 1. externe factor
     if data.get("externe_factor"):
