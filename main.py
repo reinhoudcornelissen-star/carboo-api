@@ -4478,6 +4478,44 @@ GUT_STAP = 10
 GUT_MIN_DUUR = 75
 GUT_COMFORT_GRENS = 6
 GUT_DOSIS_MARGE = 0.9   # 90 procent van het doel volstaat
+
+# ─── GUT-STAP-V2 ───────────────────────────────────────────────────────
+# Stappen van tien gram overal maakten van 20 naar 115 twintig
+# testmomenten. Onder de 60 g per uur is een transportweg genoeg en
+# verdraagt bijna iedereen het; daar is het fysiologisch niet spannend.
+# Vanaf 60 komt fructose in het spel en begint het werk dat ertoe doet.
+#
+#   onder 60   stap 20, nooit voorbij de 60   een bevestiging
+#   vanaf 60   stap 10                        twee bevestigingen
+#
+# De stap gaat nooit over het plafond van de sport.
+GUT_POORT = 60
+GUT_STAP_LAAG = 20
+
+
+def _gut_stap_omhoog(doel: int, plafond: int) -> int:
+    """De dosis na een geslaagde stap. Kaart en /volgende gebruiken
+    allebei deze functie, zodat de kaart toont wat de knop aanmaakt."""
+    doel = int(doel or 0)
+    if doel < GUT_POORT:
+        nieuw = min(doel + GUT_STAP_LAAG, GUT_POORT)
+    else:
+        nieuw = doel + GUT_STAP
+    return max(doel, min(nieuw, int(plafond)))
+
+
+def _gut_bevestigingen(doel: int) -> int:
+    """Hoeveel geslaagde testmomenten er op een dosis nodig zijn."""
+    return 1 if int(doel or 0) < GUT_POORT else 2
+
+
+def _gut_sport(supabase, user_id: str) -> str:
+    try:
+        prot = (supabase.table("carboo_gut_protocol").select("sport")
+                .eq("user_id", user_id).limit(1).execute().data) or []
+        return (prot[0].get("sport") if prot else "") or "Lopen"
+    except Exception:
+        return "Lopen"
 # ── GUT-MIX-V2 ─────────────────────────────────────────────────────
 # De verhouding telt over de MIX, niet per product. Iemand die een
 # maltodextrinedrank combineert met een gel op 2:1 zit samen goed,
@@ -4593,7 +4631,8 @@ async def maak_testmoment(data: dict,
     vorige_dosis = laatste["doel_kh_uur"] if laatste else 30
 
     dosis = data.get("doel_kh_uur")
-    dosis = int(dosis) if dosis else int(vorige_dosis) + GUT_STAP
+    dosis = int(dosis) if dosis else _gut_stap_omhoog(
+        int(vorige_dosis), GUT_PLAFOND.get(_gut_sport(supabase, user.id), 115))
 
     rij = {
         "user_id": user.id,
@@ -4782,7 +4821,8 @@ async def maak_volgend_testmoment(moment_id: str,
     poging = int(moment.get("poging") or 1)
 
     if soort == "omhoog":
-        nieuw_doel, nieuwe_poging = doel + GUT_STAP, 1
+        nieuw_doel, nieuwe_poging = _gut_stap_omhoog(
+            doel, GUT_PLAFOND.get(_gut_sport(supabase, user.id), 115)), 1
     elif soort == "omlaag":
         nieuw_doel, nieuwe_poging = max(15, doel - GUT_STAP), 1
     elif soort in ("herhaal", "product"):
@@ -5144,6 +5184,8 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     doel = int(moment.get("doel_kh_uur") or 0)
     reeks = int(moment.get("reeks") or 1)
     nummer = int(moment.get("nummer") or 1)
+    sport = _gut_sport(supabase, user.id)
+    plafond_sport = GUT_PLAFOND.get(sport, 115)
 
     duur = float(data.get("duur_min") or 0)
     kh_uur = float(data.get("kh_per_uur") or 0)
@@ -5162,7 +5204,7 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         # welke dosis het volgende testmoment krijgt, zodat de kaart het
         # kan tonen voor je op de knop drukt.
         if soort == "omhoog":
-            volgende_dosis = min(120, doel + GUT_STAP)
+            volgende_dosis = _gut_stap_omhoog(doel, plafond_sport)
         elif soort == "omlaag":
             volgende_dosis = max(15, doel - GUT_STAP)
         else:
@@ -5262,30 +5304,31 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         return bewaar("product",
             f"Smaak {smaak} op {doel} g per uur.", "geslaagd", kaart)
 
-    # 4. geslaagd: tweede op rij?
+    # 4. geslaagd: genoeg bevestigingen?
+    #
+    # Onder de 60 g per uur volstaat een geslaagd testmoment. Vanaf 60
+    # blijven het er twee, want daar komt fructose in het spel.
+    nodig = _gut_bevestigingen(doel)
     _alle, _nu, _heeft = _gut_momenten(supabase, user.id)
     eerder = [m for m in _alle
               if m["reeks"] == reeks
               and int(m.get("doel_kh_uur") or 0) == doel
               and m.get("status") == "geslaagd"
               and m.get("id") != moment_id]
-    if len(eerder) < 1:
+    if len(eerder) + 1 < nodig:
         return bewaar("herhaal",
             f"Geslaagd op {doel} g per uur. Bevestig het nog een keer.", "geslaagd")
+    geslaagd = "Geslaagd" if nodig == 1 else "Twee keer geslaagd"
 
-    # 5. de poort bij 60
-    nieuw = doel + GUT_STAP
-    prot = supabase.table("carboo_gut_protocol").select("sport") \
-        .eq("user_id", user.id).limit(1).execute().data or []
-    sport = (prot[0].get("sport") if prot else "") or "Lopen"
-    plafond_sport = GUT_PLAFOND.get(sport, 115)
+    # 5. de volgende stap, nooit over het plafond
+    nieuw = _gut_stap_omhoog(doel, plafond_sport)
 
-    if nieuw > plafond_sport:
+    if nieuw <= doel:
         return bewaar("herhaal",
             f"{doel} g per uur is het plafond voor {sport.lower()}.", "geslaagd",
             [_gut_regel("Plafond", True, f"{doel} g/uur")])
 
-    if nieuw > 60:
+    if nieuw > GUT_POORT:
         plafond_prod, verh, waarom = _gut_mix_plafond(supabase, user.id, sport)
         hoe = "onbekend" if waarom == "verhouding deels onbekend" else waarom
         if nieuw > plafond_prod:
@@ -5296,12 +5339,12 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
                             "Kies glucose met fructose in 2 op 1 of 1 op 0,8.")])
         if hoe == "onbekend":
             return bewaar("omhoog",
-                f"Twee keer geslaagd. Ga naar {nieuw} g per uur.", "geslaagd",
+                f"{geslaagd}. Ga naar {nieuw} g per uur.", "geslaagd",
                 [_gut_regel("Mix", False, "deels onbekend",
                             "Boven 60 g per uur heb je glucose met fructose nodig.")])
 
     return bewaar("omhoog",
-        f"Twee keer geslaagd op {doel} g per uur. Ga naar {nieuw}.", "geslaagd")
+        f"{geslaagd} op {doel} g per uur. Ga naar {nieuw}.", "geslaagd")
 
 
 
