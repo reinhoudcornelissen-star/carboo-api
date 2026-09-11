@@ -5029,6 +5029,29 @@ def _gut_regels_smaak(supabase, producten: list, momenten: list):
     return [structuur, vorm]
 
 
+# ─── GUT-VERKLARING-V1 ─────────────────────────────────────────────────
+# Klopt alles wat de sporter logde en blijft zijn maagcomfort toch onder
+# de 6, dan is dat geen fout maar training: de darm past zich aan door
+# herhaling. Die regel velt geen oordeel, dus hij krijgt geen vinkje en
+# geen kruisje, maar een verklaring.
+
+def _gut_verklaring(regels: list):
+    namen = [str(r.get("label") or "").lower() for r in regels if r.get("label")]
+    if len(namen) > 1:
+        opsomming = ", ".join(namen[:-1]) + " en " + namen[-1]
+    else:
+        opsomming = namen[0] if namen else "wat je logde"
+    return {
+        "type": "verklaring",
+        "label": "",
+        "goed": None,
+        "gelogd": "",
+        "instructie": "",
+        "tekst": (f"Je darm moet nog wennen — {opsomming} kloppen. "
+                  f"Herhaal dezelfde dosis; dat is hoe darmtraining werkt."),
+    }
+
+
 # ─── GUT-T1-MEELOOPT-V1 ────────────────────────────────────────────────
 # T1 volgt de hoogste inname zonder klachten uit het profiel, zolang hij
 # nog openstaat. Zodra er iets beoordeeld is ligt de dosis vast: dan wil
@@ -5202,6 +5225,7 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             kaart.append(_gut_regel_vocht(gelogde_momenten, duur))
             if comfort <= 1:
                 kaart.append(_gut_regel_maaltijd(data.get("maaltijd_uren_voor")))
+        comfort_regels = len(kaart)
         if smaak_laag:
             kaart.extend(_gut_regels_smaak(supabase, producten, gelogde_momenten))
 
@@ -5210,6 +5234,13 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             return bewaar("coach",
                 f"Drie producten geprobeerd op {doel} g per uur zonder resultaat.",
                 "mislukt", kaart)
+
+        # Alles wat gelogd is klopt en toch is het maagcomfort laag: geen
+        # fout om te herstellen, dus een verklaring onder die regels. Niet
+        # bij de coach hierboven, want die zegt iets anders dan herhalen.
+        if comfort_laag and comfort_regels and all(
+                r.get("goed") for r in kaart[:comfort_regels]):
+            kaart.insert(comfort_regels, _gut_verklaring(kaart[:comfort_regels]))
 
         if comfort_laag and smaak_laag:
             return bewaar("product",
