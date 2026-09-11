@@ -4548,7 +4548,7 @@ def _gut_doel(duur_uur, niveau, sport: str) -> dict:
 
 
 def _gut_protocol_doel(supabase, user_id: str) -> dict:
-    """Het doel van de sporter, met zijn sport erbij."""
+    """Het doel van de sporter, met zijn sport en wedstrijdduur erbij."""
     try:
         rijen = (supabase.table("carboo_gut_protocol")
                  .select("sport,niveau,wedstrijd_duur_uur")
@@ -4560,6 +4560,7 @@ def _gut_protocol_doel(supabase, user_id: str) -> dict:
     sport = prot.get("sport") or "Lopen"
     uit = _gut_doel(prot.get("wedstrijd_duur_uur"), prot.get("niveau"), sport)
     uit["sport"] = sport
+    uit["duur_uur"] = prot.get("wedstrijd_duur_uur")
     return uit
 # ── GUT-MIX-V2 ─────────────────────────────────────────────────────
 # De verhouding telt over de MIX, niet per product. Iemand die een
@@ -4653,15 +4654,18 @@ async def lijst_testmomenten(user=Depends(get_current_user),
 
     Alles komt terug, want het logboek toont de hele geschiedenis. Welke
     reeks de lopende is bepaalt de server, niet het scherm: elke rij
-    krijgt gegarandeerd een reeks mee, ook als de kolom nog niet bestaat.
-    Zo kan Testing er nooit naast zitten."""
+    krijgt gegarandeerd een reeks en een fase mee, ook als de kolommen nog
+    niet bestaan. Zo kan Testing er nooit naast zitten."""
     rijen, reeks_nu, heeft_kolom = _gut_momenten(supabase, user.id)
+    afgerond = any(x["reeks"] == reeks_nu and x["fase"] == "wedstrijd"
+                   and x.get("status") == "geslaagd" for x in rijen)
     return {
         "momenten": rijen,
         "reeks_nu": reeks_nu,
         "reeks_kolom": heeft_kolom,
         # alleen of er iets te trainen is; het doel zelf blijft binnen
         "protocol_nodig": _gut_protocol_doel(supabase, user.id)["nodig"],
+        "protocol_afgerond": afgerond,
     }
 
 
@@ -4811,13 +4815,76 @@ def _gut_nummer_labels(rijen: list):
     return rijen
 
 
+# ─── GUT-FASEN-V1 ──────────────────────────────────────────────────────
+# Wie zijn doeldosis haalt, is nog niet klaar. Na het opbouwen volgen
+# twee fasen, en daarna is het protocol afgerond:
+#
+#   opbouw       de dosis omhoog op lage intensiteit; staat de sporter op
+#                60 g en ligt zijn doel hoger, dan eerst een TUSSENTEST
+#                op tempo voor hij verder opbouwt
+#   bevestiging  dezelfde dosis op hogere intensiteit: intensiteit trekt
+#                bloed weg bij de darm, dus wat op duurtempo lukt kan op
+#                drempel nog falen
+#   wedstrijd    wedstrijdtempo, wedstrijdproducten, zo dicht mogelijk bij
+#                de wedstrijdduur
+#   afgerond     de wedstrijdsimulatie is geslaagd
+#
+# De fase staat op het testmoment. Een herhaling blijft in dezelfde fase.
+# In de opbouw tellen de bevestigingen zoals voorheen (een onder 60 g,
+# twee vanaf 60); in de andere fasen volstaat een geslaagd moment. Alleen
+# geslaagde momenten in dezelfde fase tellen mee.
+
+GUT_FASEN = {
+    "opbouw": ("laag", "Duurtraining"),
+    "tussentest": ("matig", "Duurtraining"),
+    "bevestiging": ("hoog", "Intervaltraining"),
+    "wedstrijd": ("wedstrijdtempo", "Wedstrijdsimulatie"),
+}
+GUT_SIMULATIE_MAX = 180   # minuten; een langere simulatie is als training niet haalbaar
+
+
+def _gut_volgende_fase(soort: str, fase_nu: str) -> str:
+    """De fase van het testmoment dat na dit advies komt."""
+    soort = soort or ""
+    if soort.startswith("fase_"):
+        return soort[len("fase_"):]
+    if soort == "omhoog":
+        return "opbouw"   # na een tussentest bouw je verder op
+    return fase_nu or "opbouw"
+
+
+def _gut_fase_parameters(fase: str, duur_uur) -> dict:
+    """Intensiteit, soort training en minimumduur van een fase."""
+    intensiteit, training = GUT_FASEN.get(fase, GUT_FASEN["opbouw"])
+    min_duur = GUT_MIN_DUUR
+    if fase == "wedstrijd":
+        try:
+            minuten = round(float(duur_uur) * 60) if duur_uur else 120
+        except (TypeError, ValueError):
+            minuten = 120
+        min_duur = max(GUT_MIN_DUUR, min(GUT_SIMULATIE_MAX, minuten))
+    return {"intensiteit": intensiteit, "type_training": training,
+            "min_duur_min": min_duur}
+
+
+def _gut_fase_kolom(supabase) -> bool:
+    """Of carboo_gut_testmomenten een kolom fase heeft."""
+    try:
+        supabase.table("carboo_gut_testmomenten").select("fase").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
 def _gut_momenten(supabase, user_id: str):
-    """Alle testmomenten, hun reeksnummer, en of de kolom reeks bestaat."""
+    """Alle testmomenten, hun reeksnummer, en of de kolom reeks bestaat.
+    Elke rij krijgt een fase; zonder fase is het opbouw."""
     rijen = (supabase.table("carboo_gut_testmomenten").select("*")
              .eq("user_id", user_id).order("nummer").execute().data) or []
     heeft_kolom = bool(rijen) and "reeks" in rijen[0]
     for r in rijen:
         r["reeks"] = int(r.get("reeks") or 1)
+        r["fase"] = r.get("fase") or "opbouw"
     rijen.sort(key=lambda r: (r["reeks"], int(r.get("nummer") or 0)))
     _gut_nummer_labels(rijen)
     nu = max((r["reeks"] for r in rijen), default=1)
@@ -4843,8 +4910,8 @@ def _gut_aantal_wissels(supabase, user_id: str, doel: int, reeks: int = 1):
 async def maak_volgend_testmoment(moment_id: str,
                                   user=Depends(get_current_user),
                                   supabase: Client = Depends(get_supabase)):
-    m = supabase.table("carboo_gut_testmomenten").select("*") \
-        .eq("id", moment_id).eq("user_id", user.id).limit(1).execute()
+    m = (supabase.table("carboo_gut_testmomenten").select("*")
+         .eq("id", moment_id).eq("user_id", user.id).limit(1).execute())
     if not m.data:
         raise HTTPException(404, "Testmoment niet gevonden")
     moment = m.data[0]
@@ -4852,13 +4919,15 @@ async def maak_volgend_testmoment(moment_id: str,
     soort = moment.get("advies_soort")
     if not soort:
         raise HTTPException(400, "Dit testmoment is nog niet beoordeeld")
+    if soort == "afgerond":
+        raise HTTPException(400, "Het protocol is afgerond")
 
     # bestaat er al een volgende?
     reeks = int(moment.get("reeks") or 1)
     alle, _nu, heeft_kolom = _gut_momenten(supabase, user.id)
-    later = [m for m in alle
-             if m["reeks"] == reeks
-             and int(m["nummer"]) > int(moment["nummer"])]
+    later = [x for x in alle
+             if x["reeks"] == reeks
+             and int(x["nummer"]) > int(moment["nummer"])]
     if later:
         return {"ok": True, "bestond_al": True,
                 "moment": None,
@@ -4866,29 +4935,38 @@ async def maak_volgend_testmoment(moment_id: str,
 
     doel = int(moment.get("doel_kh_uur") or 0)
     poging = int(moment.get("poging") or 1)
+    doel_wedstrijd = _gut_protocol_doel(supabase, user.id)
 
     if soort == "omhoog":
         nieuw_doel, nieuwe_poging = _gut_stap_omhoog(
-            doel, _gut_protocol_doel(supabase, user.id)["grens"] or 120), 1
+            doel, doel_wedstrijd["grens"] or 120), 1
     elif soort == "omlaag":
         nieuw_doel, nieuwe_poging = max(15, doel - GUT_STAP), 1
     elif soort in ("herhaal", "product"):
         nieuw_doel, nieuwe_poging = doel, poging + 1
+    elif soort.startswith("fase_"):
+        nieuw_doel, nieuwe_poging = doel, 1
     else:  # telt_niet
         nieuw_doel, nieuwe_poging = doel, poging
 
+    # De fase bepaalt intensiteit, soort training en minimumduur. Eerder
+    # werd de intensiteit van het vorige moment overgenomen, en bleef de
+    # fiche dus altijd lage intensiteit zeggen.
+    fase = _gut_volgende_fase(soort, moment.get("fase") or "opbouw")
     rij = {
         "user_id": user.id,
         "nummer": int(moment["nummer"]) + 1,
         "doel_kh_uur": min(120, nieuw_doel),
-        "intensiteit": moment.get("intensiteit") or "laag",
-        "min_duur_min": int(moment.get("min_duur_min") or GUT_MIN_DUUR),
-        "type_training": moment.get("type_training") or "Duurtraining",
         "status": "open",
         "poging": nieuwe_poging,
     }
+    rij.update(_gut_fase_parameters(fase, doel_wedstrijd.get("duur_uur")))
     if heeft_kolom:
         rij["reeks"] = reeks
+    if _gut_fase_kolom(supabase):
+        rij["fase"] = fase
+    elif fase != "opbouw":
+        print("[GUT-FASEN-V1] kolom fase ontbreekt; draai gut-testmomenten-fase.sql")
     r = supabase.table("carboo_gut_testmomenten").insert(rij).execute()
     return {"ok": True, "bestond_al": False,
             "moment": (r.data[0] if r.data else rij)}
@@ -5225,14 +5303,15 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     Het antwoord is gestructureerd: twee scores, een rij regels met per
     regel een oordeel en een instructie, en wat er volgt. Geen lopende
     tekst; het scherm maakt er een kaart van."""
-    m = supabase.table("carboo_gut_testmomenten").select("*") \
-        .eq("id", moment_id).eq("user_id", user.id).limit(1).execute()
+    m = (supabase.table("carboo_gut_testmomenten").select("*")
+         .eq("id", moment_id).eq("user_id", user.id).limit(1).execute())
     if not m.data:
         raise HTTPException(404, "Testmoment niet gevonden")
     moment = m.data[0]
     doel = int(moment.get("doel_kh_uur") or 0)
     reeks = int(moment.get("reeks") or 1)
     nummer = int(moment.get("nummer") or 1)
+    fase_nu = moment.get("fase") or "opbouw"
     doel_wedstrijd = _gut_protocol_doel(supabase, user.id)
     sport = doel_wedstrijd["sport"]
     plafond_sport = GUT_PLAFOND.get(sport, 115)
@@ -5261,9 +5340,11 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         else:
             volgende_dosis = doel
 
-        if soort == "coach":
-            volgende = {"label": "overleg met je coach", "dosis": None,
-                        "herhaling": False}
+        if soort in ("coach", "afgerond"):
+            volgende = {"label": ("overleg met je coach" if soort == "coach"
+                                  else "protocol afgerond"),
+                        "dosis": None, "herhaling": False,
+                        "fase": None, "nieuwe_fase": False}
         else:
             # Het label van het volgende moment is wat de reeks tot nu toe
             # plus een moment op de volgende dosis zou opleveren.
@@ -5272,8 +5353,10 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
                       and int(x.get("nummer") or 0) <= nummer]
             proef = eerder + [{"reeks": reeks, "doel_kh_uur": volgende_dosis}]
             _gut_nummer_labels(proef)
+            fase = _gut_volgende_fase(soort, fase_nu)
             volgende = {"label": proef[-1]["label"], "dosis": volgende_dosis,
-                        "herhaling": proef[-1]["herhaling"] > 0}
+                        "herhaling": proef[-1]["herhaling"] > 0,
+                        "fase": fase, "nieuwe_fase": fase != fase_nu}
 
         scores = []
         if comfort is not None:
@@ -5341,9 +5424,9 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
                 "mislukt", kaart)
 
         if comfort_laag:
-            vorige = supabase.table("carboo_gut_sessies") \
-                .select("maagcomfort").eq("user_id", user.id) \
-                .order("datum", desc=True).limit(3).execute().data or []
+            vorige = (supabase.table("carboo_gut_sessies")
+                      .select("maagcomfort").eq("user_id", user.id)
+                      .order("datum", desc=True).limit(3).execute().data) or []
             laag = sum(1 for v in vorige
                        if v.get("maagcomfort") is not None
                        and int(v["maagcomfort"]) < GUT_COMFORT_GRENS)
@@ -5357,50 +5440,77 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
 
     # 4. geslaagd: genoeg bevestigingen?
     #
-    # Onder de 60 g per uur volstaat een geslaagd testmoment. Vanaf 60
-    # blijven het er twee, want daar komt fructose in het spel.
-    nodig = _gut_bevestigingen(doel)
+    # In de opbouw volstaat onder de 60 g per uur een geslaagd testmoment
+    # en zijn het er vanaf 60 twee. In de tussentest, de bevestiging en de
+    # wedstrijdsimulatie volstaat er telkens een. Alleen geslaagde momenten
+    # in dezelfde fase tellen mee.
+    nodig = _gut_bevestigingen(doel) if fase_nu == "opbouw" else 1
     _alle, _nu, _heeft = _gut_momenten(supabase, user.id)
-    eerder = [m for m in _alle
-              if m["reeks"] == reeks
-              and int(m.get("doel_kh_uur") or 0) == doel
-              and m.get("status") == "geslaagd"
-              and m.get("id") != moment_id]
+    in_reeks = [x for x in _alle if x["reeks"] == reeks]
+    eerder = [x for x in in_reeks
+              if int(x.get("doel_kh_uur") or 0) == doel
+              and x["fase"] == fase_nu
+              and x.get("status") == "geslaagd"
+              and x.get("id") != moment_id]
     if len(eerder) + 1 < nodig:
         return bewaar("herhaal",
             f"Geslaagd op {doel} g per uur. Bevestig het nog een keer.", "geslaagd")
     geslaagd = "Geslaagd" if nodig == 1 else "Twee keer geslaagd"
 
-    # 5. de volgende stap, nooit over het doel
+    # 5. de fasen na het opbouwen
+    if fase_nu == "wedstrijd":
+        return bewaar("afgerond",
+            f"Wedstrijdsimulatie geslaagd op {doel} g per uur.", "geslaagd",
+            [_gut_regel("Wedstrijdsimulatie", True, f"{doel} g/uur")])
+
+    if fase_nu == "bevestiging":
+        return bewaar("fase_wedstrijd",
+            f"Geslaagd op hogere intensiteit met {doel} g per uur.", "geslaagd",
+            [_gut_regel("Intensiteit", True, "drempel")])
+
+    # 6. de volgende stap, nooit over het doel
     nieuw = _gut_stap_omhoog(doel, grens)
 
-    if nieuw <= doel and doel_wedstrijd["reden"] == "wedstrijd":
-        return bewaar("herhaal",
-            f"{doel} g per uur is genoeg voor je wedstrijd.", "geslaagd",
-            [_gut_regel("Wedstrijd", True, f"{doel} g/uur")])
-
     if nieuw <= doel:
-        return bewaar("herhaal",
-            f"{doel} g per uur is het plafond voor {sport.lower()}.", "geslaagd",
-            [_gut_regel("Plafond", True, f"{doel} g/uur")])
+        # Doel of plafond bereikt. Voorheen herhaalde de boom hier eindeloos
+        # dezelfde dosis; nu volgt dezelfde dosis op hogere intensiteit.
+        label = "Wedstrijd" if doel_wedstrijd["reden"] == "wedstrijd" else "Plafond"
+        return bewaar("fase_bevestiging",
+            f"{geslaagd} op {doel} g per uur. Nu dezelfde dosis op hogere intensiteit.",
+            "geslaagd", [_gut_regel(label, True, f"{doel} g/uur")])
 
+    mix_regels = []
     if nieuw > GUT_POORT:
         plafond_prod, verh, waarom = _gut_mix_plafond(supabase, user.id, sport)
-        hoe = "onbekend" if waarom == "verhouding deels onbekend" else waarom
         if nieuw > plafond_prod:
             verhouding = f"1 op {verh:.1f}".replace(".", ",") if verh else "onbekend"
             return bewaar("product",
                 f"Je mix laat maximaal {plafond_prod} g per uur toe.", "geslaagd",
                 [_gut_regel("Mix", False, verhouding,
                             "Kies glucose met fructose in 2 op 1 of 1 op 0,8.")])
-        if hoe == "onbekend":
-            return bewaar("omhoog",
-                f"{geslaagd}. Ga naar {nieuw} g per uur.", "geslaagd",
-                [_gut_regel("Mix", False, "deels onbekend",
-                            "Boven 60 g per uur heb je glucose met fructose nodig.")])
+        if waarom == "verhouding deels onbekend":
+            mix_regels = [_gut_regel("Mix", False, "deels onbekend",
+                                     "Boven 60 g per uur heb je glucose met fructose nodig.")]
+
+    # Op 60 g, met een doel dat hoger ligt: eerst een keer op tempo, want
+    # vanaf hier komt fructose in het spel. Na de mix, zodat die tussentest
+    # al met de producten gebeurt waarmee hij verder opbouwt.
+    #
+    # Alleen als het doel boven de 60 ligt. Is het doel 60, dan valt de
+    # tussentest samen met de bevestiging en doen ze twee keer hetzelfde.
+    # Die situatie wordt hierboven al opgevangen (de stap geeft dan geen
+    # hogere dosis), maar de regel staat hier ook voluit, zodat hij niet
+    # afhangt van de volgorde van deze blokken.
+    tussentest_gedaan = any(x["fase"] == "tussentest" and x.get("status") == "geslaagd"
+                            for x in in_reeks)
+    if (fase_nu == "opbouw" and doel == GUT_POORT and grens > GUT_POORT
+            and not tussentest_gedaan):
+        return bewaar("fase_tussentest",
+            f"{geslaagd} op {doel} g per uur. Eerst een keer op tempo.", "geslaagd",
+            [_gut_regel("Duurtempo", True, f"{doel} g/uur")] + mix_regels)
 
     return bewaar("omhoog",
-        f"{geslaagd} op {doel} g per uur. Ga naar {nieuw}.", "geslaagd")
+        f"{geslaagd} op {doel} g per uur. Ga naar {nieuw}.", "geslaagd", mix_regels)
 
 
 
