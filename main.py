@@ -1745,7 +1745,8 @@ async def zet_protocol_aan(data: dict, user=Depends(get_current_user),
      .eq("user_id", user.id).eq("status", "actief").execute())
     # GUT-MAAG-V2 — liep het protocol vast, dan gaat het verder op die dosis
     opgepakt = _gut_draad_oppakken(supabase, user.id) if aan else None
-    return {"ok": True, "protocol_aan": aan, "moment": opgepakt}
+    return {"ok": True, "protocol_aan": aan,
+            "moment": _gut_moment_uit(opgepakt, "protocol") if opgepakt else None}
 
 
 @app.get("/api/gut/sessies")
@@ -4740,8 +4741,11 @@ async def maak_testmoment(data: dict,
     }
     if heeft_kolom:
         rij["reeks"] = reeks_nu
+    if _gut_bron_kolom(supabase):
+        rij["bron"] = "zelfstandig"
     moment, bestond = _gut_voeg_moment_toe(supabase, user.id, rij)
-    return {"ok": True, "bestond_al": bestond, "moment": moment}
+    return {"ok": True, "bestond_al": bestond,
+            "moment": _gut_moment_uit(moment, None if bestond else "zelfstandig")}
 
 
 
@@ -4775,7 +4779,7 @@ async def pas_testmoment_aan(moment_id: str, data: dict,
          .eq("id", moment_id).eq("user_id", user.id).execute())
     if not r.data:
         raise HTTPException(404, "Testmoment niet gevonden")
-    return {"ok": True, "moment": r.data[0]}
+    return {"ok": True, "moment": _gut_moment_uit(r.data[0])}
 
 
 # ─── GUT-VOLGEND-MOMENT-V1 ─────────────────────────────────────────────
@@ -4839,19 +4843,31 @@ GUT_LETTERS = "bcdefghijklmnopqrstuvwxyz"
 
 
 def _gut_label(stap: int, herhaling: int) -> str:
+    """Het label van een moment uit het protocol: TP3, TP3b, TP3c."""
     if herhaling <= 0:
-        return f"T{stap}"
+        return f"TP{stap}"
     if herhaling <= len(GUT_LETTERS):
-        return f"T{stap}{GUT_LETTERS[herhaling - 1]}"
-    return f"T{stap}-{herhaling + 1}"
+        return f"TP{stap}{GUT_LETTERS[herhaling - 1]}"
+    return f"TP{stap}-{herhaling + 1}"
 
 
 def _gut_nummer_labels(rijen: list):
     """Zet stap, herhaling en label op elke rij. Verwacht de rijen
-    gesorteerd op reeks en nummer, met een genormaliseerde reeks."""
-    vorige = {}
+    gesorteerd op reeks en nummer.
+
+    GUT-TP-TZ-V1 — momenten uit het protocol heten TP: een nieuwe dosis
+    geeft een nieuw nummer, dezelfde dosis een letter. Zelfstandige
+    momenten heten TZ en tellen apart, per reeks. De TP-nummering slaat de
+    TZ-momenten over: TP1, TP1b, TP1c, TZ1, TP1d."""
+    vorige, zelf = {}, {}
     for r in rijen:
         reeks = int(r.get("reeks") or 1)
+        if (r.get("bron") or "protocol") == "zelfstandig":
+            zelf[reeks] = zelf.get(reeks, 0) + 1
+            r["stap"] = zelf[reeks]
+            r["herhaling"] = 0
+            r["label"] = f"TZ{zelf[reeks]}"
+            continue
         doel = int(r.get("doel_kh_uur") or 0)
         v = vorige.get(reeks)
         if v is None:
@@ -4937,6 +4953,26 @@ def _gut_kaart_kolom(supabase) -> bool:
         return False
 
 
+def _gut_bron_kolom(supabase) -> bool:
+    """Of carboo_gut_testmomenten een kolom bron heeft."""
+    try:
+        supabase.table("carboo_gut_testmomenten").select("bron").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def _gut_moment_uit(moment, bron=None):
+    """Een testmoment zoals een route het teruggeeft: altijd met bron en fase,
+    ook als een kolom nog ontbreekt of de rij net ingevoegd is."""
+    if not isinstance(moment, dict):
+        return moment
+    uit = dict(moment)
+    uit["bron"] = uit.get("bron") or bron or "protocol"
+    uit["fase"] = uit.get("fase") or "opbouw"
+    return uit
+
+
 def _gut_momenten(supabase, user_id: str):
     """Alle testmomenten, hun reeksnummer, en of de kolom reeks bestaat.
     Elke rij krijgt een fase; zonder fase is het opbouw."""
@@ -4946,6 +4982,7 @@ def _gut_momenten(supabase, user_id: str):
     for r in rijen:
         r["reeks"] = int(r.get("reeks") or 1)
         r["fase"] = r.get("fase") or "opbouw"
+        r["bron"] = r.get("bron") or "protocol"
     rijen.sort(key=lambda r: (r["reeks"], int(r.get("nummer") or 0)))
     _gut_nummer_labels(rijen)
     nu = max((r["reeks"] for r in rijen), default=1)
@@ -4996,7 +5033,8 @@ async def maak_volgend_testmoment(moment_id: str,
                 "melding": "Er staat al een open testmoment klaar."}
     later = [x for x in alle
              if x["reeks"] == reeks
-             and int(x["nummer"]) > int(moment["nummer"])]
+             and int(x["nummer"]) > int(moment["nummer"])
+             and x.get("bron") != "zelfstandig"]
     if later:
         return {"ok": True, "bestond_al": True,
                 "moment": None,
@@ -5036,8 +5074,11 @@ async def maak_volgend_testmoment(moment_id: str,
         rij["fase"] = fase
     elif fase != "opbouw":
         print("[GUT-FASEN-V1] kolom fase ontbreekt; draai gut-testmomenten-fase.sql")
+    if _gut_bron_kolom(supabase):
+        rij["bron"] = "protocol"
     nieuw_moment, bestond = _gut_voeg_moment_toe(supabase, user.id, rij)
-    return {"ok": True, "bestond_al": bestond, "moment": nieuw_moment}
+    return {"ok": True, "bestond_al": bestond,
+            "moment": _gut_moment_uit(nieuw_moment, None if bestond else "protocol")}
 
 
 # ─── GUT-VOCHT-VORM-V1 ─────────────────────────────────────────────────
@@ -5392,6 +5433,8 @@ def _gut_draad_oppakken(supabase, user_id: str):
             "opbouw", _gut_protocol_doel(supabase, user_id).get("duur_uur")))
         if _gut_fase_kolom(supabase):
             velden["fase"] = "opbouw"
+        if _gut_bron_kolom(supabase):
+            velden["bron"] = "protocol"
 
         open_ = _gut_open_moment(huidig, _gut_geteste_ids(supabase, user_id))
         if open_:
@@ -5624,7 +5667,7 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             eerder = [x for x in _gut_momenten(supabase, user.id)[0]
                       if x["reeks"] == reeks
                       and int(x.get("nummer") or 0) <= nummer]
-            proef = eerder + [{"reeks": reeks, "doel_kh_uur": volgende_dosis}]
+            proef = eerder + [{"reeks": reeks, "doel_kh_uur": volgende_dosis, "bron": "protocol"}]
             _gut_nummer_labels(proef)
             fase = _gut_volgende_fase(soort, fase_nu)
             volgende = {"label": proef[-1]["label"], "dosis": volgende_dosis,
