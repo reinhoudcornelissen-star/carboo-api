@@ -5404,6 +5404,29 @@ def _gut_verklaring(regels: list):
 GUT_MAAG_SOORTEN = ("maag_herhaal", "maag_formaat", "maag_vast")
 
 
+# ─── GUT-DOSIS-V2 ──────────────────────────────────────────────────────
+# Wie zijn dosis niet haalde, kreeg vroeger een herhaling: hetzelfde
+# testmoment nog eens. Dat stuurde te laat. Nu stuurt het blok
+# Voedingsmomenten tijdens het invullen, met een teller die groen wordt
+# zodra de dosis binnen is. Komt hij er toch niet, dan telt het moment mee
+# zoals het is, en zegt de kaart hoe hij het de volgende keer plant.
+GUT_PORTIE_INTERVAL = 20   # minuten tussen twee porties in het plan
+
+
+def _gut_dosis_plan(doel: int, duur_min) -> str:
+    """De verdeling uitgerekend: hoeveel porties van hoeveel gram, om de
+    hoeveel minuten. Concreter dan "haal eerst je dosis"."""
+    try:
+        duur = float(duur_min or 0) or float(GUT_MIN_DUUR)
+    except (TypeError, ValueError):
+        duur = float(GUT_MIN_DUUR)
+    nodig = int(doel or 0) * duur / 60
+    porties = max(1, int(round(duur / GUT_PORTIE_INTERVAL)))
+    return (f"Plan het vooraf: {porties} porties van ongeveer "
+            f"{int(round(nodig / porties))} g, om de {GUT_PORTIE_INTERVAL} minuten. "
+            f"Samen {int(round(nodig))} g over {int(round(duur))} minuten.")
+
+
 def _gut_externe_keer(momenten: list, doel: int, moment_id: str) -> int:
     """GUT-EXTERN-V1 — hoe vaak er op deze dosis NA ELKAAR iets bijzonders
     gemeld werd, het huidige moment niet meegeteld.
@@ -5804,12 +5827,13 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             "gewoon mee, anders kom je nooit verder."))
         extra_tekst.append("Derde keer iets bijzonders; dit moment telt mee.")
 
-    # 2. dosis gehaald?
+    # 2. dosis niet gehaald? GUT-DOSIS-V2 — geen herhaling meer: het moment telt
+    # mee zoals het is, en de kaart zegt hoe hij het de volgende keer plant.
     if kh_uur < doel * GUT_DOSIS_MARGE:
-        return bewaar("herhaal",
-            f"{round(kh_uur)} van de {doel} g per uur gehaald.", "mislukt",
-            [_gut_regel("Dosis", False, f"{round(kh_uur)} van {doel} g/uur",
-                        "Haal de dosis eerst, dan zegt de test iets over je darm.")])
+        extra_regels.append(_gut_regel(
+            "Dosis", False, f"{round(kh_uur)} van {doel} g/uur",
+            _gut_dosis_plan(doel, duur)))
+        extra_tekst.append(f"Je haalde {round(kh_uur)} van de {doel} g per uur.")
 
     # 3. maagcomfort en smaak
     #
