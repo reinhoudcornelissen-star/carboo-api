@@ -4501,21 +4501,23 @@ async def zet_profielfoto(data: dict,
 # testmoment, een stap terug kost weken.
 
 GUT_PLAFOND = {"Fietsen": 120, "Lopen": 115, "Triatlon": 115}
-GUT_STAP = 10
+GUT_STAP = 15
 GUT_MIN_DUUR = 75
 GUT_COMFORT_GRENS = 6
 GUT_DOSIS_MARGE = 0.9   # 90 procent van het doel volstaat
 
-# ─── GUT-STAP-V2 ───────────────────────────────────────────────────────
+# ─── GUT-STAP-V3 ───────────────────────────────────────────────────────
 # Stappen van tien gram overal maakten van 20 naar 115 twintig
 # testmomenten. Onder de 60 g per uur is een transportweg genoeg en
 # verdraagt bijna iedereen het; daar is het fysiologisch niet spannend.
 # Vanaf 60 komt fructose in het spel en begint het werk dat ertoe doet.
 #
-#   onder 60   stap 20, nooit voorbij de 60   een bevestiging
-#   vanaf 60   stap 10                        twee bevestigingen
+#   onder 60   stap 20, nooit voorbij de 60   een geslaagd moment
+#   vanaf 60   stap 15                        een geslaagd moment
 #
-# De stap gaat nooit over het plafond van de sport.
+# Een geslaagd moment telt altijd mee, ook op de doeldosis: daarna gaat
+# het protocol naar de bevestiging. De stap gaat nooit over het doel en
+# de dosis zakt nooit.
 GUT_POORT = 60
 GUT_STAP_LAAG = 20
 
@@ -4529,11 +4531,6 @@ def _gut_stap_omhoog(doel: int, plafond: int) -> int:
     else:
         nieuw = doel + GUT_STAP
     return max(doel, min(nieuw, int(plafond)))
-
-
-def _gut_bevestigingen(doel: int) -> int:
-    """Hoeveel geslaagde testmomenten er op een dosis nodig zijn."""
-    return 1 if int(doel or 0) < GUT_POORT else 2
 
 
 # ─── GUT-DOEL-V1 ───────────────────────────────────────────────────────
@@ -4898,9 +4895,7 @@ def _gut_nummer_labels(rijen: list):
 #   afgerond     de wedstrijdsimulatie is geslaagd
 #
 # De fase staat op het testmoment. Een herhaling blijft in dezelfde fase.
-# In de opbouw tellen de bevestigingen zoals voorheen (een onder 60 g,
-# twee vanaf 60); in de andere fasen volstaat een geslaagd moment. Alleen
-# geslaagde momenten in dezelfde fase tellen mee.
+# In elke fase volstaat een geslaagd moment om verder te gaan.
 
 GUT_FASEN = {
     "opbouw": ("laag", "Duurtraining"),
@@ -5773,22 +5768,12 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             f"Smaak {smaak} op {doel} g per uur.", "geslaagd",
             _gut_regels_smaak(supabase, producten, gelogde_momenten))
 
-    # 4. geslaagd: genoeg bevestigingen?
+    # 4. geslaagd: een geslaagd moment telt altijd mee.
     #
-    # In de opbouw volstaat onder de 60 g per uur een geslaagd testmoment
-    # en zijn het er vanaf 60 twee. In de tussentest, de bevestiging en de
-    # wedstrijdsimulatie volstaat er telkens een. Alleen geslaagde momenten
-    # in dezelfde fase tellen mee.
-    nodig = _gut_bevestigingen(doel) if fase_nu == "opbouw" else 1
-    eerder = [x for x in in_reeks
-              if int(x.get("doel_kh_uur") or 0) == doel
-              and x["fase"] == fase_nu
-              and x.get("status") == "geslaagd"
-              and x.get("id") != moment_id]
-    if len(eerder) + 1 < nodig:
-        return bewaar("herhaal",
-            f"Geslaagd op {doel} g per uur. Bevestig het nog een keer.", "geslaagd")
-    geslaagd = "Geslaagd" if nodig == 1 else "Twee keer geslaagd"
+    # GUT-STAP-V3 — een geslaagd moment per dosis volstaat, in elke fase, ook
+    # op de doeldosis zelf. Vanaf 60 g waren het er voorheen twee; dat maakte
+    # de reeks dubbel zo lang zonder dat de darm er iets bij leerde.
+    geslaagd = "Geslaagd"
 
     # 5. de fasen na het opbouwen
     if fase_nu == "wedstrijd":
