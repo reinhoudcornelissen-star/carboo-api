@@ -5146,36 +5146,66 @@ def _gut_regel(label: str, goed, gelogd: str, instructie: str = ""):
             "gelogd": gelogd, "instructie": "" if goed is True else instructie}
 
 
-def _gut_tijdstippen(momenten: list):
-    """De momenten tijdens de training, op volgorde."""
-    tijden = []
-    for m in (momenten or []):
-        if not isinstance(m, dict):
-            continue
-        if not (m.get("naam") or m.get("volume_ml") or m.get("kh_gram")):
-            continue
-        t = int(m.get("tijdstip_min") or 0)
-        if t > 0:
-            tijden.append(t)
-    return sorted(tijden)
+# ─── GUT-TIMING-V2 ─────────────────────────────────────────────────────
+# Niet het gemiddelde interval, maar het LANGSTE stuk zonder koolhydraten,
+# gemeten van de start tot het einde van de training. Een gemiddelde
+# verbergt precies wat je wil zien: drie gels in het eerste halfuur en
+# daarna niets meer is "om de tien minuten".
+#
+# Alleen momenten van minstens 10 g tellen mee. Een blokje van 3 g dicht
+# geen gat: er kwam in de praktijk niets binnen.
+#
+# Het einde is de ingevulde duur, maar nooit korter dan het laatste gelogde
+# moment. Vult iemand een te korte duur in, dan zou dat anders het stuk na
+# zijn laatste inname wegpoetsen.
+GUT_TIMING_GAT = 35        # minuten zonder koolhydraten die nog mogen
+GUT_TIMING_MIN_KH = 10     # gram; minder dicht geen gat
 
 
 def _gut_regel_timing(momenten: list, duur_min: float):
-    """Het gemiddelde interval tussen de momenten. Om de 20 tot 30
-    minuten kleine porties belast de maag minder dan alles in een keer."""
-    tijden = _gut_tijdstippen(momenten)
-    if len(tijden) < 2:
-        aantal = len(tijden)
-        return _gut_regel("Timing", False,
-                          f"{aantal} moment" if aantal else "niets gelogd",
-                          "Verdeel je inname: om de 20 tot 30 minuten een kleine portie.")
-    intervallen = [b - a for a, b in zip(tijden, tijden[1:])]
-    gem = round(sum(intervallen) / len(intervallen))
-    gelogd = f"om de {gem} min"
-    if gem <= 32:
+    """Het langste stuk zonder koolhydraten, van start tot einde."""
+    tijden, iets_gelogd = [], False
+    for m in (momenten or []):
+        if not isinstance(m, dict):
+            continue
+        if m.get("naam") or m.get("volume_ml") or m.get("kh_gram"):
+            iets_gelogd = True
+        t = int(m.get("tijdstip_min") or 0)
+        if t > 0 and float(m.get("kh_gram") or 0) >= GUT_TIMING_MIN_KH:
+            tijden.append(t)
+    tijden.sort()
+
+    if not tijden:
+        if iets_gelogd:
+            return _gut_regel("Timing", False, f"niets van {GUT_TIMING_MIN_KH} g of meer",
+                              f"Verdeel je koolhydraten over porties van minstens "
+                              f"{GUT_TIMING_MIN_KH} g, om de 20 tot 30 minuten.")
+        return _gut_regel("Timing", False, "niets gelogd",
+                          "Noteer per moment wat je nam, met de grammen erbij.")
+
+    try:
+        duur = float(duur_min or 0)
+    except (TypeError, ValueError):
+        duur = 0.0
+    einde = max(duur, float(tijden[-1]))
+
+    gaten = [("begin", float(tijden[0]))]
+    for a, b in zip(tijden, tijden[1:]):
+        gaten.append(("midden", float(b - a)))
+    gaten.append(("einde", einde - tijden[-1]))
+
+    grootste = max(g[1] for g in gaten)
+    plekken = [g[0] for g in gaten if g[1] == grootste]
+    gelogd = f"langste gat {int(round(grootste))} min"
+    if grootste <= GUT_TIMING_GAT:
         return _gut_regel("Timing", True, gelogd)
-    return _gut_regel("Timing", False, gelogd,
-                      "Ga naar om de 20 tot 30 minuten, in kleinere porties.")
+    # meerdere even grote gaten: dan zit het probleem overal, dus de algemene
+    plek = plekken[0] if len(plekken) == 1 else "midden"
+    return _gut_regel("Timing", False, gelogd, {
+        "einde": "Neem ook in het laatste halfuur koolhydraten in.",
+        "begin": "Begin binnen het eerste halfuur met koolhydraten.",
+        "midden": "Verdeel je inname: nooit langer dan een halfuur zonder koolhydraten.",
+    }[plek])
 
 
 def _gut_regel_samenstelling(supabase, user_id: str, producten: list, doel: int):
