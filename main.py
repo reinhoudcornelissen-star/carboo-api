@@ -4591,9 +4591,10 @@ def _gut_protocol_doel(supabase, user_id: str) -> dict:
 # maltodextrinedrank combineert met een gel op 2:1 zit samen goed,
 # ook al is die drank op zichzelf enkelvoudig.
 #
-# Hoe het plafond volgt uit de verhouding: de glucoseweg verzadigt
-# rond 60 g per uur. Wat er via fructose bij kan, bepaalt hoeveel
-# verder je komt. Bij 1 op 0,3 is dat 60 plus 18, dus 78 g per uur.
+# FRUCTOSE_AANDEEL leest de notatie als GLUCOSE OP FRUCTOSE: 2:1 is een
+# derde fructose, 1:0.8 is 0,8 fructose tegen 1 glucose, dus 44 procent.
+# Staat een product in de bibliotheek andersom genoteerd, dan rekent de
+# app met het spiegelbeeld van wat erin zit.
 #
 # De hoeveelheid en de duur spelen hier geen rol: de verhouding is
 # een breuk, en die verandert niet of iemand nu een of drie uur
@@ -4635,66 +4636,116 @@ def _gut_bib_sportvoeding(supabase, user_id: str) -> dict:
     return bib
 
 
-def _gut_mix_plafond(supabase, user_id: str, sport: str):
-    """Het plafond van de mix die deze sporter gebruikt.
+# ── GUT-MIX-V4 ─────────────────────────────────────────────────────
+# Twee transporters. De glucoseweg (SGLT1) ligt vast op 60 g per uur. De
+# fructoseweg (GLUT5) is trainbaar en schuift mee met de dosis waarnaar
+# getraind wordt; dat is precies wat dit protocol doet.
+#
+#   fructose_max = max(30, dosis - 60)
+#   opname = min(glucosedeel x dosis, 60) + min(fructosedeel x dosis, fructose_max)
+#
+# Een mix past als ze minstens 90 procent van de dosis opneemt. De regel
+# blokkeert niets: wat de sporter werkelijk verdroeg gaat voor op het model.
+# Ze zegt alleen welke mix beter bij de VOLGENDE dosis past.
+#
+# Welke mix ze aanraadt is een keuze, geen formule: het is wat er voor die
+# dosis in de winkel ligt. Bij 115 g rekent het model 1 op 0,9 uit, maar
+# daar bestaat geen product voor; 1 op 0,8 wel.
+GUT_GLUCOSE_MAX = 60
+GUT_FRUCTOSE_MIN = 30      # de fructoseweg bij een dosis tot 90 g
+GUT_MIX_MARGE = 0.10       # zoveel mag een mix tekortschieten en toch passen
+GUT_MIX_ONBEKEND = "2:1"   # meervoudig zonder verhouding: de gangbare mix
+GUT_MIX_ADVIES = ((95, "2 op 1", "2:1"), (115, "1 op 0,8", "1:0.8"), (None, "1 op 1", "1:1"))
 
-    Geeft (plafond, verhouding, reden) terug. Twee grenzen begrenzen
-    elkaar en de laagste wint:
 
-      het SPORTPLAFOND ligt vast op 120 voor fietsen en 115 voor lopen
-      en triatlon; dat is wat een getraind lichaam aankan
+def _gut_fructose_max(dosis) -> float:
+    """De fructoseweg schuift mee met de dosis waarnaar getraind wordt."""
+    return max(float(GUT_FRUCTOSE_MIN), float(dosis or 0) - GUT_GLUCOSE_MAX)
 
-      het PRODUCTPLAFOND volgt uit de gecombineerde verhouding; dat is
-      wat zijn producten leveren
 
-    Het onderscheid bepaalt het advies: bij het eerste zit hij aan zijn
-    maximum, bij het tweede kan zijn darm meer maar zijn producten niet."""
-    sportmax = GUT_PLAFOND.get(sport, 115)
-    try:
-        prot = supabase.table("carboo_gut_protocol") \
-            .select("gebruikte_producten").eq("user_id", user_id).limit(1).execute()
-        gebruikt = []
-        for p in ((prot.data[0].get("gebruikte_producten") if prot.data else None) or []):
-            if isinstance(p, dict) and p.get("naam"):
-                gebruikt.append((str(p["naam"]).strip().lower(),
-                                 float(p.get("kh") or 0) or 30))
-        if not gebruikt:
-            return sportmax, None, "geen producten ingevuld"
+def _gut_mix_opname(dosis, fructose_aandeel) -> float:
+    """Hoeveel van deze dosis de darm opneemt bij dit fructoseaandeel."""
+    d = max(0.0, float(dosis or 0))
+    f = min(1.0, max(0.0, float(fructose_aandeel or 0)))
+    return min(d * (1 - f), GUT_GLUCOSE_MAX) + min(d * f, _gut_fructose_max(d))
 
-        bib = _gut_bib_sportvoeding(supabase, user_id)
 
-        glucose, fructose, onbekend = 0.0, 0.0, False
-        for naam, kh in gebruikt:
-            b = bib.get(naam)
-            if not b:
-                onbekend = True
-                continue
-            v = b.get("kh_verhouding") or ""
-            if b.get("kh_type") == "enkelvoudig":
-                glucose += kh
-            elif v in FRUCTOSE_AANDEEL:
-                aandeel = FRUCTOSE_AANDEEL[v]
-                fructose += kh * aandeel
-                glucose += kh * (1 - aandeel)
-            else:
-                onbekend = True
-                glucose += kh
+def _gut_mix_tekst(aandeel) -> str:
+    """Een fructoseaandeel als verhouding glucose op fructose."""
+    f = min(0.999, max(0.0, float(aandeel or 0)))
+    if f <= 0:
+        return "alleen glucose"
+    return f"1 op {f / (1 - f):.1f}".replace(".", ",")
 
-        if glucose <= 0:
-            return sportmax, None, "kon de verhouding niet berekenen"
 
-        # 60 g glucose is de bovengrens van SGLT1; fructose komt daar bovenop
-        verhouding = fructose / glucose
-        productmax = int(min(120, round(60 * (1 + verhouding))))
+def _gut_mix_advies(dosis, sleutel: bool = False) -> str:
+    """Welke mix bij deze dosis hoort, uit de tabel."""
+    d = int(dosis or 0)
+    for grens, naam, code in GUT_MIX_ADVIES:
+        if grens is None or d <= grens:
+            return code if sleutel else naam
+    return GUT_MIX_ADVIES[-1][2 if sleutel else 1]
 
-        if onbekend:
-            return min(sportmax, productmax), verhouding, "verhouding deels onbekend"
-        if productmax < sportmax:
-            return productmax, verhouding, "product"
-        return sportmax, verhouding, "sport"
-    except Exception as e:
-        print(f"[GUT-MIX-V2] plafond berekenen mislukt: {e}")
-        return sportmax, None, "berekening mislukt"
+
+def _gut_mix_uit_sessie(supabase, user_id: str, producten: list, momenten: list):
+    """Het fructoseaandeel van wat de sporter werkelijk innam, gewogen op de
+    grammen per voedingsmoment. Geeft (aandeel, compleet).
+
+    Een meervoudig product zonder ingevulde verhouding telt als 2 op 1: dat is
+    wat zulke producten in de praktijk zijn. Als pure glucose rekenen zou het
+    advies laten slaan op een gat in de bibliotheek in plaats van op de mix.
+    Een product dat de app helemaal niet kent maakt het beeld onvolledig; dan
+    zegt de regel liever niets."""
+    bib = _gut_bib_sportvoeding(supabase, user_id)
+    posten = []
+    for m in (momenten or []):
+        if isinstance(m, dict) and m.get("naam") and float(m.get("kh_gram") or 0) > 0:
+            posten.append((str(m["naam"]), float(m["kh_gram"])))
+    if not posten:
+        posten = [(str(n), 30.0) for n in (producten or []) if n]
+
+    glucose, fructose, compleet = 0.0, 0.0, True
+    for naam, kh in posten:
+        b = bib.get(naam.strip().lower())
+        if not b:
+            compleet = False
+            continue
+        if b.get("kh_type") == "enkelvoudig":
+            glucose += kh
+            continue
+        aandeel = FRUCTOSE_AANDEEL.get(b.get("kh_verhouding") or "",
+                                       FRUCTOSE_AANDEEL[GUT_MIX_ONBEKEND])
+        fructose += kh * aandeel
+        glucose += kh * (1 - aandeel)
+    if glucose + fructose <= 0:
+        return None, False
+    return fructose / (glucose + fructose), compleet
+
+
+def _gut_mix_regel(supabase, user_id: str, producten: list, momenten: list, dosis):
+    """De regel Samenstelling over de mix bij deze dosis, of None als er niets
+    zinnigs te zeggen valt: onder de 60 g, of met producten die de app niet
+    kent. Ontbrekende productinfo geeft geen opmerking."""
+    d = int(dosis or 0)
+    if d <= GUT_GLUCOSE_MAX:
+        return None
+    aandeel, compleet = _gut_mix_uit_sessie(supabase, user_id, producten, momenten)
+    if aandeel is None or not compleet:
+        return None
+    gelogd = _gut_mix_tekst(aandeel)
+    opname = _gut_mix_opname(d, aandeel)
+    if opname >= d * (1 - GUT_MIX_MARGE):
+        return _gut_regel("Samenstelling", True, gelogd)
+    naam = _gut_mix_advies(d)
+    beter = _gut_mix_opname(d, FRUCTOSE_AANDEEL[_gut_mix_advies(d, sleutel=True)])
+    return _gut_regel("Samenstelling", False, gelogd,
+                      f"Voor {d} g per uur past {naam} beter: daarvan neemt je darm "
+                      f"{int(round(beter))} g op, van jouw mix {int(round(opname))} g.")
+
+
+def _gut_mix_regels(supabase, user_id: str, producten: list, momenten: list, dosis):
+    r = _gut_mix_regel(supabase, user_id, producten, momenten, dosis)
+    return [r] if r else []
 
 
 # ─── GUT-TESTMOMENTEN-API-V1 ───────────────────────────────────────────
@@ -5208,55 +5259,52 @@ def _gut_regel_timing(momenten: list, duur_min: float):
     }[plek])
 
 
-def _gut_regel_samenstelling(supabase, user_id: str, producten: list, doel: int):
-    """Verhouding, glucosebron en concentratie uit de bibliotheek."""
+def _gut_regel_samenstelling(supabase, user_id: str, producten: list,
+                             momenten: list, doel: int):
+    """Een regel over de samenstelling bij DEZE dosis.
+
+    Over de verhouding beslist het mixmodel, zodat geen twee regels elkaar
+    tegenspreken: vroeger zei de ene dat er meer fructose nodig was en de
+    andere, over dezelfde mix, dat het er te veel waren. Daarnaast kijkt ze
+    naar de concentratie en de glucosebron."""
     try:
         bib = _gut_bib_sportvoeding(supabase, user_id)
-        kenmerken, bezwaren, gevonden = [], [], 0
+        bezwaren, gevonden, conc_uit = [], 0, ""
         for naam in (producten or []):
             b = bib.get(str(naam).strip().lower())
             if not b:
                 continue
             gevonden += 1
-            verhouding = b.get("kh_verhouding") or ""
-            if b.get("kh_type") == "enkelvoudig":
-                kenmerken.append("enkelvoudig")
-            elif verhouding:
-                kenmerken.append(verhouding)
-            bron = str(b.get("kh_glucosebron") or "")
-            if bron:
-                kenmerken.append(bron)
             conc = b.get("concentratie") or ""
-            if conc:
-                kenmerken.append(conc)
-
-            if b.get("kh_type") == "enkelvoudig" and doel > 60:
-                bezwaren.append("Neem er fructose bij: boven 60 g per uur "
-                                "raakt glucose alleen verzadigd.")
-            if verhouding in ("1:0.8", "1:1"):
-                bezwaren.append("Ga terug naar 2 op 1: dit is veel fructose.")
+            if conc and not conc_uit:
+                conc_uit = conc
             if conc == "geconcentreerd":
                 ml = b.get("water_nodig_ml") or 175
                 bezwaren.append(f"Neem er {ml} ml water bij, of kies een isotone vorm.")
-            if "glucosestroop" in bron:
+            if "glucosestroop" in str(b.get("kh_glucosebron") or ""):
                 bezwaren.append("Kies maltodextrine in plaats van glucosestroop.")
 
+        # geen opdracht aan de sporter om de bibliotheek bij te werken: dat is
+        # beheerderswerk, niet het zijne
         if not gevonden:
-            return _gut_regel("Samenstelling", False, "onbekend",
-                              "Vul je producten aan in de bibliotheek, dan kijkt de app mee.")
+            return _gut_regel("Samenstelling", None, "onbekend",
+                              "De app kent deze producten niet.")
 
-        uniek = []
-        for k in kenmerken:
-            if k not in uniek:
-                uniek.append(k)
-        gelogd = ", ".join(uniek[:3])
+        aandeel, _compleet = _gut_mix_uit_sessie(supabase, user_id, producten, momenten)
+        gelogd = _gut_mix_tekst(aandeel) if aandeel is not None else "verhouding onbekend"
+        if conc_uit:
+            gelogd = f"{gelogd}, {conc_uit}"
+
+        mix = _gut_mix_regel(supabase, user_id, producten, momenten, doel)
+        if mix is not None and mix["goed"] is False:
+            return _gut_regel("Samenstelling", False, gelogd, mix["instructie"])
         if bezwaren:
             return _gut_regel("Samenstelling", False, gelogd, bezwaren[0])
         return _gut_regel("Samenstelling", True, gelogd)
     except Exception as e:
-        print(f"[GUT-ADVIESKAART-V1] samenstelling mislukt: {e}")
-        return _gut_regel("Samenstelling", False, "onbekend",
-                          "Kijk naar de verhouding glucose op fructose en de concentratie.")
+        print(f"[GUT-MIX-V4] samenstelling mislukt: {e}")
+        return _gut_regel("Samenstelling", None, "onbekend",
+                          "De app kon de samenstelling niet nakijken.")
 
 
 def _gut_regel_vocht(momenten: list, duur_min: float):
@@ -5879,7 +5927,8 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         # zonder het huidige moment dubbel te tellen
         keer = _gut_maag_pogingen(in_reeks, doel, moment_id) + 1
         kaart = [_gut_regel_timing(gelogde_momenten, duur),
-                 _gut_regel_samenstelling(supabase, user.id, producten, doel),
+                 _gut_regel_samenstelling(supabase, user.id, producten,
+                                          gelogde_momenten, doel),
                  _gut_regel_vocht(gelogde_momenten, duur),
                  _gut_regel_structuur(supabase, user.id, producten, True)]
         if comfort <= 1:
@@ -5965,12 +6014,7 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     # is hoogstens een opmerking op de kaart. Ontbreekt er productinfo, dan zegt
     # de kaart niets. Een product zonder ingevulde verhouding telde als glucose,
     # drukte het plafond omlaag en legde zo het hele protocol stil.
-    mix_regels = []
-    if nieuw > GUT_POORT:
-        plafond_prod, verh, waarom = _gut_mix_plafond(supabase, user.id, sport)
-        if waarom == "product" and verh is not None and nieuw > plafond_prod:
-            mix_regels = [_gut_regel("Mix", False, f"1 op {verh:.1f}".replace(".", ","),
-                                     "Kies glucose met fructose in 2 op 1 of 1 op 0,8.")]
+    mix_regels = _gut_mix_regels(supabase, user.id, producten, gelogde_momenten, nieuw)
 
     # Op 60 g, met een doel dat hoger ligt: eerst een keer op tempo, want
     # vanaf hier komt fructose in het spel. Na de mix, zodat die tussentest
