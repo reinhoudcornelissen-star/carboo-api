@@ -4658,6 +4658,10 @@ GUT_MIX_MARGE = 0.10       # zoveel mag een mix tekortschieten en toch passen
 # zegt al iets over de verhouding, en dat weggooien zou informatie verspillen.
 GUT_MIX_VANGNET = {"meervoudig": "2:1", "glucoserijk": "circa 4:1"}
 GUT_MIX_ONBEKEND = "2:1"   # als ook het type niets zegt
+# Types zonder koolhydraten van betekenis. Een eiwitreep of een
+# elektrolytentablet hoort de verhouding niet te verschuiven, in geen van
+# beide richtingen; ze tellen dus helemaal niet mee.
+GUT_MIX_GEEN_KH = ("eiwit", "vocht")
 GUT_MIX_ADVIES = ((95, "2 op 1", "2:1"), (115, "1 op 0,8", "1:0.8"), (None, "1 op 1", "1:1"))
 
 
@@ -4732,7 +4736,10 @@ def _gut_mix_uit_sessie(supabase, user_id: str, producten: list, momenten: list)
         if not b:
             compleet = False
             continue
-        if b.get("kh_type") == "enkelvoudig":
+        soort = str(b.get("kh_type") or "").strip().lower()
+        if soort in GUT_MIX_GEEN_KH:
+            continue
+        if soort == "enkelvoudig":
             glucose += kh
             continue
         aandeel = _gut_mix_aandeel(b)
@@ -5321,6 +5328,10 @@ def _gut_regel_samenstelling(supabase, user_id: str, producten: list,
             return _gut_regel("Samenstelling", False, gelogd, mix["instructie"])
         if bezwaren:
             return _gut_regel("Samenstelling", False, gelogd, bezwaren[0])
+        if aandeel is None:
+            # niets met koolhydraten gelogd: over de verhouding valt niets te
+            # zeggen, dus velt de regel geen oordeel
+            return _gut_regel("Samenstelling", None, gelogd)
         return _gut_regel("Samenstelling", True, gelogd)
     except Exception as e:
         print(f"[GUT-MIX-V4] samenstelling mislukt: {e}")
