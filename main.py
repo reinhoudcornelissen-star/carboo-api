@@ -5801,10 +5801,12 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         if comfort <= 1:
             kaart.append(_gut_regel_maaltijd(data.get("maaltijd_uren_voor")))
         comfort_regels = list(kaart)
-        smaak_regels = ((_gut_regels_smaak(supabase, user.id, producten, gelogde_momenten,
-                                           comfort_laag=True)
-                         + [_gut_smaak_uitleg(smaak, True)])
-                        if smaak_laag else [])
+        # GUT-KAART-VOLGORDE-V1 — eerst alle regels, daarna de toelichtingen. Een
+        # toelichting hoort bij de kaart als geheel, niet bij de regel waar ze
+        # toevallig achter staat.
+        smaak_regels = (_gut_regels_smaak(supabase, user.id, producten, gelogde_momenten,
+                                          comfort_laag=True) if smaak_laag else [])
+        uitleg = [_gut_smaak_uitleg(smaak, True)] if smaak_laag else []
 
         if keer == 1:
             # Klopt alles wat gelogd is, dan geen fout maar training. Klopt er
@@ -5814,13 +5816,13 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             # fout; ze telt alleen niet mee in de opsomming van wat klopte
             alles_klopt = all(r.get("goed") is not False for r in comfort_regels)
             if alles_klopt:
-                kaart.append(_gut_verklaring([r for r in comfort_regels
-                                              if r.get("goed") is True]))
+                uitleg.insert(0, _gut_verklaring([r for r in comfort_regels
+                                                  if r.get("goed") is True]))
             return bewaar("maag_herhaal",
                 f"Maagcomfort {comfort} op {doel} g per uur. "
                 + ("Herhaal: je darm moet nog wennen." if alles_klopt
                    else "Herhaal en pas aan wat de kaart aangeeft."),
-                "mislukt", kaart + smaak_regels)
+                "mislukt", kaart + smaak_regels + uitleg)
 
         if keer == 2:
             # eerst het formaat aanpassen, niet de dosis
@@ -5828,12 +5830,12 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             return bewaar("maag_formaat",
                 f"Tweede keer maagcomfort onder de {GUT_COMFORT_GRENS} op {doel} g per uur. "
                 f"Pas het formaat aan.",
-                "mislukt", kaart + smaak_regels)
+                "mislukt", kaart + smaak_regels + uitleg)
 
         return bewaar("maag_vast",
             f"Derde keer maagcomfort onder de {GUT_COMFORT_GRENS} op {doel} g per uur. "
             f"Het protocol loopt hier vast.",
-            "mislukt", kaart + smaak_regels + [_gut_vastgelopen(doel)])
+            "mislukt", kaart + smaak_regels + [_gut_vastgelopen(doel)] + uitleg)
 
     if smaak_laag:
         # GUT-SMAAK-V2 — fysiologisch ging het goed, dus dit moment telt mee en
