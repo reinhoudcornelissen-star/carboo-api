@@ -5226,7 +5226,7 @@ def _gut_regel(label: str, goed, gelogd: str, instructie: str = ""):
     alleen vaststelt wat er was: die velt geen oordeel, krijgt geen symbool in
     het scherm, en mag wel een neutrale toelichting dragen."""
     return {"label": label, "goed": None if goed is None else bool(goed),
-            "gelogd": gelogd, "instructie": "" if goed is True else instructie}
+            "gelogd": gelogd, "instructie": instructie}
 
 
 # ─── GUT-TIMING-V2 ─────────────────────────────────────────────────────
@@ -5243,6 +5243,9 @@ def _gut_regel(label: str, goed, gelogd: str, instructie: str = ""):
 # zijn laatste inname wegpoetsen.
 GUT_TIMING_GAT = 35        # minuten zonder koolhydraten die nog mogen
 GUT_TIMING_MIN_KH = 10     # gram; minder dicht geen gat
+# De regel heet Spreiding, niet Timing: ze zegt niet alleen wanneer je nam,
+# maar waarom dat uitmaakt. Deze zin staat onder elk oordeel dat iets vraagt.
+GUT_TIMING_UITLEG = "Je maag laat 60 tot 90 g koolhydraten per uur door."
 
 
 def _gut_regel_timing(momenten: list, duur_min: float):
@@ -5260,10 +5263,11 @@ def _gut_regel_timing(momenten: list, duur_min: float):
 
     if not tijden:
         if iets_gelogd:
-            return _gut_regel("Timing", False, f"niets van {GUT_TIMING_MIN_KH} g of meer",
-                              f"Verdeel je koolhydraten over porties van minstens "
-                              f"{GUT_TIMING_MIN_KH} g, om de 20 tot 30 minuten.")
-        return _gut_regel("Timing", False, "niets gelogd",
+            return _gut_regel("Spreiding", False, f"niets van {GUT_TIMING_MIN_KH} g of meer",
+                              f"{GUT_TIMING_UITLEG} Daar kom je niet met blokjes van een paar "
+                              f"gram: neem porties van minstens {GUT_TIMING_MIN_KH} g, om de "
+                              f"20 tot 30 minuten.")
+        return _gut_regel("Spreiding", False, "niets gelogd",
                           "Noteer per moment wat je nam, met de grammen erbij.")
 
     try:
@@ -5279,15 +5283,22 @@ def _gut_regel_timing(momenten: list, duur_min: float):
 
     grootste = max(g[1] for g in gaten)
     plekken = [g[0] for g in gaten if g[1] == grootste]
-    gelogd = f"langste gat {int(round(grootste))} min"
+    minuten = int(round(grootste))
     if grootste <= GUT_TIMING_GAT:
-        return _gut_regel("Timing", True, gelogd)
+        return _gut_regel("Spreiding", True, f"om de {minuten} min",
+                          "Je nam gelijkmatig door de hele training.")
     # meerdere even grote gaten: dan zit het probleem overal, dus de algemene
     plek = plekken[0] if len(plekken) == 1 else "midden"
-    return _gut_regel("Timing", False, gelogd, {
-        "einde": "Neem ook in het laatste halfuur koolhydraten in.",
-        "begin": "Begin binnen het eerste halfuur met koolhydraten.",
-        "midden": "Verdeel je inname: nooit langer dan een halfuur zonder koolhydraten.",
+    gelogd = {"einde": f"laatste {minuten} min zonder inname",
+              "begin": f"eerste {minuten} min zonder inname",
+              "midden": f"{minuten} min zonder inname"}[plek]
+    return _gut_regel("Spreiding", False, gelogd, {
+        "einde": f"{GUT_TIMING_UITLEG} Alles in een keer overbelast hem en laat daarna een "
+                 f"leeg uur over. Neem ook in het laatste halfuur koolhydraten.",
+        "begin": f"{GUT_TIMING_UITLEG} Begin vroeg en verdeel: neem binnen het eerste "
+                 f"halfuur je eerste koolhydraten.",
+        "midden": f"{GUT_TIMING_UITLEG} Neem daarom om de 20 tot 30 minuten iets, nooit "
+                  f"langer dan een halfuur niets.",
     }[plek])
 
 
