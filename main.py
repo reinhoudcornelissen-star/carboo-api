@@ -5404,6 +5404,26 @@ def _gut_verklaring(regels: list):
 GUT_MAAG_SOORTEN = ("maag_herhaal", "maag_formaat", "maag_vast")
 
 
+def _gut_externe_keer(momenten: list, doel: int, moment_id: str) -> int:
+    """GUT-EXTERN-V1 — hoe vaak er op deze dosis NA ELKAAR iets bijzonders
+    gemeld werd, het huidige moment niet meegeteld.
+
+    Iets bijzonders (ziek, hitte, een lekke band) laat een moment niet
+    meetellen en houdt de dosis gelijk. Twee keer na elkaar mag; daarna wordt
+    het moment gewoon beoordeeld, anders blijft de reeks eindeloos op dezelfde
+    dosis hangen. Een ander advies ertussen zet de telling op nul, en een
+    andere dosis telt apart."""
+    keer = 0
+    for x in sorted(momenten or [], key=lambda x: int(x.get("nummer") or 0)):
+        if x.get("id") == moment_id or int(x.get("doel_kh_uur") or 0) != int(doel):
+            continue
+        if x.get("advies_soort") == "telt_niet":
+            keer += 1
+        elif x.get("advies_soort"):
+            keer = 0
+    return keer
+
+
 def _gut_maag_pogingen(momenten: list, doel: int, moment_id: str) -> int:
     """Eerdere mislukte pogingen door maagcomfort op deze dosis in de reeks.
 
@@ -5699,14 +5719,16 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     in_reeks = [x for x in _alle if x["reeks"] == reeks]
 
     # GUT-SMAAK-V2 — regels die bij elk advies horen, zoals een smaak die
-    # tegenviel. Ze sturen de beslisboom niet; ze staan op de kaart.
+    # tegenviel of iets bijzonders dat toch meetelt. Ze sturen de beslisboom
+    # niet; ze staan op de kaart. Wat in extra_tekst staat gaat mee in de
+    # bewaarde zin, want oude schermen en de geschiedenis van voor de
+    # adviesKAART tonen alleen die ene zin.
     extra_regels: list = []
+    extra_tekst: list = []
 
     def bewaar(soort, tekst, status, regels=None):
-        # De bewaarde tekst zegt het ook. Oude schermen en de geschiedenis van
-        # voor de adviesKAART tonen alleen die ene zin.
-        if extra_regels and status == "geslaagd":
-            tekst = f"{tekst} De smaak viel tegen."
+        if extra_tekst:
+            tekst = " ".join([tekst] + extra_tekst)
 
         # welke dosis het volgende testmoment krijgt, zodat de kaart het
         # kan tonen voor je op de knop drukt.
@@ -5768,11 +5790,19 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         uit["kaart_bewaard"] = kaart_bewaard
         return uit
 
-    # 1. externe factor
+    # 1. externe factor — GUT-EXTERN-V1: hoogstens twee keer na elkaar op
+    # dezelfde dosis. De derde keer wordt het moment gewoon beoordeeld, met
+    # een regel op de kaart die zegt dat het meetelt.
     if data.get("externe_factor"):
-        return bewaar("telt_niet",
-            f"Iets bijzonders gemeld. Telt niet mee; herhaal {doel} g per uur.",
-            "telt_niet")
+        if _gut_externe_keer(in_reeks, doel, moment_id) < 2:
+            return bewaar("telt_niet",
+                f"Iets bijzonders gemeld. Telt niet mee; herhaal {doel} g per uur.",
+                "telt_niet")
+        extra_regels.append(_gut_regel(
+            "Externe factor", False, str(data.get("externe_factor"))[:60],
+            "Derde keer na elkaar iets bijzonders op deze dosis. Dit moment telt "
+            "gewoon mee, anders kom je nooit verder."))
+        extra_tekst.append("Derde keer iets bijzonders; dit moment telt mee.")
 
     # 2. dosis gehaald?
     if kh_uur < doel * GUT_DOSIS_MARGE:
@@ -5844,6 +5874,7 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         extra_regels.extend(_gut_regels_smaak(supabase, user.id, producten,
                                               gelogde_momenten))
         extra_regels.append(_gut_smaak_uitleg(smaak, False))
+        extra_tekst.append("De smaak viel tegen.")
 
     # 4. geslaagd: een geslaagd moment telt altijd mee.
     #
