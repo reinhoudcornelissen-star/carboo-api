@@ -4505,6 +4505,18 @@ GUT_STAP = 15
 GUT_MIN_DUUR = 75
 GUT_COMFORT_GRENS = 6
 GUT_DOSIS_MARGE = 0.9   # 90 procent van het doel volstaat
+GUT_DOSIS_BOVEN = 1.1   # meer dan tien procent boven de opdracht is te veel
+GUT_PORTIE_DEEL = 0.5   # een moment boven de helft van de uurdosis is te veel ineens
+# Vocht bij de koolhydraten. Waarschuwen pas bij een flinke afwijking, en
+# adviseren naar iets wat een sporter werkelijk drinkt: 330 ml bij een gel
+# van 40 g drinkt niemand, 270 ml wel.
+GUT_CONC_WAARSCHUW = 20.0   # g koolhydraten per 100 ml
+GUT_CONC_DOEL = 15.0        # waar het advies naartoe rekent
+GUT_DIK_DEEL = 0.70         # aandeel gel en vast waarboven het opvalt
+GUT_SOORT_VANAF = 90        # boven deze dosis telt de soort koolhydraten
+# Bij klachten staat de waarschijnlijkste oorzaak bovenaan, in deze volgorde.
+GUT_OORZAAK_VOLGORDE = ("Dosis", "Samenstelling", "Vocht", "Spreiding",
+                        "Structuur", "Maaltijd")
 
 # ─── GUT-STAP-V3 ───────────────────────────────────────────────────────
 # Stappen van tien gram overal maakten van 20 naar 115 twintig
@@ -4677,12 +4689,26 @@ def _gut_mix_opname(dosis, fructose_aandeel) -> float:
     return min(d * (1 - f), GUT_GLUCOSE_MAX) + min(d * f, _gut_fructose_max(d))
 
 
+# Zoals het op de verpakking staat, niet zoals de code rekent: een mix van een
+# derde fructose heet 2 op 1, niet 1 op 0,5. Een gewogen mengsel valt zelden
+# precies op een bekende verhouding, dus dan de dichtstbijzijnde, met ongeveer.
+GUT_MIX_NOTATIE = (("2 op 1", "2:1"), ("1 op 0,8", "1:0.8"), ("1 op 1", "1:1"),
+                   ("4 op 1", "circa 4:1"), ("5 op 1", "circa 5:1"))
+
+
 def _gut_mix_tekst(aandeel) -> str:
-    """Een fructoseaandeel als verhouding glucose op fructose."""
+    """Een fructoseaandeel in de notatie van de verpakking."""
     f = min(0.999, max(0.0, float(aandeel or 0)))
     if f <= 0:
         return "alleen glucose"
-    return f"1 op {f / (1 - f):.1f}".replace(".", ",")
+    beste, afstand = None, 1.0
+    for naam, sleutel in GUT_MIX_NOTATIE:
+        d = abs(f - FRUCTOSE_AANDEEL[sleutel])
+        if d < afstand:
+            beste, afstand = naam, d
+    if afstand <= 0.005:
+        return beste
+    return f"ongeveer {beste}"
 
 
 def _gut_mix_advies(dosis, sleutel: bool = False) -> str:
@@ -4773,11 +4799,6 @@ def _gut_mix_regel(supabase, user_id: str, producten: list, momenten: list, dosi
     return _gut_regel("Samenstelling", False, gelogd,
                       f"Voor {d} g per uur past {naam} beter: daarvan neemt je darm "
                       f"{int(round(beter))} g op, van jouw mix {int(round(opname))} g.")
-
-
-def _gut_mix_regels(supabase, user_id: str, producten: list, momenten: list, dosis):
-    r = _gut_mix_regel(supabase, user_id, producten, momenten, dosis)
-    return [r] if r else []
 
 
 # ─── GUT-TESTMOMENTEN-API-V1 ───────────────────────────────────────────
@@ -5276,98 +5297,151 @@ def _gut_regel_timing(momenten: list, duur_min: float):
         duur = 0.0
     einde = max(duur, float(tijden[-1]))
 
-    gaten = [("begin", float(tijden[0]))]
+    gaten = [("begin", float(tijden[0]), 0.0, float(tijden[0]))]
     for a, b in zip(tijden, tijden[1:]):
-        gaten.append(("midden", float(b - a)))
-    gaten.append(("einde", einde - tijden[-1]))
+        gaten.append(("midden", float(b - a), float(a), float(b)))
+    gaten.append(("einde", einde - tijden[-1], float(tijden[-1]), einde))
 
     grootste = max(g[1] for g in gaten)
-    plekken = [g[0] for g in gaten if g[1] == grootste]
+    winnaars = [g for g in gaten if g[1] == grootste]
     minuten = int(round(grootste))
     if grootste <= GUT_TIMING_GAT:
-        return _gut_regel("Spreiding", True, f"om de {minuten} min",
-                          "Je nam gelijkmatig door de hele training.")
+        # het gemiddelde zegt hier meer dan het grootste gat: je nam om de 20 min
+        tussen = [b - a for a, b in zip(tijden, tijden[1:])]
+        gem = int(round(sum(tussen) / len(tussen))) if tussen else minuten
+        return _gut_regel("Spreiding", True, f"om de {gem} min",
+                          "Gelijkmatig verdeeld over de training.")
     # meerdere even grote gaten: dan zit het probleem overal, dus de algemene
-    plek = plekken[0] if len(plekken) == 1 else "midden"
-    gelogd = {"einde": f"laatste {minuten} min zonder inname",
-              "begin": f"eerste {minuten} min zonder inname",
-              "midden": f"{minuten} min zonder inname"}[plek]
+    plek = winnaars[0][0] if len(winnaars) == 1 else "midden"
+    if plek == "midden" and len(winnaars) == 1:
+        # zeg waar het gat zat, anders lijkt de tekst algemeen
+        gelogd = (f"{minuten} min zonder inname, tussen min {int(winnaars[0][2])} "
+                  f"en {int(winnaars[0][3])}")
+    else:
+        gelogd = {"einde": f"laatste {minuten} min zonder inname",
+                  "begin": f"eerste {minuten} min zonder inname",
+                  "midden": f"{minuten} min zonder inname"}[plek]
     return _gut_regel("Spreiding", False, gelogd, {
-        "einde": f"{GUT_TIMING_UITLEG} Alles in een keer overbelast hem en laat daarna een "
-                 f"leeg uur over. Neem ook in het laatste halfuur koolhydraten.",
-        "begin": f"{GUT_TIMING_UITLEG} Begin vroeg en verdeel: neem binnen het eerste "
-                 f"halfuur je eerste koolhydraten.",
-        "midden": f"{GUT_TIMING_UITLEG} Neem daarom om de 20 tot 30 minuten iets, nooit "
-                  f"langer dan een halfuur niets.",
+        "einde": "Neem ook in het laatste halfuur koolhydraten.",
+        "begin": "Begin binnen het eerste halfuur met koolhydraten.",
+        "midden": "Neem om de 20 tot 30 minuten iets.",
     }[plek])
 
 
-def _gut_regel_samenstelling(supabase, user_id: str, producten: list,
-                             momenten: list, doel: int):
-    """Een regel over de samenstelling bij DEZE dosis.
-
-    Over de verhouding beslist het mixmodel, zodat geen twee regels elkaar
-    tegenspreken: vroeger zei de ene dat er meer fructose nodig was en de
-    andere, over dezelfde mix, dat het er te veel waren. Daarnaast kijkt ze
-    naar de concentratie en de glucosebron."""
+# ─── GUT-ML-V1 ─────────────────────────────────────────────────────────
+# Milliliters heten op twee plekken anders: het scherm stuurt volume_ml mee
+# in de payload, en de tabel carboo_gut_producten bewaart hoeveelheid_ml_g.
+# Allebei de namen staan in bewaarde rijen, dus hernoemen zou de geschiedenis
+# breken. Daarom leest alleen deze functie ze allebei, en gebruikt de rest
+# van de beslisboom haar. Wie een nieuwe regel schrijft hoeft het verschil
+# dus niet te kennen.
+def _gut_ml(moment) -> float:
+    """De milliliters van een voedingsmoment, onder welke naam ook."""
+    if not isinstance(moment, dict):
+        return 0.0
     try:
-        bib = _gut_bib_sportvoeding(supabase, user_id)
-        bezwaren, gevonden, conc_uit = [], 0, ""
-        for naam in (producten or []):
-            b = bib.get(str(naam).strip().lower())
-            if not b:
-                continue
-            gevonden += 1
-            conc = b.get("concentratie") or ""
-            if conc and not conc_uit:
-                conc_uit = conc
-            if conc == "geconcentreerd":
-                ml = b.get("water_nodig_ml") or 175
-                bezwaren.append(f"Neem er {ml} ml water bij, of kies een isotone vorm.")
-            if "glucosestroop" in str(b.get("kh_glucosebron") or ""):
-                bezwaren.append("Kies maltodextrine in plaats van glucosestroop.")
-
-        # geen opdracht aan de sporter om de bibliotheek bij te werken: dat is
-        # beheerderswerk, niet het zijne
-        if not gevonden:
-            return _gut_regel("Samenstelling", None, "onbekend",
-                              "De app kent deze producten niet.")
-
-        aandeel, _compleet = _gut_mix_uit_sessie(supabase, user_id, momenten)
-        gelogd = _gut_mix_tekst(aandeel) if aandeel is not None else "verhouding onbekend"
-        if conc_uit:
-            gelogd = f"{gelogd}, {conc_uit}"
-
-        mix = _gut_mix_regel(supabase, user_id, producten, momenten, doel)
-        if mix is not None and mix["goed"] is False:
-            return _gut_regel("Samenstelling", False, gelogd, mix["instructie"])
-        if bezwaren:
-            return _gut_regel("Samenstelling", False, gelogd, bezwaren[0])
-        if aandeel is None:
-            # niets met koolhydraten gelogd: over de verhouding valt niets te
-            # zeggen, dus velt de regel geen oordeel
-            return _gut_regel("Samenstelling", None, gelogd)
-        return _gut_regel("Samenstelling", True, gelogd)
-    except Exception as e:
-        print(f"[GUT-MIX-V4] samenstelling mislukt: {e}")
-        return _gut_regel("Samenstelling", None, "onbekend",
-                          "De app kon de samenstelling niet nakijken.")
+        return float(moment.get("volume_ml") or moment.get("hoeveelheid_ml_g") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
-def _gut_regel_vocht(momenten: list, duur_min: float):
-    """Milliliter per uur, met de band 500 tot 900."""
+def _gut_kh(moment) -> float:
+    """De koolhydraten van een voedingsmoment."""
+    if not isinstance(moment, dict):
+        return 0.0
     try:
-        ml = 0.0
-        for m in (momenten or []):
-            if isinstance(m, dict):
-                ml += float(m.get("volume_ml") or m.get("hoeveelheid_ml_g") or 0)
+        return float(moment.get("kh_gram") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _gut_concentratie(momenten: list):
+    """Gram koolhydraten per 100 ml, uit wat de sporter werkelijk mengde.
+
+    Geeft None als er geen vocht of geen koolhydraten gelogd zijn. Het getal
+    zelf komt niet op de kaart: daar staat een richtlijn per portie, want
+    g per 100 ml zegt een sporter niets."""
+    kh = sum(_gut_kh(m) for m in (momenten or []))
+    ml = sum(_gut_ml(m) for m in (momenten or []))
+    if ml <= 0 or kh <= 0:
+        return None
+    return kh / ml * 100
+
+
+def _gut_regel_samenstelling(momenten: list, doel: int):
+    """Twee controles op volgorde, en alleen bij een laag maagcomfort: de
+    portiegrootte, en het vocht bij de koolhydraten.
+
+    Ze verklaren klachten. Wie 80 g in een keer nam met maagcomfort 8 heeft
+    geen probleem en hoeft geen advies; daarom zwijgt deze regel boven de 6.
+    De bibliotheek komt er niet meer aan te pas: wat telt is wat hij nam."""
+    grootste, wanneer = 0.0, 0
+    porties = []
+    for m in (momenten or []):
+        kh = _gut_kh(m)
+        if kh <= 0:
+            continue
+        porties.append(kh)
+        if kh > grootste:
+            grootste, wanneer = kh, int((m or {}).get("tijdstip_min") or 0)
+    if not porties:
+        return None
+
+    grens = max(15.0, int(doel or 0) * GUT_PORTIE_DEEL)
+    if grootste > grens:
+        delen = max(2, int(-(-grootste // grens)))
+        return _gut_regel("Samenstelling", False, f"{int(round(grootste))} g in een keer",
+                          f"Je nam {int(round(grootste))} g in een keer op min {wanneer}. "
+                          f"Verdeel dat over {delen} porties van ongeveer "
+                          f"{int(round(grootste / delen))} g.")
+
+    conc = _gut_concentratie(momenten)
+    if conc is not None and conc > GUT_CONC_WAARSCHUW:
+        # geen g per 100 ml op de kaart: een richtlijn per portie zegt de sporter meer
+        typisch = int(round(sum(porties) / len(porties)))
+        richt = int(round(typisch / GUT_CONC_DOEL * 100 / 10) * 10)
+        return _gut_regel("Samenstelling", False, "te weinig vocht bij je koolhydraten",
+                          f"Neem meer vocht bij je koolhydraten. Reken op ongeveer "
+                          f"{richt} ml per portie van {typisch} g.")
+    return None
+
+
+def _gut_regel_soort(supabase, user_id: str, producten: list, momenten: list, doel: int):
+    """De soort koolhydraten, alleen boven 90 g per uur: daar gaat het erom of
+    de volgende dosis haalbaar is. Daaronder zegt de app hier niets over."""
+    if int(doel or 0) <= GUT_SOORT_VANAF:
+        return None
+    aandeel, compleet = _gut_mix_uit_sessie(supabase, user_id, momenten)
+    if aandeel is None or not compleet:
+        return None
+    tekst = _gut_mix_tekst(aandeel)
+    if _gut_mix_opname(doel, aandeel) >= doel * (1 - GUT_MIX_MARGE):
+        return _gut_regel("Soort koolhydraten", True, tekst)
+    return _gut_regel("Soort koolhydraten", False, tekst,
+                      f"Al je bronnen zijn {tekst}. Boven {GUT_SOORT_VANAF} g per uur heb je "
+                      f"meer fructose nodig, zoals {_gut_mix_advies(doel)}.")
+
+
+def _gut_regel_vocht(momenten: list, duur_min: float, comfort_laag: bool = False):
+    """Milliliter per uur, met de band 500 tot 900.
+
+    Het waterveld is niet verplicht: de sporter mag zelf ondervinden wat werkt.
+    Logt hij niets en had hij geen klachten, dan zegt de app hier niets over.
+    Zijn er wel klachten, dan komt weinig drinken als mogelijke oorzaak op de
+    kaart, met de vraag het volgende keer te noteren."""
+    try:
+        ml = sum(_gut_ml(m) for m in (momenten or []))
         if duur_min <= 0:
             return _gut_regel("Vocht", False, "duur onbekend",
                               "Vul de duur in, dan rekent de app je vocht per uur uit.")
         per_uur = round(ml / duur_min * 60)
         if per_uur <= 0:
+            if not comfort_laag:
+                return None
             return _gut_regel("Vocht", False, "niets gelogd",
-                              f"Drink {GUT_VOCHT_MIN} tot 750 ml per uur.")
+                              "Weinig drinken bij je koolhydraten is een veelvoorkomende "
+                              "oorzaak van maagklachten. Noteer volgende keer hoeveel je "
+                              "dronk, dan kunnen we het nakijken.")
         gelogd = f"{per_uur} ml/uur"
         if per_uur < GUT_VOCHT_MIN:
             return _gut_regel("Vocht", False, gelogd,
@@ -5409,55 +5483,36 @@ def _gut_regel_maaltijd(uren):
 # vaak een bewuste keuze, en "kies iets vloeiends" is dan geen smaakadvies.
 # Bij een lage smaak stelt de regel alleen vast wat er was.
 
-def _gut_regel_structuur(supabase, user_id: str, producten: list, oordeel: bool):
-    """De structuur van wat hij nam, uit de bibliotheek. Met een oordeel bij
-    een laag maagcomfort, zonder oordeel bij een lage smaak."""
-    stroperig, bekend = False, 0
-    try:
-        bib = _gut_bib_sportvoeding(supabase, user_id)
-        for naam in (producten or []):
-            b = bib.get(str(naam).strip().lower())
-            if not b:
-                continue
-            bekend += 1
-            if b.get("viscositeit") == "stroperig":
-                stroperig = True
-    except Exception as e:
-        print(f"[GUT-SMAAK-V2] structuur mislukt: {e}")
+def _gut_regel_structuur(momenten: list):
+    """De verhouding vloeibaar tegenover gel en vast, gewogen op de grammen.
+    Alleen bij een laag maagcomfort, want boven de 6 is er niets te verklaren.
 
-    if not bekend:
-        return _gut_regel("Structuur", None, "onbekend",
-                          "De app kent de structuur van dit product niet.")
-    if not oordeel:
-        return _gut_regel("Structuur", None, "stroperig" if stroperig else "vloeiend")
-    if stroperig:
-        return _gut_regel("Structuur", False, "stroperig",
-                          "Kies iets vloeiends; dat drinkt makkelijker weg als je moe wordt.")
-    return _gut_regel("Structuur", True, "vloeiend")
-
-
-def _gut_regel_vorm(momenten: list):
-    """De vorm zit in wat hij logde, niet in de bibliotheek. Nam hij maar een
-    vorm, dan noemt de regel de twee andere, als voorstel."""
-    vormen = []
-    for m in (momenten or []):
-        if not isinstance(m, dict):
-            continue
-        if float(m.get("kh_gram") or 0) <= 0:
-            continue
-        c = str(m.get("categorie") or "").strip().lower()
-        if c in ("gel", "vast", "drank") and c not in vormen:
-            vormen.append(c)
+    De viscositeit uit de bibliotheek komt er niet meer aan te pas: of een gel
+    stroperig heet zegt minder dan hoeveel van je koolhydraten eruit kwamen.
+    Zit er sportdrank in de sessie, dan valt "kies iets vloeiends" dus weg."""
     namen = {"gel": "gel", "vast": "vast", "drank": "drank"}
-    voorstel = {"gel": "Naast je gel kan iets vasts of een drank helpen.",
-                "drank": "Naast je drank kan een gel of iets vasts helpen.",
-                "vast": "Naast je vaste voeding kan een gel of een drank helpen."}
-    if not vormen:
-        return _gut_regel("Vorm", False, "niets gelogd",
-                          "Noteer per moment wat je nam.")
-    if len(vormen) == 1:
-        return _gut_regel("Vorm", False, f"alles {namen[vormen[0]]}", voorstel[vormen[0]])
-    return _gut_regel("Vorm", True, " + ".join(namen[v] for v in vormen))
+    gram: dict = {}
+    for m in (momenten or []):
+        kh = _gut_kh(m)
+        if kh <= 0:
+            continue
+        c = str((m or {}).get("categorie") or "").strip().lower()
+        if c in namen:
+            gram[c] = gram.get(c, 0.0) + kh
+    if not gram:
+        return None
+
+    totaal = sum(gram.values())
+    dik = gram.get("gel", 0.0) + gram.get("vast", 0.0)
+    op_volgorde = sorted(gram.items(), key=lambda x: -x[1])
+    if dik > totaal * GUT_DIK_DEEL:
+        welke = "gel" if gram.get("gel", 0.0) >= gram.get("vast", 0.0) else "vast"
+        return _gut_regel("Structuur", False,
+                          f"overwegend {welke}: {int(round(dik))} van de {int(round(totaal))} g",
+                          "Een deel als drank gaat makkelijker door een darm die nog moet "
+                          "wennen.")
+    return _gut_regel("Structuur", True,
+                      " · ".join(f"{namen[c]} {int(round(g))} g" for c, g in op_volgorde))
 
 
 def _gut_smaak_uitleg(smaak, comfort_laag: bool) -> dict:
@@ -5472,14 +5527,6 @@ def _gut_smaak_uitleg(smaak, comfort_laag: bool) -> dict:
                  f"tegenstaan. Een ander product of een andere smaak kan helpen.")
     return {"type": "verklaring", "label": "", "goed": None, "gelogd": "",
             "instructie": "", "tekst": tekst}
-
-
-def _gut_regels_smaak(supabase, user_id: str, producten: list, momenten: list,
-                      comfort_laag: bool = False):
-    """De regels die bij een lage smaak op de kaart komen. Bij een laag
-    maagcomfort staat Structuur al tussen de maagregels, met oordeel."""
-    eerst = [] if comfort_laag else [_gut_regel_structuur(supabase, user_id, producten, False)]
-    return eerst + [_gut_regel_vorm(momenten)]
 
 
 # ─── GUT-VERKLARING-V1 ─────────────────────────────────────────────────
@@ -5552,6 +5599,26 @@ def _gut_dosis_plan(doel: int, duur_min) -> str:
             f"Samen {int(round(nodig))} g over {int(round(duur))} minuten.")
 
 
+def _gut_regel_dosis(kh_uur: float, doel: int, duur_min, momenten: list):
+    """Nam hij wat er gevraagd werd, in beide richtingen?
+
+    Deze regel staat altijd op de kaart: ze gaat over de uitvoering van de
+    opdracht, niet over klachten. Te weinig was al zichtbaar, te veel niet —
+    en wie anderhalf keer zijn opdracht nam kreeg een kaart over zijn gels,
+    terwijl de verklaring in de dosis zat."""
+    per_uur = round(kh_uur or 0)
+    gelogd = f"{per_uur} van {doel} g/uur"
+    nodig = int(round(int(doel or 0) * float(duur_min or 0) / 60))
+    totaal = int(round(sum(_gut_kh(m) for m in (momenten or []))))
+    if kh_uur < doel * GUT_DOSIS_MARGE:
+        return _gut_regel("Dosis", False, gelogd, _gut_dosis_plan(doel, duur_min))
+    if kh_uur > doel * GUT_DOSIS_BOVEN:
+        return _gut_regel("Dosis", False, gelogd,
+                          f"Je nam {totaal} g, de opdracht was {nodig} g ({doel} g per uur). "
+                          f"Het protocol test een dosis tegelijk.")
+    return _gut_regel("Dosis", True, gelogd)
+
+
 def _gut_externe_keer(momenten: list, doel: int, moment_id: str) -> int:
     """GUT-EXTERN-V1 — hoe vaak er op deze dosis NA ELKAAR iets bijzonders
     gemeld werd, het huidige moment niet meegeteld.
@@ -5589,36 +5656,6 @@ def _gut_maag_pogingen(momenten: list, doel: int, moment_id: str) -> int:
                 and x.get("id") != moment_id
                 and int(x.get("doel_kh_uur") or 0) == int(doel)
                 and x.get("advies_soort") in GUT_MAAG_SOORTEN])
-
-
-def _gut_regel_formaat(momenten: list, duur_min: float):
-    """Tweede keer laag maagcomfort: een concrete instructie over het formaat."""
-    vormen, ml = [], 0.0
-    for m in (momenten or []):
-        if not isinstance(m, dict):
-            continue
-        ml += float(m.get("volume_ml") or m.get("hoeveelheid_ml_g") or 0)
-        if float(m.get("kh_gram") or 0) <= 0:
-            continue
-        c = str(m.get("categorie") or "").strip().lower()
-        if c in ("gel", "vast", "drank") and c not in vormen:
-            vormen.append(c)
-    per_uur = round(ml / duur_min * 60) if duur_min and duur_min > 0 else 0
-
-    vast = [v for v in vormen if v in ("vast", "gel")]
-    if vast:
-        namen = {"vast": "vaste voeding", "gel": "gels"}
-        welke = " en ".join(namen[v] for v in vast)
-        return _gut_regel("Formaat", False, " + ".join(vormen),
-                          f"Vervang je {welke} door een drank: vloeibaar gaat makkelijker "
-                          f"door een darm die nog moet wennen.")
-    gelogd = f"alles drank · {per_uur} ml/uur" if vormen else f"{per_uur} ml/uur"
-    if per_uur < 700:
-        return _gut_regel("Formaat", False, gelogd,
-                          "Verdun je drank: dezelfde koolhydraten met meer water erbij, "
-                          "richting 700 ml per uur.")
-    return _gut_regel("Formaat", False, gelogd,
-                      "Neem dezelfde koolhydraten in kleinere slokken, vaker verspreid over het uur.")
 
 
 def _gut_vastgelopen(doel: int) -> dict:
@@ -5873,7 +5910,6 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     # adviesKAART tonen alleen die ene zin.
     extra_regels: list = []
     extra_tekst: list = []
-
     def bewaar(soort, tekst, status, regels=None):
         if extra_tekst:
             tekst = " ".join([tekst] + extra_tekst)
@@ -5915,9 +5951,18 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             scores.append({"label": "Smaak", "waarde": smaak,
                            "goed": smaak >= GUT_COMFORT_GRENS})
 
-        uit = {"soort": soort, "advies": tekst, "status": status,
+        # GUT-KAART-V5 — de basis, voor er een regel getoond wordt: waar ging
+        # deze training over, en wat ging erin?
+        basis = (f"{int(round(duur))} min \u00b7 opdracht {doel} g/uur \u00b7 "
+                 f"{int(round(sum(_gut_kh(m) for m in gelogde_momenten)))} g")
+        ml_totaal = int(round(sum(_gut_ml(m) for m in gelogde_momenten)))
+        if ml_totaal > 0:
+            basis += f" \u00b7 {ml_totaal} ml"
+
+        uit = {"soort": soort, "advies": tekst, "status": status, "basis": basis,
                "doel_nu": doel, "doel_volgende": volgende_dosis,
-               "scores": scores, "regels": list(regels or []) + extra_regels,
+               "scores": scores,
+               "regels": list(regels or []) + extra_regels,
                "volgende": volgende}
 
         # GUT-GESCHIEDENIS-V1 — de kaart zoals de sporter hem nu ziet. Een oud
@@ -5945,84 +5990,74 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         if _gut_externe_keer(in_reeks, doel, moment_id) < 2:
             return bewaar("telt_niet",
                 f"Iets bijzonders gemeld. Telt niet mee; herhaal {doel} g per uur.",
-                "telt_niet")
+                "telt_niet")  # zonder regels: dit moment telt niet mee
         extra_regels.append(_gut_regel(
             "Externe factor", False, str(data.get("externe_factor"))[:60],
             "Derde keer na elkaar iets bijzonders op deze dosis. Dit moment telt "
             "gewoon mee, anders kom je nooit verder."))
         extra_tekst.append("Derde keer iets bijzonders; dit moment telt mee.")
 
-    # 2. dosis niet gehaald? GUT-DOSIS-V2 — geen herhaling meer: het moment telt
-    # mee zoals het is, en de kaart zegt hoe hij het de volgende keer plant.
-    if kh_uur < doel * GUT_DOSIS_MARGE:
-        extra_regels.append(_gut_regel(
-            "Dosis", False, f"{round(kh_uur)} van {doel} g/uur",
-            _gut_dosis_plan(doel, duur)))
-        extra_tekst.append(f"Je haalde {round(kh_uur)} van de {doel} g per uur.")
-
-    # 3. maagcomfort en smaak
-    #
-    # Een zware klacht is geen aparte vraag meer: wie braakt of moet
-    # stoppen geeft zijn maagcomfort een 0 of 1. Onder de 6 kijkt de app
-    # naar drie dingen die de sporter werkelijk logde; bij 0 of 1 komt de
-    # maaltijdtiming erbij.
+    # 2. de kaart: vier vaste regels over de uitvoering van de opdracht.
+    # GUT-KAART-V5 — ze staan er altijd, ook als alles klopt, want de sporter
+    # moet kunnen zien dat hij deed wat er gevraagd werd. Samenstelling en
+    # Structuur verklaren klachten en komen alleen onder de 6: wie 80 g in een
+    # keer nam met maagcomfort 8 heeft geen probleem en hoeft geen advies.
     comfort_laag = comfort is not None and comfort < GUT_COMFORT_GRENS
     smaak_laag = smaak is not None and smaak < GUT_COMFORT_GRENS
 
+    vaste = [_gut_regel_dosis(kh_uur, doel, duur, gelogde_momenten),
+             _gut_regel_timing(gelogde_momenten, duur)]
+    for regel_erbij in (_gut_regel_vocht(gelogde_momenten, duur, comfort_laag),
+                        _gut_regel_soort(supabase, user.id, producten,
+                                         gelogde_momenten, doel)):
+        if regel_erbij is not None:
+            vaste.append(regel_erbij)
+
+    # 3. maagcomfort en smaak
     if comfort_laag:
         # GUT-MAAG-V2 — de hoeveelste keer laag maagcomfort op deze dosis,
         # zonder het huidige moment dubbel te tellen
         keer = _gut_maag_pogingen(in_reeks, doel, moment_id) + 1
-        kaart = [_gut_regel_timing(gelogde_momenten, duur),
-                 _gut_regel_samenstelling(supabase, user.id, producten,
-                                          gelogde_momenten, doel),
-                 _gut_regel_vocht(gelogde_momenten, duur),
-                 _gut_regel_structuur(supabase, user.id, producten, True)]
+        erbij = [_gut_regel_samenstelling(gelogde_momenten, doel),
+                 _gut_regel_structuur(gelogde_momenten)]
         if comfort <= 1:
-            kaart.append(_gut_regel_maaltijd(data.get("maaltijd_uren_voor")))
-        comfort_regels = list(kaart)
-        # GUT-KAART-VOLGORDE-V1 — eerst alle regels, daarna de toelichtingen. Een
-        # toelichting hoort bij de kaart als geheel, niet bij de regel waar ze
-        # toevallig achter staat.
-        smaak_regels = (_gut_regels_smaak(supabase, user.id, producten, gelogde_momenten,
-                                          comfort_laag=True) if smaak_laag else [])
+            erbij.append(_gut_regel_maaltijd(data.get("maaltijd_uren_voor")))
+        alle = vaste + [r for r in erbij if r is not None]
+
+        oorzaak = sorted([r for r in alle if r.get("goed") is False],
+                         key=lambda r: (GUT_OORZAAK_VOLGORDE.index(r["label"])
+                                        if r["label"] in GUT_OORZAAK_VOLGORDE else 99))
+        kaart = oorzaak + [r for r in alle if r not in oorzaak]
         uitleg = [_gut_smaak_uitleg(smaak, True)] if smaak_laag else []
 
         if keer == 1:
-            # Klopt alles wat gelogd is, dan geen fout maar training. Klopt er
-            # iets niet, dan wijst de kaart dat aan en zegt de korte tekst niet
-            # dat het aan de darm ligt.
-            # een regel zonder oordeel, zoals een onbekende structuur, is geen
-            # fout; ze telt alleen niet mee in de opsomming van wat klopte
-            alles_klopt = all(r.get("goed") is not False for r in comfort_regels)
+            # Wijkt er niets af, dan is het geen fout maar training. Dat is de
+            # enige situatie waarin die zin nog verschijnt.
+            alles_klopt = not oorzaak
             if alles_klopt:
-                uitleg.insert(0, _gut_verklaring([r for r in comfort_regels
+                uitleg.insert(0, _gut_verklaring([r for r in alle
                                                   if r.get("goed") is True]))
             return bewaar("maag_herhaal",
                 f"Maagcomfort {comfort} op {doel} g per uur. "
                 + ("Herhaal: je darm moet nog wennen." if alles_klopt
                    else "Herhaal en pas aan wat de kaart aangeeft."),
-                "mislukt", kaart + smaak_regels + uitleg)
+                "mislukt", kaart + uitleg)
 
         if keer == 2:
-            # eerst het formaat aanpassen, niet de dosis
-            kaart.append(_gut_regel_formaat(gelogde_momenten, duur))
             return bewaar("maag_formaat",
                 f"Tweede keer maagcomfort onder de {GUT_COMFORT_GRENS} op {doel} g per uur. "
                 f"Pas het formaat aan.",
-                "mislukt", kaart + smaak_regels + uitleg)
+                "mislukt", kaart + uitleg)
 
         return bewaar("maag_vast",
             f"Derde keer maagcomfort onder de {GUT_COMFORT_GRENS} op {doel} g per uur. "
             f"Het protocol loopt hier vast.",
-            "mislukt", kaart + smaak_regels + [_gut_vastgelopen(doel)] + uitleg)
+            "mislukt", kaart + [_gut_vastgelopen(doel)] + uitleg)
 
     if smaak_laag:
         # GUT-SMAAK-V2 — fysiologisch ging het goed, dus dit moment telt mee en
-        # de reeks gaat door naar de volgende dosis of fase. Structuur en Vorm
-        # blijven als voorstel op de kaart staan.
-        extra_regels.extend(_gut_regels_smaak(supabase, user.id, producten,
-                                              gelogde_momenten))
+        # de reeks gaat door. Alleen de uitleg: Structuur hoort bij het
+        # maagcomfort, niet bij de smaak.
         extra_regels.append(_gut_smaak_uitleg(smaak, False))
         extra_tekst.append("De smaak viel tegen.")
 
@@ -6037,12 +6072,12 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     if fase_nu == "wedstrijd":
         return bewaar("afgerond",
             f"Wedstrijdsimulatie geslaagd op {doel} g per uur.", "geslaagd",
-            [_gut_regel("Wedstrijdsimulatie", True, f"{doel} g/uur")])
+            vaste + [_gut_regel("Wedstrijdsimulatie", True, f"{doel} g/uur")])
 
     if fase_nu == "bevestiging":
         return bewaar("fase_wedstrijd",
             f"Geslaagd op hogere intensiteit met {doel} g per uur.", "geslaagd",
-            [_gut_regel("Intensiteit", True, "drempel")])
+            vaste + [_gut_regel("Intensiteit", True, "drempel")])
 
     # 6. de volgende stap, nooit over het doel
     nieuw = _gut_stap_omhoog(doel, grens)
@@ -6053,7 +6088,7 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         label = "Wedstrijd" if doel_wedstrijd["reden"] == "wedstrijd" else "Plafond"
         return bewaar("fase_bevestiging",
             f"{geslaagd} op {doel} g per uur. Nu dezelfde dosis op hogere intensiteit.",
-            "geslaagd", [_gut_regel(label, True, f"{doel} g/uur")])
+            "geslaagd", vaste + [_gut_regel(label, True, f"{doel} g/uur")])
 
     # GUT-MIX-GEEN-BLOKKADE-V1 — een geslaagd moment gaat altijd door naar de
     # volgende dosis of fase. Wat de sporter werkelijk verdroeg gaat voor op het
@@ -6061,7 +6096,6 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     # is hoogstens een opmerking op de kaart. Ontbreekt er productinfo, dan zegt
     # de kaart niets. Een product zonder ingevulde verhouding telde als glucose,
     # drukte het plafond omlaag en legde zo het hele protocol stil.
-    mix_regels = _gut_mix_regels(supabase, user.id, producten, gelogde_momenten, nieuw)
 
     # Op 60 g, met een doel dat hoger ligt: eerst een keer op tempo, want
     # vanaf hier komt fructose in het spel. Na de mix, zodat die tussentest
@@ -6075,10 +6109,10 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             and not tussentest_gedaan):
         return bewaar("fase_tussentest",
             f"{geslaagd} op {doel} g per uur. Eerst een keer op tempo.", "geslaagd",
-            [_gut_regel("Duurtempo", True, f"{doel} g/uur")] + mix_regels)
+            vaste + [_gut_regel("Duurtempo", True, f"{doel} g/uur")])
 
     return bewaar("omhoog",
-        f"{geslaagd} op {doel} g per uur. Ga naar {nieuw}.", "geslaagd", mix_regels)
+        f"{geslaagd} op {doel} g per uur. Ga naar {nieuw}.", "geslaagd", vaste)
 
 
 
