@@ -5390,7 +5390,9 @@ def _gut_regel_samenstelling(momenten: list, doel: int):
     grens = max(15.0, int(doel or 0) * GUT_PORTIE_DEEL)
     if grootste > grens:
         delen = max(2, int(-(-grootste // grens)))
-        return _gut_regel("Samenstelling", False, f"{int(round(grootste))} g in een keer",
+        # het tijdstip erbij: zonder dat leest "80 g" hier hetzelfde als de
+        # grammen in de regel Structuur, die een totaal over de hele training zijn
+        return _gut_regel("Samenstelling", False, f"{int(round(grootste))} g op min {wanneer}",
                           f"Je nam {int(round(grootste))} g in een keer op min {wanneer}. "
                           f"Verdeel dat over {delen} porties van ongeveer "
                           f"{int(round(grootste / delen))} g.")
@@ -5511,8 +5513,11 @@ def _gut_regel_structuur(momenten: list):
                           f"overwegend {welke}: {int(round(dik))} van de {int(round(totaal))} g",
                           "Een deel als drank gaat makkelijker door een darm die nog moet "
                           "wennen.")
+    # het totaal vooraan, anders staat "gel 80 g" naast de regel Samenstelling
+    # en lijkt het een enkele portie in plaats van de hele training
     return _gut_regel("Structuur", True,
-                      " · ".join(f"{namen[c]} {int(round(g))} g" for c, g in op_volgorde))
+                      f"{int(round(totaal))} g: "
+                      + ", ".join(f"{int(round(g))} {namen[c]}" for c, g in op_volgorde))
 
 
 def _gut_smaak_uitleg(smaak, comfort_laag: bool) -> dict:
