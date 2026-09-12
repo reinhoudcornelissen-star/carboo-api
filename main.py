@@ -4713,7 +4713,7 @@ def _gut_mix_aandeel(product) -> float:
     return FRUCTOSE_AANDEEL[GUT_MIX_VANGNET.get(soort, GUT_MIX_ONBEKEND)]
 
 
-def _gut_mix_uit_sessie(supabase, user_id: str, producten: list, momenten: list):
+def _gut_mix_uit_sessie(supabase, user_id: str, momenten: list):
     """Het fructoseaandeel van wat de sporter werkelijk innam, gewogen op de
     grammen per voedingsmoment. Geeft (aandeel, compleet).
 
@@ -4721,14 +4721,18 @@ def _gut_mix_uit_sessie(supabase, user_id: str, producten: list, momenten: list)
     wat zulke producten in de praktijk zijn. Als pure glucose rekenen zou het
     advies laten slaan op een gat in de bibliotheek in plaats van op de mix.
     Een product dat de app helemaal niet kent maakt het beeld onvolledig; dan
-    zegt de regel liever niets."""
+    zegt de regel liever niets.
+
+    Staan er geen grammen bij de momenten, dan wordt er niet gegist. Een
+    verhouding die op verzonnen gewichten steunt, is misleidender dan geen
+    verhouding."""
     bib = _gut_bib_sportvoeding(supabase, user_id)
     posten = []
     for m in (momenten or []):
         if isinstance(m, dict) and m.get("naam") and float(m.get("kh_gram") or 0) > 0:
             posten.append((str(m["naam"]), float(m["kh_gram"])))
     if not posten:
-        posten = [(str(n), 30.0) for n in (producten or []) if n]
+        return None, False
 
     glucose, fructose, compleet = 0.0, 0.0, True
     for naam, kh in posten:
@@ -4757,7 +4761,7 @@ def _gut_mix_regel(supabase, user_id: str, producten: list, momenten: list, dosi
     d = int(dosis or 0)
     if d <= GUT_GLUCOSE_MAX:
         return None
-    aandeel, compleet = _gut_mix_uit_sessie(supabase, user_id, producten, momenten)
+    aandeel, compleet = _gut_mix_uit_sessie(supabase, user_id, momenten)
     if aandeel is None or not compleet:
         return None
     gelogd = _gut_mix_tekst(aandeel)
@@ -5318,7 +5322,7 @@ def _gut_regel_samenstelling(supabase, user_id: str, producten: list,
             return _gut_regel("Samenstelling", None, "onbekend",
                               "De app kent deze producten niet.")
 
-        aandeel, _compleet = _gut_mix_uit_sessie(supabase, user_id, producten, momenten)
+        aandeel, _compleet = _gut_mix_uit_sessie(supabase, user_id, momenten)
         gelogd = _gut_mix_tekst(aandeel) if aandeel is not None else "verhouding onbekend"
         if conc_uit:
             gelogd = f"{gelogd}, {conc_uit}"
