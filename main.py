@@ -4654,7 +4654,10 @@ def _gut_bib_sportvoeding(supabase, user_id: str) -> dict:
 GUT_GLUCOSE_MAX = 60
 GUT_FRUCTOSE_MIN = 30      # de fructoseweg bij een dosis tot 90 g
 GUT_MIX_MARGE = 0.10       # zoveel mag een mix tekortschieten en toch passen
-GUT_MIX_ONBEKEND = "2:1"   # meervoudig zonder verhouding: de gangbare mix
+# Valt een product in het vangnet, dan bepaalt kh_type de aanname: dat type
+# zegt al iets over de verhouding, en dat weggooien zou informatie verspillen.
+GUT_MIX_VANGNET = {"meervoudig": "2:1", "glucoserijk": "circa 4:1"}
+GUT_MIX_ONBEKEND = "2:1"   # als ook het type niets zegt
 GUT_MIX_ADVIES = ((95, "2 op 1", "2:1"), (115, "1 op 0,8", "1:0.8"), (None, "1 op 1", "1:1"))
 
 
@@ -4693,11 +4696,17 @@ def _gut_mix_aandeel(product) -> float:
     De verhouding wordt lang niet altijd ingevuld, en dan staat er letterlijk
     "onbekend" in plaats van niets: bijna de helft van de meervoudige
     sportvoeding, van stroopwafels tot repen en snoep. Elke waarde die geen
-    verhouding is telt daarom als 2 op 1. Als pure glucose rekenen laat het
-    advies slaan op een gat in de bibliotheek in plaats van op de mix; zo liep
-    een heel protocol vast op een profiel dat in werkelijkheid prima was."""
+    verhouding is valt in het vangnet, en daar beslist kh_type: meervoudig
+    telt als 2 op 1, glucoserijk als circa 4 op 1. Als pure glucose rekenen
+    laat het advies slaan op een gat in de bibliotheek in plaats van op de
+    mix; zo liep een heel protocol vast op een profiel dat prima was."""
     v = str(product.get("kh_verhouding") or "").strip().lower()
-    return FRUCTOSE_AANDEEL.get(v, FRUCTOSE_AANDEEL[GUT_MIX_ONBEKEND])
+    if v in FRUCTOSE_AANDEEL:
+        return FRUCTOSE_AANDEEL[v]
+    soort = str(product.get("kh_type") or "").strip().lower()
+    if soort == "enkelvoudig":
+        return 0.0
+    return FRUCTOSE_AANDEEL[GUT_MIX_VANGNET.get(soort, GUT_MIX_ONBEKEND)]
 
 
 def _gut_mix_uit_sessie(supabase, user_id: str, producten: list, momenten: list):
