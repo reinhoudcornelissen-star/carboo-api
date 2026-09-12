@@ -5812,18 +5812,18 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             f"{geslaagd} op {doel} g per uur. Nu dezelfde dosis op hogere intensiteit.",
             "geslaagd", [_gut_regel(label, True, f"{doel} g/uur")])
 
+    # GUT-MIX-GEEN-BLOKKADE-V1 — een geslaagd moment gaat altijd door naar de
+    # volgende dosis of fase. Wat de sporter werkelijk verdroeg gaat voor op het
+    # theoretische plafond van zijn producten: de mix houdt niets meer tegen en
+    # is hoogstens een opmerking op de kaart. Ontbreekt er productinfo, dan zegt
+    # de kaart niets. Een product zonder ingevulde verhouding telde als glucose,
+    # drukte het plafond omlaag en legde zo het hele protocol stil.
     mix_regels = []
     if nieuw > GUT_POORT:
         plafond_prod, verh, waarom = _gut_mix_plafond(supabase, user.id, sport)
-        if nieuw > plafond_prod:
-            verhouding = f"1 op {verh:.1f}".replace(".", ",") if verh else "onbekend"
-            return bewaar("product",
-                f"Je mix laat maximaal {plafond_prod} g per uur toe.", "geslaagd",
-                [_gut_regel("Mix", False, verhouding,
-                            "Kies glucose met fructose in 2 op 1 of 1 op 0,8.")])
-        if waarom == "verhouding deels onbekend":
-            mix_regels = [_gut_regel("Mix", False, "deels onbekend",
-                                     "Boven 60 g per uur heb je glucose met fructose nodig.")]
+        if waarom == "product" and verh is not None and nieuw > plafond_prod:
+            mix_regels = [_gut_regel("Mix", False, f"1 op {verh:.1f}".replace(".", ","),
+                                     "Kies glucose met fructose in 2 op 1 of 1 op 0,8.")]
 
     # Op 60 g, met een doel dat hoger ligt: eerst een keer op tempo, want
     # vanaf hier komt fructose in het spel. Na de mix, zodat die tussentest
