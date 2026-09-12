@@ -4687,6 +4687,19 @@ def _gut_mix_advies(dosis, sleutel: bool = False) -> str:
     return GUT_MIX_ADVIES[-1][2 if sleutel else 1]
 
 
+def _gut_mix_aandeel(product) -> float:
+    """Het fructoseaandeel van een product uit de bibliotheek.
+
+    De verhouding wordt lang niet altijd ingevuld, en dan staat er letterlijk
+    "onbekend" in plaats van niets: bijna de helft van de meervoudige
+    sportvoeding, van stroopwafels tot repen en snoep. Elke waarde die geen
+    verhouding is telt daarom als 2 op 1. Als pure glucose rekenen laat het
+    advies slaan op een gat in de bibliotheek in plaats van op de mix; zo liep
+    een heel protocol vast op een profiel dat in werkelijkheid prima was."""
+    v = str(product.get("kh_verhouding") or "").strip().lower()
+    return FRUCTOSE_AANDEEL.get(v, FRUCTOSE_AANDEEL[GUT_MIX_ONBEKEND])
+
+
 def _gut_mix_uit_sessie(supabase, user_id: str, producten: list, momenten: list):
     """Het fructoseaandeel van wat de sporter werkelijk innam, gewogen op de
     grammen per voedingsmoment. Geeft (aandeel, compleet).
@@ -4713,8 +4726,7 @@ def _gut_mix_uit_sessie(supabase, user_id: str, producten: list, momenten: list)
         if b.get("kh_type") == "enkelvoudig":
             glucose += kh
             continue
-        aandeel = FRUCTOSE_AANDEEL.get(b.get("kh_verhouding") or "",
-                                       FRUCTOSE_AANDEEL[GUT_MIX_ONBEKEND])
+        aandeel = _gut_mix_aandeel(b)
         fructose += kh * aandeel
         glucose += kh * (1 - aandeel)
     if glucose + fructose <= 0:
