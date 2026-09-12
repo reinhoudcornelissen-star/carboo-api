@@ -4605,6 +4605,36 @@ FRUCTOSE_AANDEEL = {
 }
 
 
+# ── GUT-BIBLIOTHEEK-V1 ─────────────────────────────────────────────
+# De sportvoeding zoals de sporter ze in zijn eigen scherm ziet: zijn eigen
+# producten en de globale. Heeft hij zelf een product met de naam van een
+# globaal product, dan wint het zijne.
+#
+# Voorheen las elke regel de hele tabel, van alle gebruikers, en won de
+# laatste rij met die naam. Zo kon de verhouding van andermans product in
+# jouw advies belanden.
+def _gut_bib_sportvoeding(supabase, user_id: str) -> dict:
+    """Sportvoeding op naam, kleingeschreven. Faalt stil: zonder bibliotheek
+    zeggen de regels gewoon dat ze het product niet kennen."""
+    try:
+        rijen = (supabase.table("fuelc_bibliotheek")
+                 .select("naam,user_id,is_globaal,kh_type,kh_verhouding,"
+                         "kh_glucosebron,concentratie,water_nodig_ml,viscositeit")
+                 .or_(f"user_id.eq.{user_id},is_globaal.eq.true")
+                 .eq("categorie", "Sportvoeding").execute().data) or []
+    except Exception as e:
+        print(f"[GUT-BIBLIOTHEEK-V1] bibliotheek lezen mislukt: {e}")
+        return {}
+    bib = {}
+    for b in rijen:
+        naam = str(b.get("naam") or "").strip().lower()
+        if not naam:
+            continue
+        if naam not in bib or str(b.get("user_id")) == str(user_id):
+            bib[naam] = b
+    return bib
+
+
 def _gut_mix_plafond(supabase, user_id: str, sport: str):
     """Het plafond van de mix die deze sporter gebruikt.
 
@@ -4631,10 +4661,7 @@ def _gut_mix_plafond(supabase, user_id: str, sport: str):
         if not gebruikt:
             return sportmax, None, "geen producten ingevuld"
 
-        bib = {str(b.get("naam") or "").strip().lower(): b
-               for b in (supabase.table("fuelc_bibliotheek")
-                         .select("naam,kh_type,kh_verhouding")
-                         .eq("categorie", "Sportvoeding").execute().data or [])}
+        bib = _gut_bib_sportvoeding(supabase, user_id)
 
         glucose, fructose, onbekend = 0.0, 0.0, False
         for naam, kh in gebruikt:
@@ -5103,17 +5130,20 @@ GUT_VOCHT_MAX = 900   # ml per uur, bovengrens
 # beoordeelt een ding dat de sporter werkelijk logde, zegt wat er stond,
 # en geeft een korte instructie als het niet klopt.
 #
-#   maagcomfort onder de 6   timing, samenstelling, vocht
+#   maagcomfort onder de 6   timing, samenstelling, vocht, structuur
 #   maagcomfort 0 of 1       daar komt de maaltijdtiming bij
-#   smaak onder de 6         structuur en vorm
+#   smaak onder de 6         vorm, en structuur zonder oordeel
 #
 # Geen merknamen: alleen eigenschappen. Een sporter die leest dat zijn
 # verhouding 1 op 1 is en zijn vocht 310 ml per uur weet wat hij moet
 # veranderen, ook als hij volgende keer een ander merk koopt.
 
-def _gut_regel(label: str, goed: bool, gelogd: str, instructie: str = ""):
-    return {"label": label, "goed": bool(goed), "gelogd": gelogd,
-            "instructie": "" if goed else instructie}
+def _gut_regel(label: str, goed, gelogd: str, instructie: str = ""):
+    """Een regel op de kaart. goed is True, False, of None voor een regel die
+    alleen vaststelt wat er was: die velt geen oordeel, krijgt geen symbool in
+    het scherm, en mag wel een neutrale toelichting dragen."""
+    return {"label": label, "goed": None if goed is None else bool(goed),
+            "gelogd": gelogd, "instructie": "" if goed is True else instructie}
 
 
 def _gut_tijdstippen(momenten: list):
@@ -5148,14 +5178,10 @@ def _gut_regel_timing(momenten: list, duur_min: float):
                       "Ga naar om de 20 tot 30 minuten, in kleinere porties.")
 
 
-def _gut_regel_samenstelling(supabase, producten: list, doel: int):
+def _gut_regel_samenstelling(supabase, user_id: str, producten: list, doel: int):
     """Verhouding, glucosebron en concentratie uit de bibliotheek."""
     try:
-        bib = {str(b.get("naam") or "").strip().lower(): b
-               for b in (supabase.table("fuelc_bibliotheek")
-                         .select("naam,kh_type,kh_verhouding,kh_glucosebron,"
-                                 "concentratie,water_nodig_ml")
-                         .eq("categorie", "Sportvoeding").execute().data or [])}
+        bib = _gut_bib_sportvoeding(supabase, user_id)
         kenmerken, bezwaren, gevonden = [], [], 0
         for naam in (producten or []):
             b = bib.get(str(naam).strip().lower())
@@ -5249,14 +5275,21 @@ def _gut_regel_maaltijd(uren):
                       "Eet minstens twee uur voor je vertrekt.")
 
 
-def _gut_regels_smaak(supabase, producten: list, momenten: list):
-    """Structuur uit de bibliotheek, vorm uit wat hij logde."""
+# ─── GUT-SMAAK-V2 ──────────────────────────────────────────────────────
+# Een lage smaak houdt niets tegen: fysiologisch ging het goed, dus het
+# moment telt mee en de reeks loopt door. Wat de kaart toont is een
+# voorstel, geen opdracht; de sporter heeft vaak maar een product.
+#
+# Structuur oordeelt alleen bij een laag maagcomfort. Een stroperige gel is
+# vaak een bewuste keuze, en "kies iets vloeiends" is dan geen smaakadvies.
+# Bij een lage smaak stelt de regel alleen vast wat er was.
+
+def _gut_regel_structuur(supabase, user_id: str, producten: list, oordeel: bool):
+    """De structuur van wat hij nam, uit de bibliotheek. Met een oordeel bij
+    een laag maagcomfort, zonder oordeel bij een lage smaak."""
     stroperig, bekend = False, 0
     try:
-        bib = {str(b.get("naam") or "").strip().lower(): b
-               for b in (supabase.table("fuelc_bibliotheek")
-                         .select("naam,viscositeit")
-                         .eq("categorie", "Sportvoeding").execute().data or [])}
+        bib = _gut_bib_sportvoeding(supabase, user_id)
         for naam in (producten or []):
             b = bib.get(str(naam).strip().lower())
             if not b:
@@ -5265,18 +5298,22 @@ def _gut_regels_smaak(supabase, producten: list, momenten: list):
             if b.get("viscositeit") == "stroperig":
                 stroperig = True
     except Exception as e:
-        print(f"[GUT-ADVIESKAART-V1] structuur mislukt: {e}")
+        print(f"[GUT-SMAAK-V2] structuur mislukt: {e}")
 
     if not bekend:
-        structuur = _gut_regel("Structuur", False, "onbekend",
-                               "Vul je producten aan in de bibliotheek, dan kijkt de app mee.")
-    elif stroperig:
-        structuur = _gut_regel("Structuur", False, "stroperig",
-                               "Kies iets vloeiends; dat drinkt makkelijker weg als je moe wordt.")
-    else:
-        structuur = _gut_regel("Structuur", True, "vloeiend")
+        return _gut_regel("Structuur", None, "onbekend",
+                          "De app kent de structuur van dit product niet.")
+    if not oordeel:
+        return _gut_regel("Structuur", None, "stroperig" if stroperig else "vloeiend")
+    if stroperig:
+        return _gut_regel("Structuur", False, "stroperig",
+                          "Kies iets vloeiends; dat drinkt makkelijker weg als je moe wordt.")
+    return _gut_regel("Structuur", True, "vloeiend")
 
-    # De vorm zit in wat hij logde, niet in de bibliotheek.
+
+def _gut_regel_vorm(momenten: list):
+    """De vorm zit in wat hij logde, niet in de bibliotheek. Nam hij maar een
+    vorm, dan noemt de regel de twee andere, als voorstel."""
     vormen = []
     for m in (momenten or []):
         if not isinstance(m, dict):
@@ -5287,15 +5324,37 @@ def _gut_regels_smaak(supabase, producten: list, momenten: list):
         if c in ("gel", "vast", "drank") and c not in vormen:
             vormen.append(c)
     namen = {"gel": "gel", "vast": "vast", "drank": "drank"}
+    voorstel = {"gel": "Naast je gel kan iets vasts of een drank helpen.",
+                "drank": "Naast je drank kan een gel of iets vasts helpen.",
+                "vast": "Naast je vaste voeding kan een gel of een drank helpen."}
     if not vormen:
-        vorm = _gut_regel("Vorm", False, "niets gelogd",
+        return _gut_regel("Vorm", False, "niets gelogd",
                           "Noteer per moment wat je nam.")
-    elif len(vormen) == 1:
-        vorm = _gut_regel("Vorm", False, f"alles {namen[vormen[0]]}",
-                          "Wissel af: iets vasts of een drank naast je gel.")
+    if len(vormen) == 1:
+        return _gut_regel("Vorm", False, f"alles {namen[vormen[0]]}", voorstel[vormen[0]])
+    return _gut_regel("Vorm", True, " + ".join(namen[v] for v in vormen))
+
+
+def _gut_smaak_uitleg(smaak, comfort_laag: bool) -> dict:
+    """Waarom de smaak tegenviel, en wat dat betekent voor de reeks. Geen
+    oordeel, dus dezelfde vorm als de verklaring bij het maagcomfort."""
+    if comfort_laag:
+        tekst = (f"Je smaak zakte ook naar {smaak}. Een ander product of een andere "
+                 f"smaak kan helpen, maar de dosis blijft hetzelfde: je maag vraagt "
+                 f"eerst om herhaling.")
     else:
-        vorm = _gut_regel("Vorm", True, " + ".join(namen[v] for v in vormen))
-    return [structuur, vorm]
+        tekst = (f"Je smaak zakte naar {smaak}. Na een paar uur gaat zoet vaak "
+                 f"tegenstaan. Een ander product of een andere smaak kan helpen.")
+    return {"type": "verklaring", "label": "", "goed": None, "gelogd": "",
+            "instructie": "", "tekst": tekst}
+
+
+def _gut_regels_smaak(supabase, user_id: str, producten: list, momenten: list,
+                      comfort_laag: bool = False):
+    """De regels die bij een lage smaak op de kaart komen. Bij een laag
+    maagcomfort staat Structuur al tussen de maagregels, met oordeel."""
+    eerst = [] if comfort_laag else [_gut_regel_structuur(supabase, user_id, producten, False)]
+    return eerst + [_gut_regel_vorm(momenten)]
 
 
 # ─── GUT-VERKLARING-V1 ─────────────────────────────────────────────────
@@ -5639,7 +5698,16 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
     _alle, _nu, _heeft = _gut_momenten(supabase, user.id)
     in_reeks = [x for x in _alle if x["reeks"] == reeks]
 
+    # GUT-SMAAK-V2 — regels die bij elk advies horen, zoals een smaak die
+    # tegenviel. Ze sturen de beslisboom niet; ze staan op de kaart.
+    extra_regels: list = []
+
     def bewaar(soort, tekst, status, regels=None):
+        # De bewaarde tekst zegt het ook. Oude schermen en de geschiedenis van
+        # voor de adviesKAART tonen alleen die ene zin.
+        if extra_regels and status == "geslaagd":
+            tekst = f"{tekst} De smaak viel tegen."
+
         # welke dosis het volgende testmoment krijgt, zodat de kaart het
         # kan tonen voor je op de knop drukt.
         if soort == "omhoog":
@@ -5679,7 +5747,7 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
 
         uit = {"soort": soort, "advies": tekst, "status": status,
                "doel_nu": doel, "doel_volgende": volgende_dosis,
-               "scores": scores, "regels": regels or [],
+               "scores": scores, "regels": list(regels or []) + extra_regels,
                "volgende": volgende}
 
         # GUT-GESCHIEDENIS-V1 — de kaart zoals de sporter hem nu ziet. Een oud
@@ -5727,21 +5795,27 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
         # zonder het huidige moment dubbel te tellen
         keer = _gut_maag_pogingen(in_reeks, doel, moment_id) + 1
         kaart = [_gut_regel_timing(gelogde_momenten, duur),
-                 _gut_regel_samenstelling(supabase, producten, doel),
-                 _gut_regel_vocht(gelogde_momenten, duur)]
+                 _gut_regel_samenstelling(supabase, user.id, producten, doel),
+                 _gut_regel_vocht(gelogde_momenten, duur),
+                 _gut_regel_structuur(supabase, user.id, producten, True)]
         if comfort <= 1:
             kaart.append(_gut_regel_maaltijd(data.get("maaltijd_uren_voor")))
         comfort_regels = list(kaart)
-        smaak_regels = (_gut_regels_smaak(supabase, producten, gelogde_momenten)
+        smaak_regels = ((_gut_regels_smaak(supabase, user.id, producten, gelogde_momenten,
+                                           comfort_laag=True)
+                         + [_gut_smaak_uitleg(smaak, True)])
                         if smaak_laag else [])
 
         if keer == 1:
             # Klopt alles wat gelogd is, dan geen fout maar training. Klopt er
             # iets niet, dan wijst de kaart dat aan en zegt de korte tekst niet
             # dat het aan de darm ligt.
-            alles_klopt = all(r.get("goed") for r in comfort_regels)
+            # een regel zonder oordeel, zoals een onbekende structuur, is geen
+            # fout; ze telt alleen niet mee in de opsomming van wat klopte
+            alles_klopt = all(r.get("goed") is not False for r in comfort_regels)
             if alles_klopt:
-                kaart.append(_gut_verklaring(comfort_regels))
+                kaart.append(_gut_verklaring([r for r in comfort_regels
+                                              if r.get("goed") is True]))
             return bewaar("maag_herhaal",
                 f"Maagcomfort {comfort} op {doel} g per uur. "
                 + ("Herhaal: je darm moet nog wennen." if alles_klopt
@@ -5762,11 +5836,12 @@ async def beoordeel_testmoment(moment_id: str, data: dict,
             "mislukt", kaart + smaak_regels + [_gut_vastgelopen(doel)])
 
     if smaak_laag:
-        # alleen de smaak: fysiologisch ging het goed, dus een ander product.
-        # Telt niet mee in de pogingen op maagcomfort.
-        return bewaar("product",
-            f"Smaak {smaak} op {doel} g per uur.", "geslaagd",
-            _gut_regels_smaak(supabase, producten, gelogde_momenten))
+        # GUT-SMAAK-V2 — fysiologisch ging het goed, dus dit moment telt mee en
+        # de reeks gaat door naar de volgende dosis of fase. Structuur en Vorm
+        # blijven als voorstel op de kaart staan.
+        extra_regels.extend(_gut_regels_smaak(supabase, user.id, producten,
+                                              gelogde_momenten))
+        extra_regels.append(_gut_smaak_uitleg(smaak, False))
 
     # 4. geslaagd: een geslaagd moment telt altijd mee.
     #
