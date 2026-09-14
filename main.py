@@ -5828,6 +5828,10 @@ def _gut_herstart_nodig(supabase, user_id: str, startdosis: int, protocol_aan=Tr
     dan vraagt het scherm bevestiging voor iets wat niet gebeurt, of erger:
     het herstart zonder te vragen. Een gedeelde functie met een "doe-het-
     niet-echt"-vlag leest slechter en verstopt de schrijfactie in een tak.
+
+    Draai tests/test_herstart.py als je hier iets wijzigt. Dat script legt
+    beide functies op elk pad naast elkaar en wordt rood zodra ze iets
+    verschillends zeggen. Zie tests/LEESMIJ.md.
     """
     try:
         dosis = max(15, min(120, int(startdosis or 0) or 20))
@@ -5868,6 +5872,10 @@ def _gut_t1_verzeker(supabase, user_id: str, startdosis: int, protocol_aan=True,
 
     Stuurt het protocol niet, dan blijft de sporter zelf de baas over zijn
     dosis en raakt deze functie zijn momenten niet aan.
+
+    Draai tests/test_herstart.py als je hier iets wijzigt. Dezelfde
+    voorwaarden staan in _gut_herstart_nodig hierboven; dat script wordt rood
+    zodra de twee iets verschillends zeggen. Zie tests/LEESMIJ.md.
     """
     try:
         dosis = max(15, min(120, int(startdosis or 0) or 20))
