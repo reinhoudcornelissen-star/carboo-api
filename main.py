@@ -1121,6 +1121,14 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         result["gut_winkelmandje"] = wm.data or []
         prot = supabase.table("carboo_gut_protocol").select("*").eq("user_id", klant_id).eq("actief", True).execute()
         result["gut_protocol"] = prot.data[0] if prot.data else None
+        # GUT-COACH-MOMENT-V1 — de testmomenten erbij, met hun labels. Zonder
+        # deze lijst kan het coachscherm geen TP of TZ tonen: dat label staat
+        # nergens bewaard en wordt per verzoek berekend uit de hele reeks.
+        # Dezelfde functie als de sporterkant gebruikt, zodat er geen tweede
+        # berekening ontstaat die kan afdrijven.
+        gut_momenten, gut_reeks_nu, _ = _gut_momenten(supabase, klant_id)
+        result["gut_momenten"] = gut_momenten
+        result["gut_reeks_nu"] = gut_reeks_nu
     if privacy.get("dossier"):
         dos = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
         result["dossier"] = dos.data or []
@@ -1691,6 +1699,79 @@ async def get_gut_testplan(user=Depends(get_current_user), supabase: Client = De
     r = supabase.table("carboo_gut_testplan").select("*").eq("user_id", user.id).order("week_nummer").execute()
     return {"testplan": r.data or []}
 # === EINDE TESTPLAN =========================================================
+
+
+# === COACH STUURT EEN TESTMOMENT BIJ =======================================
+# GUT-COACH-MOMENT-V1 — een coach tekent geen traject uit. Dat bleek uit de
+# weekopzet hierboven: drie klanten, niemand voorbij week 2, nooit een
+# sportdrank gebruikt. Hij grijpt in op een enkel moment.
+#
+# Alleen een OPEN moment in de lopende reeks, met dezelfde voorwaarde als
+# _gut_open_moment: nog niet beoordeeld en nog geen sessie eronder. Een moment
+# met een sessie eronder aanpassen zou de opdracht onwaar maken tegenover wat
+# de sporter werkelijk deed.
+#
+# Geen grenzen aan de dosis: een coach kent zijn sporter en mag overrulen. Wel
+# zichtbaar wie het deed, en wel een waarschuwing als die dosis het protocol
+# door de opbouw heen duwt. Zonder bevestiging gebeurt er dan niets.
+@app.post("/api/coach/klant/{klant_id}/gut-moment")
+async def coach_stuur_moment_bij(klant_id: str, data: dict,
+                                 user=Depends(get_current_user),
+                                 supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_gut(user, klant_id, supabase)
+
+    rijen, reeks_nu, _ = _gut_momenten(supabase, klant_id)
+    huidig = [m for m in rijen if m["reeks"] == reeks_nu]
+    open_moment = _gut_open_moment(huidig, _gut_geteste_ids(supabase, klant_id))
+    if not open_moment:
+        raise HTTPException(400, "Deze sporter heeft geen open testmoment om bij te sturen")
+
+    gevraagd = str(data.get("moment_id") or "").strip()
+    if gevraagd and gevraagd != str(open_moment["id"]):
+        raise HTTPException(400, "Alleen het open moment van de lopende reeks kan bijgestuurd worden")
+
+    velden: dict = {}
+    if data.get("doel_kh_uur") is not None:
+        try:
+            dosis = int(data["doel_kh_uur"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "doel_kh_uur moet een getal zijn")
+        if dosis < 15 or dosis > 200:
+            raise HTTPException(400, "doel_kh_uur ligt buiten een zinnig bereik")
+        velden["doel_kh_uur"] = dosis
+    for veld in ("intensiteit", "type_training"):
+        if data.get(veld):
+            velden[veld] = str(data[veld])
+    if data.get("min_duur_min") is not None:
+        try:
+            velden["min_duur_min"] = int(data["min_duur_min"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "min_duur_min moet een getal zijn")
+    # de notitie alleen aanraken als ze meegestuurd wordt: stuurt het formulier
+    # enkel een nieuwe dosis, dan blijft een bestaande notitie staan
+    heeft_notitie = "coach_notitie" in data
+    notitie = str(data.get("coach_notitie") or "").strip()
+
+    if not velden and not (heeft_notitie and notitie):
+        raise HTTPException(400, "Niets om bij te sturen")
+
+    # Eerst kijken, dan pas schrijven -- zoals bij de herstartbevestiging.
+    doorbraak = None
+    if "doel_kh_uur" in velden:
+        doorbraak = _gut_coach_fasedoorbraak(supabase, klant_id,
+                                             velden["doel_kh_uur"],
+                                             open_moment.get("fase"))
+        if doorbraak and not data.get("doorbraak_bevestigd"):
+            return {"ok": False, "fasedoorbraak": doorbraak}
+
+    if heeft_notitie:
+        velden["coach_notitie"] = notitie or None
+    velden["door_coach"] = coach_id
+    velden["bijgewerkt"] = "now()"
+    (supabase.table("carboo_gut_testmomenten").update(velden)
+     .eq("id", open_moment["id"]).eq("user_id", klant_id).execute())
+    return {"ok": True, "moment_id": open_moment["id"], "fasedoorbraak": doorbraak}
+# === EINDE COACH STUURT BIJ =================================================
 
 @app.get("/api/gut/protocol")
 async def get_protocol(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -5816,6 +5897,48 @@ def _gut_voeg_moment_toe(supabase, user_id: str, rij: dict):
 # T1 volgt de hoogste inname zonder klachten uit het profiel, zolang hij
 # nog openstaat. Zodra er iets beoordeeld is ligt de dosis vast: dan wil
 # je niet dat het protocol resets omdat iemand een cijfer bijstelt.
+def _gut_coach_fasedoorbraak(supabase, user_id: str, dosis: int, fase: str = "opbouw"):
+    """Zou deze dosis het protocol door de opbouw heen duwen? Schrijft niets.
+
+    Geeft None als er niets bijzonders gebeurt, anders {"dosis", "grens"}: de
+    dosis die de coach wil zetten en de grens van deze sporter. Het coachscherm
+    maakt daar zijn waarschuwing van.
+
+    LET OP: dit is dezelfde regel als in beoordeel_testmoment. Daar geldt
+
+        plafond_sport = GUT_PLAFOND.get(sport, 115)
+        grens = doel_wedstrijd["grens"] or plafond_sport
+        nieuw = _gut_stap_omhoog(doel, grens)
+        if nieuw <= doel:  ->  fase_bevestiging
+
+    Die twee horen bij elkaar en moeten samen wijzigen. Lopen ze uit de pas,
+    dan waarschuwt het coachscherm voor een doorbraak die niet komt, of erger:
+    een coach kort het protocol af zonder dat iemand het gezegd heeft. Een
+    sporter die van 60 naar 120 springt en slaagt, staat dan in een klap in de
+    bevestigingsfase en heeft zijn hele opbouw overgeslagen.
+
+    Alleen in de opbouw. In de bevestiging en de wedstrijdsimulatie stuurt de
+    dosis de fase niet meer: die fasen volgen op een doel dat al bereikt is.
+    """
+    try:
+        if (fase or "opbouw") != "opbouw":
+            return None
+        dosis = int(dosis or 0)
+        if dosis <= 0:
+            return None
+        doel_wedstrijd = _gut_protocol_doel(supabase, user_id)
+        if not doel_wedstrijd["nodig"]:
+            return None
+        plafond_sport = GUT_PLAFOND.get(doel_wedstrijd["sport"], 115)
+        grens = doel_wedstrijd["grens"] or plafond_sport
+        if _gut_stap_omhoog(dosis, grens) <= dosis:
+            return {"dosis": dosis, "grens": int(grens)}
+        return None
+    except Exception as e:
+        print(f"[GUT-COACH-MOMENT-V1] fasedoorbraak bepalen mislukt: {e}")
+        return None
+
+
 def _gut_herstart_nodig(supabase, user_id: str, startdosis: int, protocol_aan=True):
     """Zou dit profiel de lopende reeks herstarten? Schrijft niets.
 
