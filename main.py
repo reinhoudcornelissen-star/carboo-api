@@ -1714,6 +1714,45 @@ async def get_gut_testplan(user=Depends(get_current_user), supabase: Client = De
 # Geen grenzen aan de dosis: een coach kent zijn sporter en mag overrulen. Wel
 # zichtbaar wie het deed, en wel een waarschuwing als die dosis het protocol
 # door de opbouw heen duwt. Zonder bevestiging gebeurt er dan niets.
+@app.get("/api/coach/klant/{klant_id}/gut-momenten")
+async def coach_get_gut_momenten(klant_id: str, user=Depends(get_current_user),
+                                 supabase: Client = Depends(get_supabase)):
+    """De testmomenten van deze klant met hun labels, de score van de sessie
+    die eronder ligt, en welk moment bijgestuurd kan worden.
+
+    Dezelfde _gut_momenten als de sporterkant gebruikt, zodat de labels niet
+    uit de pas kunnen lopen -- twee lezers van een functie, geen tweede
+    berekening.
+
+    De scores komen erbij omdat een coach anders blind bijstuurt: hij moet
+    zien waarop hij ingrijpt. Ze staan in carboo_gut_sessies en niet op het
+    testmoment, dus die koppeling gebeurt hier.
+    """
+    await _coach_mag_gut(user, klant_id, supabase)
+    rijen, reeks_nu, _ = _gut_momenten(supabase, klant_id)
+
+    scores: dict = {}
+    try:
+        sess = (supabase.table("carboo_gut_sessies")
+                .select("testmoment_id,datum,maagcomfort,smaak_score,duur_min")
+                .eq("user_id", klant_id).order("datum").execute().data) or []
+        for s in sess:
+            if s.get("testmoment_id"):
+                scores[str(s["testmoment_id"])] = s
+    except Exception as e:
+        print(f"[GUT-COACH-MOMENT-V1] scores ophalen mislukt: {e}")
+    for r in rijen:
+        r["sessie"] = scores.get(str(r.get("id")))
+
+    huidig = [m for m in rijen if m["reeks"] == reeks_nu]
+    open_moment = _gut_open_moment(huidig, _gut_geteste_ids(supabase, klant_id))
+    return {
+        "momenten": rijen,
+        "reeks_nu": reeks_nu,
+        "open_moment_id": open_moment["id"] if open_moment else None,
+    }
+
+
 @app.post("/api/coach/klant/{klant_id}/gut-moment")
 async def coach_stuur_moment_bij(klant_id: str, data: dict,
                                  user=Depends(get_current_user),
