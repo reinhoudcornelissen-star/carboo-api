@@ -5958,10 +5958,11 @@ def _gut_voeg_moment_toe(supabase, user_id: str, rij: dict):
         raise
 
 
-# ─── GUT-T1-MEELOOPT-V1 ────────────────────────────────────────────────
-# T1 volgt de hoogste inname zonder klachten uit het profiel, zolang hij
-# nog openstaat. Zodra er iets beoordeeld is ligt de dosis vast: dan wil
-# je niet dat het protocol resets omdat iemand een cijfer bijstelt.
+# ─── GUT-COACH-MOMENT-V1 ───────────────────────────────────────────────
+# Een coach mag een open testmoment bijsturen, ook omhoog: hij kent zijn
+# sporter. Maar een dosis op of boven de grens laat de beslisboom het doel
+# als bereikt beschouwen, en dan slaat het protocol de hele opbouw over.
+# Deze functie stelt dat vooraf vast zodat het scherm ernaar kan vragen.
 def _gut_coach_fasedoorbraak(supabase, user_id: str, dosis: int, fase: str = "opbouw"):
     """Zou deze dosis het protocol door de opbouw heen duwen? Schrijft niets.
 
@@ -6004,6 +6005,10 @@ def _gut_coach_fasedoorbraak(supabase, user_id: str, dosis: int, fase: str = "op
         return None
 
 
+# ─── GUT-T1-MEELOOPT-V1 ────────────────────────────────────────────────
+# T1 volgt de hoogste inname zonder klachten uit het profiel, zolang hij
+# nog openstaat. Zodra er iets beoordeeld is ligt de dosis vast: dan wil
+# je niet dat het protocol resets omdat iemand een cijfer bijstelt.
 def _gut_herstart_nodig(supabase, user_id: str, startdosis: int, protocol_aan=True):
     """Zou dit profiel de lopende reeks herstarten? Schrijft niets.
 
