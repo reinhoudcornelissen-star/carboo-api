@@ -5077,27 +5077,49 @@ def _gut_label(stap: int, herhaling: int) -> str:
 
 
 def _gut_nummer_labels(rijen: list):
-    """Zet stap, herhaling en label op elke rij. Verwacht de rijen
-    gesorteerd op reeks en nummer.
+    """Zet stap, herhaling, poging_dosis en label op elke rij. Verwacht de
+    rijen gesorteerd op reeks en nummer.
 
     GUT-TP-TZ-V1 — momenten uit het protocol heten TP: een nieuwe dosis
     geeft een nieuw nummer, dezelfde dosis een letter. Zelfstandige
     momenten heten TZ en tellen apart, per reeks. De TP-nummering slaat de
-    TZ-momenten over: TP1, TP1b, TP1c, TZ1, TP1d."""
-    vorige, zelf = {}, {}
+    TZ-momenten over: TP1, TP1b, TP1c, TZ1, TP1d.
+
+    GUT-COACH-MOMENT-V1 — een door de coach bijgestuurd moment houdt het
+    nummer van het moment dat het vervangt en krijgt een letter, ook als de
+    dosis verandert. TP5 op 90 wordt TP5b op 85, niet TP6: een oplopend
+    nummer leest als vooruitgang terwijl de sporter terugstapt, en dat valt
+    niet uit te leggen. Twee randen: zonder vorig moment geldt de regel niet
+    (een TP1b zonder TP1 is onzin), en een zelfstandig moment valt erbuiten,
+    want de TZ-telling loopt apart.
+
+    Daardoor gaan herhaling en "de hoeveelste keer op deze dosis" uit
+    elkaar lopen, en tot nu toe waren dat hetzelfde getal. De opdrachtkaart
+    leest het voor de zin "Tweede keer op 85 g"; zonder scheiding zou ze
+    beweren dat het de tweede keer op 85 is terwijl het de eerste is.
+    Vandaar poging_dosis, dat de dosis zelf telt en niets van stappen of
+    letters weet."""
+    vorige, zelf, per_dosis = {}, {}, {}
     for r in rijen:
         reeks = int(r.get("reeks") or 1)
+        doel = int(r.get("doel_kh_uur") or 0)
+
+        sleutel = (reeks, doel)
+        per_dosis[sleutel] = per_dosis.get(sleutel, 0) + 1
+        r["poging_dosis"] = per_dosis[sleutel]
+
         if (r.get("bron") or "protocol") == "zelfstandig":
             zelf[reeks] = zelf.get(reeks, 0) + 1
             r["stap"] = zelf[reeks]
             r["herhaling"] = 0
             r["label"] = f"TZ{zelf[reeks]}"
             continue
-        doel = int(r.get("doel_kh_uur") or 0)
+
         v = vorige.get(reeks)
+        bijgestuurd = bool(r.get("door_coach"))
         if v is None:
             stap, herhaling = 1, 0
-        elif doel == v[2]:
+        elif doel == v[2] or bijgestuurd:
             stap, herhaling = v[0], v[1] + 1
         else:
             stap, herhaling = v[0] + 1, 0
