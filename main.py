@@ -1522,6 +1522,9 @@ class GutProtocol(BaseModel):
     wedstrijd_duur_uur: Optional[float] = None
     # of het protocol stuurt, of de sporter zelf bepaalt
     protocol_aan: Optional[bool] = None
+    # GUT-HERSTART-V1 — zonder deze goedkeuring wordt een lopende reeks nooit
+    # herstart: het eindpunt slaat dan niets op en meldt wat er zou gebeuren.
+    herstart_bevestigd: Optional[bool] = False
 
 class GutSessie(BaseModel):
     datum: Optional[str] = None
@@ -1697,6 +1700,18 @@ async def get_protocol(user=Depends(get_current_user), supabase: Client = Depend
 @app.post("/api/gut/protocol")
 async def sla_protocol_op(item: GutProtocol, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     dosis = bereken_startdosis(item.niveau, item.ervaring, item.sport, item.max_kh_per_uur)
+    # GUT-HERSTART-V1 — eerst kijken, dan pas schrijven. Zou dit profiel de
+    # lopende reeks herstarten en heeft de sporter dat niet goedgekeurd, dan
+    # slaan we niets op en melden we alleen wat er zou gebeuren. Stond deze
+    # controle na het opslaan, dan was "niets opgeslagen" niet waar te maken.
+    #
+    # Een herstart kan ook ontstaan zonder dat iemand aan zijn hoogste inname
+    # komt: het plafond hangt aan niveau en sport, en de startdosis wordt tot
+    # dat plafond geknepen. Wie van Professioneel naar Competitief gaat, zakt
+    # van 120 naar 90 en verliest zo zijn reeks. Vandaar de bevestiging.
+    herstart = _gut_herstart_nodig(supabase, user.id, dosis["startdosis"], item.protocol_aan)
+    if herstart and not item.herstart_bevestigd:
+        return {"ok": False, "herstart": herstart}
     data = {
         "user_id": user.id,
         "sport": item.sport,
@@ -1727,8 +1742,9 @@ async def sla_protocol_op(item: GutProtocol, user=Depends(get_current_user), sup
     # Ook bij een update: wie zijn profiel bijwerkt voor de eerste test
     # hoort dat getal terug te zien in T1. Stond dit alleen op de tak
     # hierboven, dan liep het nooit, want T1 bestond op dat moment nog niet.
-    _gut_t1_verzeker(supabase, user.id, dosis["startdosis"], item.protocol_aan)
-    return {"ok": True, "dosis": dosis}
+    _gut_t1_verzeker(supabase, user.id, dosis["startdosis"], item.protocol_aan,
+                     mag_herstarten=True)
+    return {"ok": True, "dosis": dosis, "herstart": herstart}
 
 # ─── GUT-TOGGLE-V1 ─────────────────────────────────────────────────────
 # Aan: het protocol stuurt, en de beslisboom geeft na elke evaluatie
@@ -5800,7 +5816,43 @@ def _gut_voeg_moment_toe(supabase, user_id: str, rij: dict):
 # T1 volgt de hoogste inname zonder klachten uit het profiel, zolang hij
 # nog openstaat. Zodra er iets beoordeeld is ligt de dosis vast: dan wil
 # je niet dat het protocol resets omdat iemand een cijfer bijstelt.
-def _gut_t1_verzeker(supabase, user_id: str, startdosis: int, protocol_aan=True):
+def _gut_herstart_nodig(supabase, user_id: str, startdosis: int, protocol_aan=True):
+    """Zou dit profiel de lopende reeks herstarten? Schrijft niets.
+
+    Geeft None als er niets gebeurt, anders {"dosis", "momenten"}: de dosis
+    waarop de nieuwe reeks zou beginnen, en hoeveel testmomenten de lopende
+    reeks telt. Het scherm maakt daar zijn bevestiging van.
+
+    LET OP: dit zijn dezelfde voorwaarden als in _gut_t1_verzeker hieronder.
+    Die twee horen bij elkaar en moeten samen wijzigen. Lopen ze uit de pas,
+    dan vraagt het scherm bevestiging voor iets wat niet gebeurt, of erger:
+    het herstart zonder te vragen. Een gedeelde functie met een "doe-het-
+    niet-echt"-vlag leest slechter en verstopt de schrijfactie in een tak.
+    """
+    try:
+        dosis = max(15, min(120, int(startdosis or 0) or 20))
+        if protocol_aan is False:
+            return None
+        if not _gut_protocol_doel(supabase, user_id)["nodig"]:
+            return None
+        alle, reeks_nu, heeft_kolom = _gut_momenten(supabase, user_id)
+        if not alle or not heeft_kolom:
+            return None
+        huidig = [m for m in alle if m["reeks"] == reeks_nu]
+        if not huidig:
+            return None
+        if int(huidig[0].get("doel_kh_uur") or 0) == dosis:
+            return None
+        if not any(m.get("advies_soort") for m in huidig):
+            return None  # T1 wordt alleen bijgesteld; dat is geen herstart
+        return {"dosis": dosis, "momenten": len(huidig)}
+    except Exception as e:
+        print(f"[GUT-HERSTART-V1] herstart bepalen mislukt: {e}")
+        return None
+
+
+def _gut_t1_verzeker(supabase, user_id: str, startdosis: int, protocol_aan=True,
+                     mag_herstarten=False):
     """Houdt de testreeks gelijk aan het profiel.
 
     Er is nog niets      -> T1 komt er met de startdosis uit het profiel.
@@ -5809,6 +5861,10 @@ def _gut_t1_verzeker(supabase, user_id: str, startdosis: int, protocol_aan=True)
                             nieuwe reeks vanaf dat getal. De oude momenten
                             blijven staan; ze zijn geschiedenis en tellen
                             niet meer mee in wat de beslisboom afweegt.
+
+    Die laatste stap gebeurt alleen met mag_herstarten. De standaard is
+    False: een reeks weggooien is onomkeerbaar, dus wie dat wil moet het
+    vragen. Wie er niet aan denkt, maakt niets kapot.
 
     Stuurt het protocol niet, dan blijft de sporter zelf de baas over zijn
     dosis en raakt deze functie zijn momenten niet aan.
@@ -5851,6 +5907,8 @@ def _gut_t1_verzeker(supabase, user_id: str, startdosis: int, protocol_aan=True)
             return
 
         # Er is al getest en het getal is veranderd: opnieuw beginnen.
+        if not mag_herstarten:
+            return  # GUT-HERSTART-V1 — niet zonder goedkeuring
         if not heeft_kolom:
             print("[GUT-REEKS-V1] kolom reeks ontbreekt, geen herstart. "
                   "Draai gut-testmomenten-reeks.sql")
