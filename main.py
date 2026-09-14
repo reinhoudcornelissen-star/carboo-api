@@ -1778,9 +1778,13 @@ async def coach_stuur_moment_bij(klant_id: str, data: dict,
         if dosis < 15 or dosis > 200:
             raise HTTPException(400, "doel_kh_uur ligt buiten een zinnig bereik")
         velden["doel_kh_uur"] = dosis
-    for veld in ("intensiteit", "type_training"):
-        if data.get(veld):
-            velden[veld] = str(data[veld])
+    # door _gut_intensiteit, zoals overal elders: anders is deze route de enige
+    # die een ongecontroleerde waarde kan wegschrijven, en hangt de juistheid
+    # af van de keuzelijst in het coachscherm in plaats van van de backend
+    if data.get("intensiteit"):
+        velden["intensiteit"] = _gut_intensiteit(data["intensiteit"])
+    if data.get("type_training"):
+        velden["type_training"] = str(data["type_training"])
     if data.get("min_duur_min") is not None:
         try:
             velden["min_duur_min"] = int(data["min_duur_min"])
