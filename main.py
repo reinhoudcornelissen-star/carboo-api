@@ -1100,7 +1100,35 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         wz = supabase.table("fuelc_dagboek_welzijn").select("datum,energie_score,stemming,stress,slaap_uur,gewicht_kg,hf_rust,rpe").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
         result["welzijn"] = wz.data or []
     if privacy.get("race_plannen"):
-        rap = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
+        # COACH-RAPPORTEN-FILTER-V1 — deze query gaf ALLES wat er voor die
+        # gebruiker in de tabel stond, ongeacht toestand. De sporter zelf ziet
+        # zijn dossier door twee filters (regel 2361); de coach door geen.
+        #
+        # Wat de sporter weghaalde, moet weg. Verwijderen is zacht: het zet
+        # alleen verwijderd_op (regel 2392). Weigeren van een coachconcept doet
+        # hetzelfde en laat status op 'concept' staan (regel 2445).
+        #
+        # Daardoor volstaat een voorwaarde voor alle drie de gevallen:
+        #
+        #   verwijderd_op is null OF status = 'concept'
+        #
+        #   verwijderd rapport   actief  + gezet  -> valt eruit
+        #   gewoon rapport       actief  + leeg   -> blijft
+        #   concept, open        concept + leeg   -> blijft, "wacht op goedkeuring"
+        #   concept, geweigerd   concept + gezet  -> blijft, "geweigerd"
+        #
+        # status en verwijderd_op komen mee zodat het scherm dat onderscheid
+        # kan tonen. LET OP: dit leunt erop dat weigeren status op 'concept'
+        # laat staan. Een eigen status 'geweigerd' zou steviger zijn.
+        #
+        # limit 20 in plaats van 10: de tabel is per gebruiker afgetopt op
+        # twintig (regel 2375), dus twintig kan per definitie niets afkappen.
+        # Met tien duwden de verwijderde rijen echte rapporten uit de lijst.
+        rap = (supabase.table("carboo_rapporten")
+               .select("id,naam,type,meta,datum,status,verwijderd_op")
+               .eq("user_id", klant_id)
+               .or_("verwijderd_op.is.null,status.eq.concept")
+               .order("datum", desc=True).limit(20).execute())
         result["race_plannen"] = rap.data or []
     if privacy.get("train_gut"):
         gut = supabase.table("carboo_gut_sessies").select("*").eq("user_id", klant_id).order("datum", desc=True).limit(30).execute()
@@ -1140,7 +1168,14 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         # weggehaald.
         result["gut_doel"] = _gut_protocol_doel(supabase, klant_id)
     if privacy.get("dossier"):
-        dos = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
+        # COACH-RAPPORTEN-FILTER-V1 — zelfde tabel, zelfde rijen, zelfde lek.
+        # De uitleg staat bij race_plannen hierboven; deze twee queries horen
+        # woordelijk gelijk te blijven zolang de vlaggen niet samengevoegd zijn.
+        dos = (supabase.table("carboo_rapporten")
+               .select("id,naam,type,meta,datum,status,verwijderd_op")
+               .eq("user_id", klant_id)
+               .or_("verwijderd_op.is.null,status.eq.concept")
+               .order("datum", desc=True).limit(20).execute())
         result["dossier"] = dos.data or []
     if privacy.get("voedingskwaliteit") or privacy.get("performance") or privacy.get("macros"):
         if "dagschema" not in result:
