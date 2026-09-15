@@ -1129,6 +1129,16 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         gut_momenten, gut_reeks_nu, _ = _gut_momenten(supabase, klant_id)
         result["gut_momenten"] = gut_momenten
         result["gut_reeks_nu"] = gut_reeks_nu
+        # COACH-MODULES-V1 — het doel waar de beslisboom werkelijk op stuurt,
+        # voor het overzicht aan de coachkant.
+        #
+        # NIET max_dosis_g_uur uit carboo_gut_protocol, hoe voor de hand
+        # liggend dat ook is: dat getal komt uit bereken_startdosis en is iets
+        # anders dan de grens waarop _gut_stap_omhoog stopt. Een coach die
+        # "doel 120" leest terwijl de boom op 90 blijft staan, leest een cijfer
+        # dat niet is wat het lijkt -- en daar hebben we er deze maand vier van
+        # weggehaald.
+        result["gut_doel"] = _gut_protocol_doel(supabase, klant_id)
     if privacy.get("dossier"):
         dos = supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", klant_id).order("datum", desc=True).limit(10).execute()
         result["dossier"] = dos.data or []
