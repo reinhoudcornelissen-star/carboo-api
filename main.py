@@ -1734,7 +1734,7 @@ async def coach_get_gut_momenten(klant_id: str, user=Depends(get_current_user),
     scores: dict = {}
     try:
         sess = (supabase.table("carboo_gut_sessies")
-                .select("testmoment_id,datum,maagcomfort,smaak_score,duur_min")
+                .select("testmoment_id,datum,maagcomfort,smaak_score,duur_min,vocht_ml")
                 .eq("user_id", klant_id).order("datum").execute().data) or []
         for s in sess:
             if s.get("testmoment_id"):
@@ -1751,6 +1751,124 @@ async def coach_get_gut_momenten(klant_id: str, user=Depends(get_current_user),
         "reeks_nu": reeks_nu,
         "open_moment_id": open_moment["id"] if open_moment else None,
     }
+
+
+@app.post("/api/coach/klant/{klant_id}/gut-moment/volgende")
+async def coach_maak_volgend_moment(klant_id: str, data: dict,
+                                    user=Depends(get_current_user),
+                                    supabase: Client = Depends(get_supabase)):
+    """De coach maakt het volgende testmoment aan, met zijn eigen dosis erbij.
+
+    Een coach bereidt voor. Wachten tot de sporter zelf op "Volgend testmoment"
+    drukt betekent dat hij pas kan bijsturen als die knop al ingedrukt is, en
+    dan is het moment er al zoals het protocol het bedoelde.
+
+    Dezelfde beslissing als maak_volgend_testmoment: dezelfde weigeringen,
+    dezelfde dosisstap per adviessoort, dezelfde fase, dezelfde rij. Drukt de
+    sporter daarna alsnog op zijn knop, dan vindt die route het open moment van
+    de coach en geeft het terug met bestond_al -- er komt geen tweede bij.
+
+    Weigeringen komen als leesbare reden terug in plaats van als foutcode: een
+    coach kijkt naar een ander scherm dan de sporter en moet kunnen lezen
+    waarom er niets kan.
+    """
+    coach_id = await _coach_mag_gut(user, klant_id, supabase)
+
+    if not _gut_protocol_aan(supabase, klant_id):
+        return {"ok": False, "reden": "zelfstandig",
+                "melding": "Deze sporter test zelfstandig. Dan stuurt het protocol niet, "
+                           "en jij dus ook niet. Hij kan de schakelaar terugzetten op "
+                           "Protocol als hij sturing wil."}
+
+    alle, reeks_nu, heeft_kolom = _gut_momenten(supabase, klant_id)
+    huidig = [m for m in alle if m["reeks"] == reeks_nu]
+    if not huidig:
+        return {"ok": False, "reden": "geen_reeks",
+                "melding": "Deze sporter heeft nog geen testmomenten."}
+
+    open_ = _gut_open_moment(huidig, _gut_geteste_ids(supabase, klant_id))
+    if open_:
+        return {"ok": False, "reden": "al_open", "moment_id": open_["id"],
+                "melding": "Er staat al een open testmoment klaar. Stuur dat bij."}
+
+    vorige = huidig[-1]
+    soort = vorige.get("advies_soort")
+    if not soort:
+        return {"ok": False, "reden": "niet_beoordeeld",
+                "melding": "Je sporter heeft zijn vorige testmoment nog niet geevalueerd. "
+                           "Zodra dat gebeurd is, kun je het volgende klaarzetten."}
+    if soort == "afgerond":
+        return {"ok": False, "reden": "afgerond",
+                "melding": "Het protocol van deze sporter is afgerond."}
+    if soort == "maag_vast":
+        return {"ok": False, "reden": "vast",
+                "melding": "Het protocol loopt vast op deze dosis. De sporter zoekt "
+                           "zelf verder; een volgend moment hoort daar niet bij."}
+
+    doel = int(vorige.get("doel_kh_uur") or 0)
+    poging = int(vorige.get("poging") or 1)
+    doel_wedstrijd = _gut_protocol_doel(supabase, klant_id)
+
+    # exact dezelfde stap als de sporterknop, zodat een moment van de coach er
+    # niet anders uitziet dan een moment van het protocol
+    if soort == "omhoog":
+        nieuw_doel, nieuwe_poging = _gut_stap_omhoog(
+            doel, doel_wedstrijd["grens"] or 120), 1
+    elif soort == "omlaag":
+        nieuw_doel, nieuwe_poging = max(15, doel - GUT_STAP), 1
+    elif soort in ("herhaal", "product", "maag_herhaal", "maag_formaat"):
+        nieuw_doel, nieuwe_poging = doel, poging + 1
+    elif soort.startswith("fase_"):
+        nieuw_doel, nieuwe_poging = doel, 1
+    else:
+        nieuw_doel, nieuwe_poging = doel, poging
+
+    fase = _gut_volgende_fase(soort, vorige.get("fase") or "opbouw")
+
+    # de coach mag een eigen dosis zetten, ook boven wat het protocol zou doen
+    if data.get("doel_kh_uur") is not None:
+        try:
+            gevraagd = int(data["doel_kh_uur"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "doel_kh_uur moet een getal zijn")
+        if gevraagd < 15 or gevraagd > 200:
+            raise HTTPException(400, "doel_kh_uur ligt buiten een zinnig bereik")
+        nieuw_doel = gevraagd
+
+    # eerst kijken, dan pas schrijven -- zoals bij het bijsturen
+    waarschuwingen = _gut_coach_waarschuwingen(supabase, klant_id, nieuw_doel, fase)
+    if waarschuwingen and not data.get("doorbraak_bevestigd"):
+        return {"ok": False, "reden": "waarschuwingen", "waarschuwingen": waarschuwingen}
+
+    rij = {
+        "user_id": klant_id,
+        "nummer": int(vorige["nummer"]) + 1,
+        "doel_kh_uur": nieuw_doel,
+        "status": "open",
+        "poging": nieuwe_poging,
+        "door_coach": coach_id,
+    }
+    rij.update(_gut_fase_parameters(fase, doel_wedstrijd.get("duur_uur")))
+    if data.get("intensiteit"):
+        rij["intensiteit"] = _gut_intensiteit(data["intensiteit"])
+    if data.get("min_duur_min") is not None:
+        try:
+            rij["min_duur_min"] = int(data["min_duur_min"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "min_duur_min moet een getal zijn")
+    if data.get("coach_notitie") is not None:
+        rij["coach_notitie"] = str(data["coach_notitie"]).strip() or None
+    if heeft_kolom:
+        rij["reeks"] = reeks_nu
+    if _gut_fase_kolom(supabase):
+        rij["fase"] = fase
+    if _gut_bron_kolom(supabase):
+        rij["bron"] = "protocol"
+
+    nieuw_moment, bestond = _gut_voeg_moment_toe(supabase, klant_id, rij)
+    return {"ok": True, "bestond_al": bestond,
+            "moment": _gut_moment_uit(nieuw_moment, None if bestond else "protocol"),
+            "waarschuwingen": waarschuwingen}
 
 
 @app.post("/api/coach/klant/{klant_id}/gut-moment")
@@ -1799,13 +1917,13 @@ async def coach_stuur_moment_bij(klant_id: str, data: dict,
         raise HTTPException(400, "Niets om bij te sturen")
 
     # Eerst kijken, dan pas schrijven -- zoals bij de herstartbevestiging.
-    doorbraak = None
+    waarschuwingen: list = []
     if "doel_kh_uur" in velden:
-        doorbraak = _gut_coach_fasedoorbraak(supabase, klant_id,
-                                             velden["doel_kh_uur"],
-                                             open_moment.get("fase"))
-        if doorbraak and not data.get("doorbraak_bevestigd"):
-            return {"ok": False, "fasedoorbraak": doorbraak}
+        waarschuwingen = _gut_coach_waarschuwingen(supabase, klant_id,
+                                                   velden["doel_kh_uur"],
+                                                   open_moment.get("fase"))
+        if waarschuwingen and not data.get("doorbraak_bevestigd"):
+            return {"ok": False, "waarschuwingen": waarschuwingen}
 
     if heeft_notitie:
         velden["coach_notitie"] = notitie or None
@@ -1813,7 +1931,7 @@ async def coach_stuur_moment_bij(klant_id: str, data: dict,
     velden["bijgewerkt"] = "now()"
     (supabase.table("carboo_gut_testmomenten").update(velden)
      .eq("id", open_moment["id"]).eq("user_id", klant_id).execute())
-    return {"ok": True, "moment_id": open_moment["id"], "fasedoorbraak": doorbraak}
+    return {"ok": True, "moment_id": open_moment["id"], "waarschuwingen": waarschuwingen}
 # === EINDE COACH STUURT BIJ =================================================
 
 @app.get("/api/gut/protocol")
@@ -6003,6 +6121,59 @@ def _gut_coach_fasedoorbraak(supabase, user_id: str, dosis: int, fase: str = "op
     except Exception as e:
         print(f"[GUT-COACH-MOMENT-V1] fasedoorbraak bepalen mislukt: {e}")
         return None
+
+
+# Wat een getrainde darm per uur opneemt, glucose en fructose samen. Uit de
+# literatuur, en bewust een eigen getal.
+#
+# NIET af te leiden uit _gut_mix_opname, hoe verleidelijk dat ook is. Die
+# functie kent deze grens niet: _gut_fructose_max is max(30, dosis - 60), dus
+# de fructoseweg schuift mee met de dosis waarnaar getraind wordt. Bij een
+# proefdosis van 300 rekent dat model 240 g fructose en dus 300 g opname. Dat
+# is opzet -- de mixcontrole mag niets blokkeren, ze vraagt alleen of de
+# VERHOUDING bij de dosis past. Een maximum is een ander feit dan een
+# verhouding, en dit is de plek waar dat feit staat.
+GUT_OPNAME_PLAFOND = 120
+
+
+def _gut_coach_waarschuwingen(supabase, user_id: str, dosis: int, fase: str = "opbouw"):
+    """Alles wat een coach moet weten voor hij deze dosis zet. Schrijft niets.
+
+    Geeft een lijst; is die leeg, dan valt er niets te melden. Twee soorten
+    kunnen tegelijk gelden -- 150 bij een sporter die op 60 staat is allebei --
+    en dan horen ze in EEN bevestiging te staan en niet als twee vragen na
+    elkaar. Het scherm plakt de meldingen onder elkaar en stelt de vraag een
+    keer.
+
+    De fasedoorbraak komt uit _gut_coach_fasedoorbraak, die ongemoeid blijft:
+    daar staat tests/test_fasedoorbraak.py op, die hem regel voor regel met
+    beoordeel_testmoment vergelijkt. Die wachter blijft zo geldig, en er komt
+    geen tweede plek met dezelfde fasenregel bij.
+    """
+    uit = []
+    doorbraak = _gut_coach_fasedoorbraak(supabase, user_id, dosis, fase)
+    if doorbraak:
+        uit.append({
+            "soort": "fasedoorbraak",
+            "dosis": doorbraak["dosis"],
+            "grens": doorbraak["grens"],
+            "melding": (
+                f"{doorbraak['dosis']} g/uur ligt op of boven het doel van deze "
+                f"sporter ({doorbraak['grens']} g/uur). Slaagt dit moment, dan "
+                f"beschouwt het protocol het doel als bereikt en gaat het door naar "
+                f"de bevestigingsfase. De opbouw ernaartoe wordt overgeslagen."),
+        })
+    plafond = GUT_OPNAME_PLAFOND
+    if int(dosis or 0) > plafond:
+        uit.append({
+            "soort": "opname",
+            "dosis": int(dosis or 0),
+            "grens": plafond,
+            "melding": (
+                f"Boven {plafond} g per uur neemt de darm het overschot niet meer "
+                f"op, ook niet met een ideale mix van glucose en fructose."),
+        })
+    return uit
 
 
 # ─── GUT-T1-MEELOOPT-V1 ────────────────────────────────────────────────
