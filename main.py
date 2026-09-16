@@ -206,9 +206,16 @@ class FuelcProfiel(BaseModel):
     vet_doel_pct: Optional[int] = 25
     eet_patroon: Optional[str] = "Klassiek (3 maaltijden)"
     momenten_tijden: Optional[str] = None
-    td_0: Optional[bool] = False
-    td_1: Optional[bool] = False
-    td_2: Optional[bool] = False
+    # TUSSENDOORTJES-STANDAARD-V1 - drie losse vlaggen: Voormiddag, Namiddag,
+    # Avondtussendoortje. De standaard staat op True omdat een profiel zonder
+    # tussendoortjes drie eetmomenten heeft en de rest van het bestand er zes
+    # gebruikt; een nieuwe klant die zijn profielscherm nooit opent zou anders
+    # meteen uit de pas lopen. Let op: sla_fuelc_profiel dumpt het hele model,
+    # dus een POST die deze velden weglaat zet ze op True. Beide schrijvers in
+    # de frontend sturen ze mee, dus dat raakt alleen oudere clients.
+    td_0: Optional[bool] = True
+    td_1: Optional[bool] = True
+    td_2: Optional[bool] = True
     voornaam: Optional[str] = None
     achternaam: Optional[str] = None
 
