@@ -392,7 +392,9 @@ class PrivacyInstellingen(BaseModel):
     performance: bool = False
     race_plannen: bool = False
     train_gut: bool = False
-    dossier: bool = False
+    # DOSSIERVLAG-WEG-V1 — dossier is hier weg. De frontend stuurt het veld
+    # mogelijk nog mee; pydantic negeert onbekende velden (extra='ignore'),
+    # dus dat breekt niets in het venster tussen beide deploys.
 
 class CoachOpmerking(BaseModel):
     relatie_id: str
@@ -935,6 +937,9 @@ async def klant_direct_toevoegen(data: dict, user=Depends(get_current_user), sup
     if rel_id:
         bestaande_privacy = supabase.table("carboo_coach_privacy").select("id").eq("relatie_id", rel_id).execute()
         if not bestaande_privacy.data:
+            # DOSSIERVLAG-WEG-V1 — "dossier" wordt hier nog geschreven hoewel
+            # niets het meer leest: de kolom blijft voorlopig staan en of ze
+            # NOT NULL is, is niet nagekeken. Weg zodra de kolom weg is.
             supabase.table("carboo_coach_privacy").insert({
                 "relatie_id": rel_id, "klant_id": klant_id,
                 "dagschema": False, "gewicht": False, "macros": False,
@@ -1016,6 +1021,7 @@ async def accepteer_invite(token: str, user=Depends(get_current_user), supabase:
     # Privacy instellingen
     bestaande_privacy = supabase.table("carboo_coach_privacy").select("id").eq("relatie_id", relatie["id"]).execute()
     if not bestaande_privacy.data:
+        # DOSSIERVLAG-WEG-V1 — zie de uitleg bij de andere insert hierboven.
         supabase.table("carboo_coach_privacy").insert({
             "relatie_id": relatie["id"], "klant_id": user.id,
             "dagschema": False, "gewicht": False, "macros": False,
@@ -1058,7 +1064,6 @@ async def update_privacy(relatie_id: str, item: PrivacyInstellingen, user=Depend
         "performance": item.performance,
         "race_plannen": item.race_plannen,
         "train_gut": item.train_gut,
-        "dossier": item.dossier,
         "bijgewerkt": "now()"
     }).eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
     return {"ok": True}
@@ -1174,16 +1179,6 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         # dat niet is wat het lijkt -- en daar hebben we er deze maand vier van
         # weggehaald.
         result["gut_doel"] = _gut_protocol_doel(supabase, klant_id)
-    if privacy.get("dossier"):
-        # COACH-RAPPORTEN-FILTER-V1 — zelfde tabel, zelfde rijen, zelfde lek.
-        # De uitleg staat bij race_plannen hierboven; deze twee queries horen
-        # woordelijk gelijk te blijven zolang de vlaggen niet samengevoegd zijn.
-        dos = (supabase.table("carboo_rapporten")
-               .select("id,naam,type,meta,datum,status,verwijderd_op")
-               .eq("user_id", klant_id)
-               .or_("verwijderd_op.is.null,status.eq.concept")
-               .order("datum", desc=True).limit(20).execute())
-        result["dossier"] = dos.data or []
     if privacy.get("voedingskwaliteit") or privacy.get("performance") or privacy.get("macros"):
         if "dagschema" not in result:
             # Voor coach analyses: volledige velden inclusief micronutrienten
