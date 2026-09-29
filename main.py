@@ -3858,6 +3858,57 @@ def _vocht_ml(r: dict) -> float:
     return 0.0
 
 
+# EIWIT-HERKOMST-BACKEND-V1 — dierlijk of plantaardig eiwit, zoals de kaart
+# "Herkomst eiwit" in Analyses (EIWIT-HERKOMST-V2 in analyses.tsx, met
+# herkenCategorie uit analyse-utils.ts): wijzig ze SAMEN. Alles wat in geen
+# van beide lijsten staat (supplement, overig) telt in het totaal mee.
+_G_DIER = {"Vlees & vis", "Vlees", "Vis", "Schaal- en schelpdieren", "Zuivel", "Eieren"}
+_G_PLANT = {"Peulvruchten", "Sojaproducten", "Noten & zaden", "Noten en zaden", "Vleesvervanger",
+            "Granen & brood", "Granen en brood", "Groenten", "Groenten en fruit", "Fruit"}
+_RAAD_CATEGORIE = [
+    ("Sojaproducten", ("tofu", "tempeh", "sojayoghurt", "sojamelk", "edamame")),
+    ("Peulvruchten", ("boon", "linze", "kikker", "hummus", "spliterwt", "erwt")),
+    ("Noten & zaden", ("noot", "amandel", "cashew", "walnoot", "pinda", "chiazaad", "lijnzaad", "pompoenpit")),
+    ("Vlees & vis", ("garnaal", "zalm", "tonijn", "kabeljauw", "makreel", "haring", "kip", "vlees", "gehakt",
+                     "varken", "rund", "lam", "steak", "ham", "worst", "filet", "kalkoen", "biefstuk", "vis")),
+    ("Zuivel", ("melk", "yoghurt", "kwark", "kaas", "room", "boter", "skyr", "plattekaas", "mozzarella")),
+    ("Eieren", ("ei ", "ei,", "eieren", "omelet", "roerei")),
+    ("Granen & brood", ("brood", "pasta", "rijst", "havermout", "wrap", "cracker", "muesli", "granola",
+                        "couscous", "quinoa", "aardappel", "pannenkoek", "wafel")),
+    ("Groenten", ("broccoli", "spinazie", "wortel", "tomaat", "paprika", "courgette", "sla", "komkommer",
+                  "champignon", "avocado", "ui", "prei", "witloof", "groente")),
+    ("Fruit", ("appel", "peer", "banaan", "aardbei", "bosbes", "mango", "kiwi", "sinaas", "druif", "dadel",
+               "rozijn", "fruit")),
+    ("Sportvoeding", ("shake", "proteine", "whey", "energiegel", "sportdrank", "recovery", "isotoon")),
+]
+
+
+def _eiwit_categorie(naam: str, cat: str, supabase: Client) -> str:
+    """De categorie zoals herkenCategorie in de app: de opgeslagen categorie
+    eerst, en pas als die ontbreekt een gok op naam."""
+    c = herken_categorie(naam, cat, supabase)
+    if c and c != "Overige":
+        return c
+    n = (naam or "").lower()
+    for categorie, woorden in _RAAD_CATEGORIE:
+        if any(_bevat_woord(n, w) for w in woorden):
+            return categorie
+        # zoals in de app: ook alles wat met "ei" begint, op de plaats van Eieren
+        if categorie == "Eieren" and n.startswith("ei"):
+            return categorie
+    return "Overige"
+
+
+def _ingredienten(rc: dict) -> list:
+    ingr = (rc or {}).get("ingredienten") or []
+    if isinstance(ingr, str):
+        try:
+            ingr = json.loads(ingr)
+        except Exception:
+            ingr = []
+    return [i for i in ingr if isinstance(i, dict)]
+
+
 def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, met_inzichten: bool = True) -> dict:
     # alles in een paar bevragingen, niet een per dag
     dg = supabase.table("fuelc_dagboek").select("*") \
@@ -3908,7 +3959,41 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
                 "suikers": 0.0, "suikers_toegevoegd": 0.0, "verzadigd": 0.0,
                 "omega3": 0.0, "natrium": 0.0, "kalium": 0.0, "calcium": 0.0,
                 "ijzer": 0.0, "vitd": 0.0, "vitb12": 0.0, "vocht": 0.0,
+                "eiwit_dier": 0.0, "eiwit_plant": 0.0,
                 "groenten": 0.0, "fruit": 0.0, "cat_kcal": {}}
+
+    # EIWIT-HERKOMST-BACKEND-V1 — een gelogd recept wordt uitgepakt zoals in
+    # Analyses (RECEPT-UITPAK-V1): het eiwit van de regel wordt over de
+    # ingrediënten verdeeld naar hun aandeel in de kcal (uit de bibliotheek,
+    # anders 1,5 kcal per gram), elk ingrediënt met zijn eigen categorie.
+    bib_ing: dict = {}
+    _ing_namen = {str(i.get("naam") or "").strip() for rc in recepten.values() for i in _ingredienten(rc)}
+    _ing_namen.discard("")
+    if _ing_namen:
+        try:
+            for b in (supabase.table("fuelc_bibliotheek").select("naam,categorie,kcal_100g")
+                      .in_("naam", list(_ing_namen)[:400]).execute().data or []):
+                bib_ing[str(b.get("naam") or "").strip().lower()] = b
+        except Exception as e:
+            print(f"[EIWIT-HERKOMST-BACKEND-V1] bibliotheek niet gelezen: {e}")
+
+    def eiwit_delen(r) -> list:
+        """(categorie, gram eiwit) voor een logregel."""
+        e = float(r.get("eiwit_g") or 0)
+        rc = recepten.get(str(r.get("recept_id"))) if r.get("recept_id") else None
+        ingr = _ingredienten(rc) if rc else []
+        if not ingr:
+            return [(_eiwit_categorie(r.get("naam") or "", r.get("categorie") or "", supabase), e)]
+        schaal = (float(r.get("hoeveelheid_g") or 100) / 100) / max(float(rc.get("aantal_porties") or 1), 1)
+        rijen = []
+        for i in ingr:
+            naam = str(i.get("naam") or "").strip()
+            gram = float(i.get("gram") or i.get("hoeveelheid_g") or 0) * schaal
+            b = bib_ing.get(naam.lower())
+            kcal = float(b.get("kcal_100g") or 0) * gram / 100 if b else gram * 1.5
+            rijen.append((_eiwit_categorie(naam, (b or {}).get("categorie") or "", supabase), kcal))
+        totaal = sum(k for _, k in rijen) or 1
+        return [(c, e * k / totaal) for c, k in rijen]
 
     dagen: dict = {}
     per_moment_dag: dict = {}    # datum -> moment -> kh/eiwit/vet
@@ -3943,6 +4028,12 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
 
         cat = herken_categorie(r.get("naam") or "", r.get("categorie") or "", supabase)
         v["cat_kcal"][cat] = v["cat_kcal"].get(cat, 0) + (r.get("kcal") or 0)
+
+        for _c, _e in eiwit_delen(r):
+            if _c in _G_DIER:
+                v["eiwit_dier"] += _e
+            elif _c in _G_PLANT:
+                v["eiwit_plant"] += _e
 
         m = r.get("moment")
         if m is not None and m < 90:
@@ -4057,6 +4148,22 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
     nd = [_nd_score(v) for v in dagen.values() if v["kcal"] > 0]
     nd_gem = round(sum(nd) / len(nd), 1) if nd else 0.0
 
+    # NORMEN-EIWIT-BALANS-V1 — waarden voor drie normen die in carboo_normen
+    # stonden maar nooit berekend werden. Eiwit per hoofdmaaltijd: het
+    # gemiddelde per hoofdmaaltijd van dit profiel, over de volledige dagen;
+    # een hoofdmaaltijd die nooit ingevuld werd, telt als 0.
+    eiwit_hoofd = []
+    for m, naam in enumerate(_moment_namen(profiel)):
+        if _is_hoofdmaaltijd(naam):
+            eiwit_hoofd.append(round((per_moment.get(m) or {}).get("eiwit", 0) / n_dagen))
+    # Energiebalans: wat er gegeten werd tegenover het dagdoel van het
+    # dagschema (energiedoel plus de trainingen van die dag), over dezelfde dagen.
+    _e_basis = float(profiel.get("energie_doel") or 2000)
+    _tr_kcal = _trainingskcal_per_dag(tr)
+    _doel_som = sum(_e_basis + _tr_kcal.get(str(d)[:10], 0) for d in dagen)
+    energiebalans = (round(sum(v["kcal"] for v in dagen.values()) / _doel_som * 100, 1)
+                     if _doel_som and dagen else None)
+
     res = {
         "van": van, "tot": tot,
         "voornaam": (profiel.get("voornaam") or "").strip() or None,
@@ -4090,6 +4197,12 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
             # NORM-ND-V1 — de nutriëntdensiteit stond alleen bovenaan in res,
             # waar de normcontrole ze niet zocht
             "nd": nd_gem,
+            "eiwit_hoofdmaaltijden": eiwit_hoofd,
+            "energiebalans_pct": energiebalans,
+            # EIWIT-HERKOMST-BACKEND-V1 — aandeel plantaardig in al het eiwit
+            "eiwit_plantaardig_pct": (round(sum(v["eiwit_plant"] for v in dagen.values()) /
+                                            sum(v["eiwit"] for v in dagen.values()) * 100, 1)
+                                      if sum(v["eiwit"] for v in dagen.values()) > 0 else None),
         },
         "dagen": [
             {"datum": d,
@@ -4490,6 +4603,16 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         if gewicht and pd.get("eiwit") is not None:
             w["eiwit_g_kg"] = round(pd["eiwit"] / gewicht, 2)
 
+        # NORMEN-EIWIT-BALANS-V1
+        _hoofd = pd.get("eiwit_hoofdmaaltijden") or []
+        if gewicht and _hoofd:
+            w["eiwit_maaltijd_g_kg"] = round(sum(_hoofd) / len(_hoofd) / gewicht, 2)
+            w["eiwit_maaltijden_ok"] = len([e for e in _hoofd if e >= 0.3 * gewicht])
+        if pd.get("energiebalans_pct") is not None:
+            w["energiebalans_pct"] = pd["energiebalans_pct"]
+        if pd.get("eiwit_plantaardig_pct") is not None:
+            w["eiwit_plantaardig_pct"] = pd["eiwit_plantaardig_pct"]
+
         _v = pd.get("vocht") or pd.get("vocht_ml")
         if _v and dagen_met_drank >= 4:
             w["vocht_dag"] = _v
@@ -4504,6 +4627,17 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         _vr = _waarden(res.get("vorige") or {}, _gew,
                        (res.get("vorige") or {}).get("drankdagen") or 0)
 
+        # NORM-GESLACHT-V1 — een norm kan een aparte ondergrens voor mannen
+        # hebben (kolom norm_min_man, voor ijzer: 9 mg tegenover 15 mg bij
+        # vrouwen, Hoge Gezondheidsraad 2016). Na de menopauze geldt voor
+        # vrouwen de mannenwaarde; het profiel kent de menopauze niet, dus
+        # vanaf 50 jaar als benadering. Ontbreekt de kolom, dan norm_min.
+        try:
+            _lft = float(profiel.get("leeftijd") or 0)
+        except (TypeError, ValueError):
+            _lft = 0
+        _mannenwaarde = (profiel.get("geslacht") or "Man") == "Man" or _lft >= 50
+
         _kandidaten = []
         for _n in _normen:
             _s = _n.get("sleutel")
@@ -4511,6 +4645,8 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
                 continue
             _w = _nu[_s]
             _min = _n.get("norm_min")
+            if _mannenwaarde and _n.get("norm_min_man") is not None:
+                _min = float(_n["norm_min_man"])
             _max = _n.get("norm_max")
             _richting = _n.get("richting")
 
