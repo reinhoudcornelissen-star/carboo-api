@@ -3456,6 +3456,69 @@ MOMENT_NAMEN = {0: "Ontbijt", 1: "Voormiddag", 2: "Lunch",
                 3: "Namiddag", 4: "Avondmaal", 5: "Avondtussendoortje"}
 
 
+# MOMENTEN-BACKEND-V1 — een momentnummer is een PLAATS in de rij eetmomenten
+# van dit profiel, geen vaste naam. Dezelfde regel als basisNamen() in
+# app/app/fueling/momenten.ts: wijzig ze SAMEN. MOMENT_NAMEN hierboven klopt
+# alleen voor wie alle drie de tussendoortjes heeft.
+_TUSSENDOORTJES = ("Voormiddag", "Namiddag", "Avondtussendoortje")
+
+
+def _moment_namen(profiel: dict) -> list:
+    p = profiel or {}
+    if "fasting" in str(p.get("eet_patroon") or ""):
+        return ["Eerste maaltijd", "Tweede maaltijd", "Derde maaltijd"]
+    sleutels = ("td_0", "td_1", "td_2")
+    # Ontbreken de vlaggen helemaal, dan alle drie aan (zoals momenten.ts);
+    # staat er None, dan is dat gewoon uit.
+    if not any(k in p for k in sleutels):
+        v = n = a = True
+    else:
+        v, n, a = (p.get(k) is True for k in sleutels)
+    namen = ["Ontbijt"]
+    if v: namen.append("Voormiddag")
+    namen.append("Lunch")
+    if n: namen.append("Namiddag")
+    namen.append("Avondmaal")
+    if a: namen.append("Avondtussendoortje")
+    return namen
+
+
+def _moment_naam(profiel: dict, m: int) -> str:
+    namen = _moment_namen(profiel)
+    if 0 <= m < len(namen):
+        return namen[m]
+    if m == len(namen):
+        return "Herstel"
+    return "Moment " + str(m)
+
+
+def _is_hoofdmaaltijd(naam: str) -> bool:
+    return naam not in _TUSSENDOORTJES and naam != "Herstel" and not naam.startswith("Moment ")
+
+
+# KH-DOEL-DAGSCHEMA-V1 — hetzelfde koolhydraatdoel als het dagschema
+# (macroDoelen in dagschema.tsx, MACRO-ANKER-V1): eiwit in g/kg, vet met een
+# ondergrens van 20% van de energie, koolhydraten krijgen de rest.
+def _kh_doel_dag(profiel: dict, kcal: float) -> float:
+    eiwit = bereken_eiwit_doel(profiel)
+    vt = float(profiel.get("vet_doel_pct") or 25)
+    vet = max(round(kcal * vt / 100 / 9), round(kcal * 20 / 100 / 9))
+    return max(0.0, (kcal - eiwit * 4 - vet * 9) / 4)
+
+
+# Trainingskcal per dag zoals het dagschema ze telt: per sport wint Strava
+# (werkelijk) van gepland, zodat een rit niet dubbel meetelt.
+def _trainingskcal_per_dag(trainingen: list) -> dict:
+    per_dag: dict = {}
+    for t in trainingen:
+        d = str(t.get("datum"))[:10]
+        sp = t.get("sport") or "Overig"
+        vak = per_dag.setdefault(d, {}).setdefault(sp, {"gepland": 0.0, "strava": 0.0})
+        vak["strava" if t.get("bron") == "strava" else "gepland"] += t.get("kcal_verbranding") or 0
+    return {d: sum(s["strava"] if s["strava"] > 0 else s["gepland"] for s in sporten.values())
+            for d, sporten in per_dag.items()}
+
+
 def _gf_gram(rij: dict, recepten: dict, supabase: Client):
     """Hoeveel gram groente en fruit zit er in deze logregel?
 
@@ -3811,11 +3874,13 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
             .in_("id", recept_ids).execute().data or []
         recepten = {str(x["id"]): x for x in rr}
 
-    # INZICHTEN-V1 — de doelen komen uit het profiel
+    # INZICHTEN-V1 — de doelen komen uit het profiel. Het volledige profiel:
+    # de eetmomenten (eet_patroon, td_0..2) en het eiwitdoel (gewicht, lengte,
+    # leeftijd, geslacht, doelstelling) hebben elk hun eigen velden nodig.
     profiel = {}
     try:
         pr = supabase.table("fuelc_profiel") \
-            .select("energie_doel,kh_doel_pct,eiwit_doel_pct,vet_doel_pct,gewicht_kg,voornaam,achternaam") \
+            .select("*") \
             .eq("user_id", user_id).limit(1).execute().data or []
         profiel = pr[0] if pr else {}
     except Exception:
@@ -3846,7 +3911,8 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
                 "groenten": 0.0, "fruit": 0.0, "cat_kcal": {}}
 
     dagen: dict = {}
-    per_moment: dict = {}
+    per_moment_dag: dict = {}    # datum -> moment -> kh/eiwit/vet
+    momenten_dag: dict = {}      # datum -> ingevulde eetmomenten
 
     for r in dg:
         d = str(r.get("datum"))
@@ -3880,10 +3946,29 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
 
         m = r.get("moment")
         if m is not None and m < 90:
-            pm = per_moment.setdefault(int(m), {"kh": 0.0, "eiwit": 0.0, "vet": 0.0})
+            momenten_dag.setdefault(d, set()).add(int(m))
+            pm = per_moment_dag.setdefault(d, {}).setdefault(int(m), {"kh": 0.0, "eiwit": 0.0, "vet": 0.0})
             pm["kh"] += r.get("kh_g") or 0
             pm["eiwit"] += r.get("eiwit_g") or 0
             pm["vet"] += r.get("vet_g") or 0
+
+    # VOLLEDIGE-DAGEN-V1 — een dag telt pas mee als er minstens drie eetmomenten
+    # ingevuld zijn, dezelfde regel als de streak. Een dag met alleen een
+    # ontbijt drukte anders de gemiddelden van groenten, vezels en fruit, en
+    # leverde "blijft achter" op voor wat gewoon niet ingevuld was. Is er geen
+    # enkele volledige dag, dan valt het rapport terug op alle dagen.
+    alle_dagen = dagen
+    volledig = {d: v for d, v in dagen.items() if len(momenten_dag.get(d, ())) >= 3}
+    alleen_volledig = bool(volledig)
+    if alleen_volledig:
+        dagen = volledig
+
+    per_moment: dict = {}
+    for d in dagen:
+        for m, w in per_moment_dag.get(d, {}).items():
+            pm = per_moment.setdefault(m, {"kh": 0.0, "eiwit": 0.0, "vet": 0.0})
+            for k in pm:
+                pm[k] += w[k]
 
     n_dagen = max(len(dagen), 1)
 
@@ -3977,6 +4062,10 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
         "voornaam": (profiel.get("voornaam") or "").strip() or None,
         "gewicht_kg": gewicht, "gewogen_op": gewogen_op,
         "dagen_gelogd": len(dagen),
+        # VOLLEDIGE-DAGEN-V1 — dagen met iets ingevuld maar minder dan drie
+        # eetmomenten; ze tellen niet mee zolang alleen_volledig waar is.
+        "dagen_onvolledig": len(alle_dagen) - len(volledig) if alleen_volledig else len(alle_dagen),
+        "alleen_volledig": alleen_volledig,
         "trainingen_aantal": len(tr),
         "trainingsminuten": sum((t.get("duur_min") or 0) for t in tr),
         "verbrand_kcal": round(sum((t.get("kcal_verbranding") or 0) for t in tr)),
@@ -3998,17 +4087,21 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
             "natrium": round(gem("natrium")), "kalium": round(gem("kalium")),
             "calcium": round(gem("calcium")), "ijzer": gem("ijzer"),
             "vitd": gem("vitd"), "vitb12": gem("vitb12"),
+            # NORM-ND-V1 — de nutriëntdensiteit stond alleen bovenaan in res,
+            # waar de normcontrole ze niet zocht
+            "nd": nd_gem,
         },
         "dagen": [
             {"datum": d,
              "kcal": round(v["kcal"]), "kh": round(v["kh"]),
              "eiwit": round(v["eiwit"]), "vet": round(v["vet"]),
              "groenten": round(v["groenten"]), "fruit": round(v["fruit"]),
-             "nd": _nd_score(v)}
-            for d, v in sorted(dagen.items())
+             "nd": _nd_score(v), "volledig": d in volledig}
+            for d, v in sorted(alle_dagen.items())
         ],
         "dagdelen": [
-            {"moment": m, "naam": MOMENT_NAMEN.get(m, "Moment " + str(m)),
+            {"moment": m, "naam": _moment_naam(profiel, m),
+             "hoofdmaaltijd": _is_hoofdmaaltijd(_moment_naam(profiel, m)),
              "kh": round(p["kh"] / n_dagen), "eiwit": round(p["eiwit"] / n_dagen),
              "vet": round(p["vet"] / n_dagen)}
             for m, p in sorted(per_moment.items())
@@ -4196,18 +4289,17 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
               str(round(_n_vezels)) + "."))
 
     # ── macro's ─────────────────────────────────────────────────────
-    e_doel = float(profiel.get("energie_doel") or 0)
-    kh_pct = float(profiel.get("kh_doel_pct") or 50)
-
-    tr_per_dag = {}
-    for t in trainingen:
-        tr_per_dag[str(t.get("datum"))] = tr_per_dag.get(str(t.get("datum")), 0) + (t.get("kcal_verbranding") or 0)
+    # KH-DOEL-DAGSCHEMA-V1 — het doel dat de sporter in zijn dagschema zag:
+    # energiedoel (standaard 2000, zoals het dagschema) plus de trainingskcal
+    # van die dag, en daaruit de koolhydraten als restpost. Voorheen was het
+    # energiedoel x kh_doel_pct plus ALLE trainingskcal als koolhydraten, een
+    # doel dat nergens in de app te zien was.
+    e_doel = float(profiel.get("energie_doel") or 2000)
+    tr_per_dag = _trainingskcal_per_dag(trainingen)
 
     dagpct = []
     for datum, v in dagen.items():
-        if e_doel <= 0:
-            continue
-        doel_kh = (e_doel * kh_pct / 100 + tr_per_dag.get(datum, 0)) / 4
+        doel_kh = _kh_doel_dag(profiel, e_doel + tr_per_dag.get(str(datum)[:10], 0))
         if doel_kh > 0:
             dagpct.append((datum, v["kh"] / doel_kh))
 
@@ -4230,10 +4322,13 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
 
     dagdelen = res.get("dagdelen") or []
     if dagdelen:
-        zwaarste = max(dagdelen, key=lambda m: m["eiwit"])
-        lichtste = min([m for m in dagdelen if m["moment"] in (0, 2, 4)] or dagdelen,
-                       key=lambda m: m["eiwit"])
-        if zwaarste["eiwit"] > 40:
+        # MOMENTEN-BACKEND-V1 — alleen hoofdmaaltijden onderling: dat een
+        # tussendoortje minder eiwit heeft dan een avondmaal is geen scheve
+        # verdeling. En pas scheef als de lichtste minder dan de helft heeft.
+        hoofd = [m for m in dagdelen if m.get("hoofdmaaltijd")]
+        zwaarste = max(hoofd, key=lambda m: m["eiwit"]) if len(hoofd) >= 2 else None
+        lichtste = min(hoofd, key=lambda m: m["eiwit"]) if len(hoofd) >= 2 else None
+        if zwaarste and zwaarste["eiwit"] > 40 and lichtste["eiwit"] < zwaarste["eiwit"] / 2:
             voeg(macros, "rood", "Je eiwit staat scheef verdeeld",
                  (str(zwaarste["eiwit"]) + " gram in je " + zwaarste["naam"].lower() +
                   " tegenover " + str(lichtste["eiwit"]) + " in je " + lichtste["naam"].lower() +
@@ -6891,7 +6986,15 @@ async def get_bord(maand: str,
         n = str(it.get("naam") or "").strip().lower()
         if n in op_naam:
             return op_naam[n]
-        return CAT.get(it.get("categorie") or "")
+        # BORD-FRUIT-V1 — "Groenten en fruit" niet blind naar groente: dezelfde
+        # woordenlijst als het weekrapport splitst in groente, fruit en knollen.
+        # Anders telde een banaan zonder bordrol als groente, en klonk "fruit
+        # kwam nauwelijks op je ontbijt" onterecht.
+        cat = it.get("categorie") or ""
+        if cat.lower().strip() in ("groenten en fruit", "groenten & fruit"):
+            soort = herken_categorie(n, cat, supabase)
+            return {"Fruit": "fruit", "Granen & brood": "zetmeel"}.get(soort, "groente")
+        return CAT.get(cat)
 
     # ── BORD-RECEPTEN-V1 — een recept uitpakken naar zijn ingredienten ──
     # Een gelogd recept heeft geen bordrol: pasta carbonara is zetmeel,
