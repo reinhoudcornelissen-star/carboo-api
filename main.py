@@ -3775,6 +3775,26 @@ def _kies_recepten(user_id: str, res: dict, tot: str, supabase: Client) -> dict:
         return {"recepten": []}
 
 
+# VOCHT-DAG-V1 — hoeveel ml vocht zit er in deze logregel? Dezelfde lijst als
+# de drinkmelding in de app (lib/drinkmelding.ts): herkend op naam, met het
+# aandeel vocht per product. Een regel uit de categorie Dranken telt volledig.
+_VOCHT_PCT = {"water": 100, "melk": 100, "yoghurt": 85, "koffie": 100, "thee": 100,
+              "sap": 100, "sportdrank": 100, "drink": 100, "smoothie": 80, "soep": 90}
+
+
+def _vocht_ml(r: dict) -> float:
+    ml = float(r.get("hoeveelheid_g") or 0)
+    if ml <= 0:
+        return 0.0
+    naam = str(r.get("naam") or "").lower()
+    for woord, pct in _VOCHT_PCT.items():
+        if woord in naam:
+            return ml * pct / 100
+    if "drank" in str(r.get("categorie") or "").lower():
+        return ml
+    return 0.0
+
+
 def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, met_inzichten: bool = True) -> dict:
     # alles in een paar bevragingen, niet een per dag
     dg = supabase.table("fuelc_dagboek").select("*") \
@@ -3814,11 +3834,15 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
         pass
 
     # ── per dag optellen ────────────────────────────────────────────
+    # kcal_voeding en suikers_toegevoegd laten sportvoeding tijdens een
+    # training buiten beschouwing (SPORTSUIKER-V1): die suiker raadt de app
+    # zelf aan, en ze hoort niet in de norm voor de gewone voeding.
+    # vocht telt wat er buiten de trainingen gedronken werd (VOCHT-DAG-V1).
     def leeg():
-        return {"kcal": 0.0, "kh": 0.0, "eiwit": 0.0, "vet": 0.0, "vezels": 0.0,
+        return {"kcal": 0.0, "kcal_voeding": 0.0, "kh": 0.0, "eiwit": 0.0, "vet": 0.0, "vezels": 0.0,
                 "suikers": 0.0, "suikers_toegevoegd": 0.0, "verzadigd": 0.0,
                 "omega3": 0.0, "natrium": 0.0, "kalium": 0.0, "calcium": 0.0,
-                "ijzer": 0.0, "vitd": 0.0, "vitb12": 0.0,
+                "ijzer": 0.0, "vitd": 0.0, "vitb12": 0.0, "vocht": 0.0,
                 "groenten": 0.0, "fruit": 0.0, "cat_kcal": {}}
 
     dagen: dict = {}
@@ -3827,13 +3851,17 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
     for r in dg:
         d = str(r.get("datum"))
         v = dagen.setdefault(d, leeg())
+        _sport = (r.get("moment") or 0) >= 90
         v["kcal"] += r.get("kcal") or 0
         v["kh"] += r.get("kh_g") or 0
         v["eiwit"] += r.get("eiwit_g") or 0
         v["vet"] += r.get("vet_g") or 0
         v["vezels"] += r.get("vezels_g") or 0
         v["suikers"] += r.get("suikers_g") or 0
-        v["suikers_toegevoegd"] += r.get("suikers_toegevoegd_g") or 0
+        if not _sport:
+            v["kcal_voeding"] += r.get("kcal") or 0
+            v["suikers_toegevoegd"] += r.get("suikers_toegevoegd_g") or 0
+            v["vocht"] += _vocht_ml(r)
         v["verzadigd"] += r.get("verz_g") or 0
         v["omega3"] += r.get("omega3_g") or 0
         v["natrium"] += r.get("natrium_mg") or 0
@@ -3862,6 +3890,11 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
     def gem(sleutel):
         return round(sum(v[sleutel] for v in dagen.values()) / n_dagen, 1)
 
+    # Vocht alleen over de dagen waarop er drinken ingevuld is: een dag zonder
+    # drank zegt dat het niet bijgehouden werd, niet dat er niets gedronken werd.
+    drankdagen = [v["vocht"] for v in dagen.values() if v["vocht"] > 0]
+    vocht_gem = round(sum(drankdagen) / len(drankdagen)) if drankdagen else 0
+
     # ── per training ────────────────────────────────────────────────
     def moment_voor(start) -> int:
         s = str(start or "")[:5]
@@ -3877,21 +3910,44 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
         return round(sum((r.get(veld) or 0) for r in dg
                          if str(r.get("datum")) == str(datum) and r.get("moment") == moment))
 
+    # TRAININGSITEMS-V1 — elk item tijdens een training hoort bij één training.
+    # Voorheen kreeg elke training alle trainingsitems van die dag, zodat bij
+    # twee sessies op een dag dezelfde bidon twee keer telde. Eerst de koppeling
+    # via training_id; oudere items hebben die niet en dragen moment 99 + de
+    # plaats van de training op die dag. Is er die dag maar één training, dan
+    # hoort alles daarbij.
+    tr_per_datum: dict = {}
+    for t in tr:
+        tr_per_datum.setdefault(str(t.get("datum"))[:10], []).append(t)
+
+    def items_van(t) -> list:
+        datum = str(t.get("datum"))[:10]
+        dag_tr = tr_per_datum.get(datum) or [t]
+        plaats = next((i for i, x in enumerate(dag_tr) if x is t), 0)
+        uit = []
+        for r in dg:
+            if str(r.get("datum"))[:10] != datum or (r.get("moment") or 0) < 90:
+                continue
+            tid = r.get("training_id")
+            if tid:
+                if str(tid) == str(t.get("id")):
+                    uit.append(r)
+            elif len(dag_tr) == 1 or (r.get("moment") or 0) - 99 == plaats:
+                uit.append(r)
+        return uit
+
     trainingen = []
     for t in tr:
         mv = moment_voor(t.get("starttijd"))
         duur = t.get("duur_min") or 0
-        tijdens = round(sum((r.get("kh_g") or 0) for r in dg
-                            if str(r.get("datum")) == str(t.get("datum"))
-                            and (r.get("moment") or 0) >= 90))
+        _eigen = items_van(t)
+        tijdens = round(sum((r.get("kh_g") or 0) for r in _eigen))
         # BEVINDINGEN-TRAININGEN-V1 — vocht en intensiteit horen bij het beeld van een training
         _DRANKW = ("water", "sportdrank", "isotoon", "thee", "koffie", "cola",
                    "drank", "limonade", "sap", "bidon")
-        vocht_ml = round(sum((r.get("hoeveelheid_g") or 0) for r in dg
-                             if str(r.get("datum")) == str(t.get("datum"))
-                             and (r.get("moment") or 0) >= 90
-                             and (("drank" in (r.get("categorie") or "").lower())
-                                  or any(w in (r.get("naam") or "").lower() for w in _DRANKW))))
+        vocht_ml = round(sum((r.get("hoeveelheid_g") or 0) for r in _eigen
+                             if (("drank" in (r.get("categorie") or "").lower())
+                                 or any(w in (r.get("naam") or "").lower() for w in _DRANKW))))
         _uren = (duur / 60) if duur else 0
         _kcal_uur = ((t.get("kcal_verbranding") or 0) / _uren) if _uren > 0 else 0
         trainingen.append({
@@ -3927,8 +3983,10 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
 
         "nutrientdensiteit": nd_gem,
         "per_dag": {
-            "kcal": gem("kcal"), "kh": gem("kh"), "eiwit": gem("eiwit"), "vet": gem("vet"),
+            "kcal": gem("kcal"), "kcal_voeding": gem("kcal_voeding"),
+            "kh": gem("kh"), "eiwit": gem("eiwit"), "vet": gem("vet"),
             "vezels": gem("vezels"),
+            "vocht": vocht_gem, "drankdagen": len(drankdagen),
             "zetmeel": round(gem("kh") - gem("suikers"), 1),
             "suikers_natuurlijk": round(gem("suikers") - gem("suikers_toegevoegd"), 1),
             "suikers_toegevoegd": gem("suikers_toegevoegd"),
@@ -4063,12 +4121,16 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
                  ("Gemiddeld " + str(d["fruit"]) + " gram per dag."))
 
     kcal = max(d["kcal"], 1)
+    # SPORTSUIKER-V1 — de suikernorm geldt voor de gewone voeding. Gels en
+    # sportdrank tijdens een training tellen niet mee, in teller noch noemer.
+    kcal_voeding = max(d.get("kcal_voeding") or d["kcal"], 1)
     _n_suiker = _norm("suikers_toegevoegd_pct", "norm_max", 10)
-    pct_toeg = (d["suikers_toegevoegd"] * 4 / kcal) * 100
+    pct_toeg = (d["suikers_toegevoegd"] * 4 / kcal_voeding) * 100
     if pct_toeg > _n_suiker:
         voeg(kwaliteit, "rood", "Te veel toegevoegde suiker",
              ("Toegevoegde suikers leverden " + str(round(pct_toeg)) + "% van je energie, "
-              "tegenover " + str(round(_n_suiker)) + "% als bovengrens."))
+              "tegenover " + str(round(_n_suiker)) + "% als bovengrens. Sportvoeding tijdens "
+              "je trainingen telt hier niet mee; dit komt uit je gewone maaltijden."))
     else:
         voeg(kwaliteit, "groen", "Je suikers zitten goed",
              ("Toegevoegde suikers bleven op " + str(round(pct_toeg)) + "% van je energie, "
@@ -4088,6 +4150,35 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
              (str(round(pct_verz_e)) + "% van je energie uit verzadigd vet, onder de grens van " +
               str(round(_n_verz)) + "%."))
 
+    # VOCHT-KWALITEIT-V1 — vocht hoort bij de kwaliteit van een dag, niet
+    # alleen bij de trainingen. Zwijgt wanneer er te weinig gelogd is:
+    # zonder drankdagen zou iedereen "te weinig" te horen krijgen, ook wie
+    # genoeg drinkt maar het niet bijhoudt. Dezelfde drempel van vier dagen
+    # als bij de normvergelijking in de kop.
+    # VOCHT-DAG-V1 — vocht wordt nu echt per dag opgeteld (_vocht_ml); het
+    # gemiddelde loopt over de dagen waarop er drinken ingevuld is.
+    _drankdagen_k = d.get("drankdagen") or 0
+    _vocht = d.get("vocht") or 0
+    if _vocht and _drankdagen_k >= 4:
+        _n_vocht_min = _norm("vocht_dag", "norm_min", 2000)
+        _n_vocht_max = _norm("vocht_dag", "norm_max", 2500)
+        _lt = str(round(_vocht / 1000, 1)).replace(".", ",")
+        _op = "Op de " + str(_drankdagen_k) + " dagen dat je drinken invulde: "
+        if _vocht < _n_vocht_min:
+            voeg(kwaliteit, "geel", "Je drinkt te weinig",
+                 (_op + _lt + " liter per dag, tegenover 2 tot 2,5 liter als richtlijn. "
+                  "Een extra glas bij elke maaltijd sluit dat gat meestal al. Reken "
+                  "daarbovenop wat je tijdens een training verliest."))
+        elif _vocht > _n_vocht_max * 1.6:
+            voeg(kwaliteit, "groen", "Je drinkt ruim",
+                 (_op + _lt + " liter per dag, boven de richtlijn van 2 tot 2,5 liter. "
+                  "Dat mag, zolang je plas licht van kleur blijft."))
+        else:
+            voeg(kwaliteit, "groen", "Je vochtinname zit goed",
+                 (_op + _lt + " liter per dag, binnen de richtlijn van 2 tot 2,5 liter."))
+
+    # Omega 3 en vezels na vocht: binnen dezelfde ernst gaat vocht voor, zodat
+    # het niet wegvalt achter de grens van vijf vaststellingen.
     _n_omega = _norm("omega3", "norm_min", 1.5)
     if d["omega3"] < _n_omega:
         voeg(kwaliteit, "geel", "Weinig omega 3",
@@ -4103,31 +4194,6 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         voeg(kwaliteit, "groen", "Je vezels zitten op peil",
              (str(d["vezels"]) + " gram per dag, boven de richtlijn van " +
               str(round(_n_vezels)) + "."))
-
-    # VOCHT-KWALITEIT-V1 — vocht hoort bij de kwaliteit van een dag, niet
-    # alleen bij de trainingen. Zwijgt wanneer er te weinig gelogd is:
-    # zonder drankdagen zou iedereen "te weinig" te horen krijgen, ook wie
-    # genoeg drinkt maar het niet bijhoudt. Dezelfde drempel van vier dagen
-    # als bij de normvergelijking in de kop.
-    _drankdagen_k = len([1 for _dg in dagen.values()
-                         if (_dg.get("vocht") or _dg.get("vocht_ml") or 0) > 0])
-    _vocht = d.get("vocht") or d.get("vocht_ml") or 0
-    if _vocht and _drankdagen_k >= 4:
-        _n_vocht_min = _norm("vocht_dag", "norm_min", 2000)
-        _n_vocht_max = _norm("vocht_dag", "norm_max", 2500)
-        _lt = str(round(_vocht / 1000, 1)).replace(".", ",")
-        if _vocht < _n_vocht_min:
-            voeg(kwaliteit, "geel", "Je drinkt te weinig",
-                 (_lt + " liter per dag, tegenover 2 tot 2,5 liter als richtlijn. "
-                  "Een extra glas bij elke maaltijd sluit dat gat meestal al. Reken "
-                  "daarbovenop wat je tijdens een training verliest."))
-        elif _vocht > _n_vocht_max * 1.6:
-            voeg(kwaliteit, "groen", "Je drinkt ruim",
-                 (_lt + " liter per dag, boven de richtlijn van 2 tot 2,5 liter. "
-                  "Dat mag, zolang je plas licht van kleur blijft."))
-        else:
-            voeg(kwaliteit, "groen", "Je vochtinname zit goed",
-                 (_lt + " liter per dag, binnen de richtlijn van 2 tot 2,5 liter."))
 
     # ── macro's ─────────────────────────────────────────────────────
     e_doel = float(profiel.get("energie_doel") or 0)
@@ -4215,10 +4281,12 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
                  ("Gemiddeld " + str(_gem_v) + " ml per uur, tegenover 500 tot 800 als richtlijn. "
                   "Op warme dagen weegt dat zwaarder door dan je koolhydraten."))
         elif _gem_v >= 500:
-            voeg(trainingen_inz, "groen", "Je vochtinname zit goed",
+            voeg(trainingen_inz, "groen", "Onderweg drink je genoeg",
                  ("Gemiddeld " + str(_gem_v) + " ml per uur over je langere sessies."))
 
-    if _kort and not any((t.get("kh_per_uur") or 0) > 0 for t in _kort):
+    # kh_per_uur bestaat pas vanaf een uur; kh_tijdens zegt voor elke sessie
+    # of er iets genomen werd.
+    if _kort and not any((t.get("kh_tijdens") or 0) > 0 for t in _kort):
         voeg(trainingen_inz, "groen", "Korte sessies liet je met rust",
              (str(len(_kort)) + " sessies onder de drempel, zonder bijtanken. Terecht — daar "
               "haal je alles uit je eigen voorraad."))
@@ -4245,7 +4313,7 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
 
     _verg("vezels", "vezels", "g", True)
     _verg("groenten", "groenten", "g", True)
-    _verg("verz", "verzadigd vet", "g", False)
+    _verg("verzadigd", "verzadigd vet", "g", False)
     _verg("eiwit", "eiwit", "g", True)
     _verg("kh", "koolhydraten", "g", True, 20)
     _verg("suikers_toegevoegd", "toegevoegde suikers", "g", False)
@@ -4320,7 +4388,9 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
             if _st is None:
                 _st = pd.get("suikers_toegevoegd_g")
             if _st is not None:
-                w["suikers_toegevoegd_pct"] = round(_st * 4 / kcal * 100, 1)
+                # SPORTSUIKER-V1 — dezelfde noemer als in de kwaliteitsrubriek
+                _kv = pd.get("kcal_voeding") or kcal
+                w["suikers_toegevoegd_pct"] = round(_st * 4 / _kv * 100, 1)
 
         if gewicht and pd.get("eiwit") is not None:
             w["eiwit_g_kg"] = round(pd["eiwit"] / gewicht, 2)
@@ -4335,11 +4405,9 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         _normen = res.get("normen") or []
         _gew = float(profiel.get("gewicht_kg") or 0) or None
 
-        _drankdagen = len([1 for _v in dagen.values()
-                           if (_v.get("vocht") or _v.get("vocht_ml") or 0) > 0])
-
-        _nu = _waarden(d, _gew, _drankdagen)
-        _vr = _waarden(res.get("vorige") or {}, _gew, 7)
+        _nu = _waarden(d, _gew, d.get("drankdagen") or 0)
+        _vr = _waarden(res.get("vorige") or {}, _gew,
+                       (res.get("vorige") or {}).get("drankdagen") or 0)
 
         _kandidaten = []
         for _n in _normen:
@@ -4411,6 +4479,12 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
             kern = _zin_norm(_sterk)
     except Exception as _e:
         print(f"[NORMEN-V1] selectie mislukt: {_e}")
+
+    # ERNST-EERST-V1 — wat aandacht vraagt vóór wat goed gaat. De rubriek toont
+    # er maar vijf; zonder deze volgorde viel een gele vaststelling achteraan
+    # (vocht, vezels) weg achter vier groene.
+    _rang = {"rood": 0, "geel": 1, "groen": 2}
+    kwaliteit.sort(key=lambda i: _rang.get(i["ernst"], 3))
 
     return {
         "kop": kop,
