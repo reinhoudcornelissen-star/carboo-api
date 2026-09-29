@@ -3452,14 +3452,10 @@ async def categorie_woorden(supabase: Client = Depends(get_supabase)):
 
 # ── BEVOORRADING-V1 — de cijfers voor het weekrapport ──────────────────
 
-MOMENT_NAMEN = {0: "Ontbijt", 1: "Voormiddag", 2: "Lunch",
-                3: "Namiddag", 4: "Avondmaal", 5: "Avondtussendoortje"}
-
-
 # MOMENTEN-BACKEND-V1 — een momentnummer is een PLAATS in de rij eetmomenten
 # van dit profiel, geen vaste naam. Dezelfde regel als basisNamen() in
-# app/app/fueling/momenten.ts: wijzig ze SAMEN. MOMENT_NAMEN hierboven klopt
-# alleen voor wie alle drie de tussendoortjes heeft.
+# app/app/fueling/momenten.ts: wijzig ze SAMEN. (De vaste lijst MOMENT_NAMEN
+# die hier stond klopte alleen voor wie alle drie de tussendoortjes had.)
 _TUSSENDOORTJES = ("Voormiddag", "Namiddag", "Avondtussendoortje")
 
 
@@ -4124,20 +4120,6 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
     vocht_gem = round(sum(drankdagen) / len(drankdagen)) if drankdagen else 0
 
     # ── per training ────────────────────────────────────────────────
-    def moment_voor(start) -> int:
-        s = str(start or "")[:5]
-        if not s:
-            return 2
-        if s < "10:00": return 0
-        if s < "12:00": return 1
-        if s < "15:00": return 2
-        if s < "18:00": return 3
-        return 4
-
-    def som(datum, moment, veld):
-        return round(sum((r.get(veld) or 0) for r in dg
-                         if str(r.get("datum")) == str(datum) and r.get("moment") == moment))
-
     # TRAININGSITEMS-V1 — elk item tijdens een training hoort bij één training.
     # Voorheen kreeg elke training alle trainingsitems van die dag, zodat bij
     # twee sessies op een dag dezelfde bidon twee keer telde. Eerst de koppeling
@@ -4166,7 +4148,6 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
 
     trainingen = []
     for t in tr:
-        mv = moment_voor(t.get("starttijd"))
         duur = t.get("duur_min") or 0
         _eigen = items_van(t)
         tijdens = round(sum((r.get("kh_g") or 0) for r in _eigen))
@@ -4187,13 +4168,8 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
             "duur_min": duur,
             "starttijd": t.get("starttijd"),
             "verbrand": round(t.get("kcal_verbranding") or 0),
-            "dagdeel_voor": MOMENT_NAMEN.get(mv, ""),
-            "kh_voor": som(t.get("datum"), mv, "kh_g"),
             "kh_tijdens": tijdens,
             "kh_per_uur": round(tijdens / (duur / 60.0)) if duur >= 60 else None,
-            "dagdeel_na": MOMENT_NAMEN.get(mv + 1, ""),
-            "kh_na": som(t.get("datum"), mv + 1, "kh_g"),
-            "eiwit_na": som(t.get("datum"), mv + 1, "eiwit_g"),
         })
 
     # ── de nutrientdensiteit per dag, dan gemiddeld ─────────────────
