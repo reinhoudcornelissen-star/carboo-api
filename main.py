@@ -3858,6 +3858,58 @@ def _vocht_ml(r: dict) -> float:
     return 0.0
 
 
+# KRANT-TEKST-V1 — een getal zoals een Belgische krant het schrijft: komma,
+# geen overbodige nullen. 18.4 -> "18,4", 30.0 -> "30", 0.28 -> "0,28".
+def _getal(x) -> str:
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    if abs(x) >= 100:
+        s = str(round(x))
+    elif abs(x) >= 1:
+        s = f"{x:.1f}"
+    else:
+        s = f"{x:.2f}"
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s.replace(".", ",")
+
+
+# KRANT-TEKST-V1 — de kop per norm. Voorheen "Je " + naam + " blijft onder de
+# norm.", wat "Je groenten blijft" gaf, "Je hoofdmaaltijden op peil blijft", en
+# bij een te hoge waarde binnen een bereik (vet 40% bij 20-35%) zelfs "blijft
+# onder de norm". Sleutel -> (kop als het te laag is, kop als het te hoog is).
+_KOP_AANDACHT = {
+    "groenten": ("Je eet te weinig groenten.", None),
+    "fruit": ("Je eet te weinig fruit.", None),
+    "vezels": ("Je vezels blijven onder de norm.", None),
+    "nutrientdensiteit": ("Je voeding is weinig voedingsrijk.", None),
+    "vocht_dag": ("Je drinkt te weinig.", None),
+    "suikers_toegevoegd_pct": (None, "Te veel toegevoegde suiker."),
+    "eiwit_g_kg": ("Je eet te weinig eiwit.", None),
+    "eiwit_maaltijd_g_kg": ("Je hoofdmaaltijden hebben te weinig eiwit.", None),
+    "eiwit_maaltijden_ok": ("Niet elke hoofdmaaltijd heeft genoeg eiwit.", None),
+    "eiwit_plantaardig_pct": ("Je eiwit komt vooral uit dierlijke bronnen.", None),
+    "vet_pct": ("Je eet weinig vet.", "Je eet veel vet."),
+    "verz_pct": (None, "Je verzadigd vet ligt te hoog."),
+    "energiebalans_pct": ("Je at minder dan je dagdoel.", "Je at meer dan je dagdoel."),
+}
+_KOP_STERK = {
+    "groenten": "Je groenten zitten goed.",
+    "vezels": "Je vezels zitten goed.",
+    "suikers_toegevoegd_pct": "Je toegevoegde suikers blijven laag.",
+    "eiwit_maaltijden_ok": "Elke hoofdmaaltijd heeft genoeg eiwit.",
+    "energiebalans_pct": "Je at in evenwicht met je dagdoel.",
+    "vocht_dag": "Je drinkt genoeg.",
+}
+# Micronutriënten ontbreken bij veel producten en staan dan als 0 in het
+# dagboek: een tekort kan in de gegevens zitten en niet op het bord. Ze
+# blijven meetellen voor de receptkeuze, maar komen niet als aandachtspunt
+# bovenaan de krant.
+_NIET_IN_KOP = {"kalium", "calcium", "ijzer", "vitb12", "vitd", "omega3"}
+
+
 # EIWIT-HERKOMST-BACKEND-V1 — dierlijk of plantaardig eiwit, zoals de kaart
 # "Herkomst eiwit" in Analyses (EIWIT-HERKOMST-V2 in analyses.tsx, met
 # herkenCategorie uit analyse-utils.ts): wijzig ze SAMEN. Alles wat in geen
@@ -4320,11 +4372,11 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     if d.get("fruit") is not None:
         if d["fruit"] < _n_fruit:
             voeg(kwaliteit, "geel", "Je fruit blijft achter",
-                 (str(d["fruit"]) + " gram per dag tegenover " + str(round(_n_fruit)) +
+                 (_getal(d["fruit"]) + " gram per dag tegenover " + _getal(_n_fruit) +
                   " als richtlijn. Twee stuks per dag brengt je er meestal."))
         else:
             voeg(kwaliteit, "groen", "Je fruit zit op peil",
-                 ("Gemiddeld " + str(d["fruit"]) + " gram per dag."))
+                 ("Gemiddeld " + _getal(d["fruit"]) + " gram per dag."))
 
     kcal = max(d["kcal"], 1)
     # SPORTSUIKER-V1 — de suikernorm geldt voor de gewone voeding. Gels en
@@ -4338,10 +4390,13 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
               "tegenover " + str(round(_n_suiker)) + "% als bovengrens. Sportvoeding tijdens "
               "je trainingen telt hier niet mee; dit komt uit je gewone maaltijden."))
     else:
+        # KRANT-TEKST-V1 — de zin over zetmeel alleen als het zo is
+        _zetmeel_meest = (d.get("zetmeel") or 0) >= 0.5 * (d.get("kh") or 0) > 0
         voeg(kwaliteit, "groen", "Je suikers zitten goed",
              ("Toegevoegde suikers bleven op " + str(round(pct_toeg)) + "% van je energie, "
-              "onder de bovengrens van " + str(round(_n_suiker)) + "%. Het grootste deel van je "
-              "koolhydraten is zetmeel, en dat is precies wat je wil."))
+              "onder de bovengrens van " + str(round(_n_suiker)) + "%." +
+              (" Het grootste deel van je koolhydraten is zetmeel, en dat is precies wat je wil."
+               if _zetmeel_meest else "")))
 
     # verzadigd vet als aandeel van je ENERGIE — dezelfde maat als de tabel
     _n_verz = _norm("verz_pct", "norm_max", 10)
@@ -4388,18 +4443,18 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     _n_omega = _norm("omega3", "norm_min", 1.5)
     if d["omega3"] < _n_omega:
         voeg(kwaliteit, "geel", "Weinig omega 3",
-             ("Je komt op " + str(d["omega3"]) + " gram per dag, tegenover " + str(_n_omega) +
+             ("Je komt op " + _getal(d["omega3"]) + " gram per dag, tegenover " + _getal(_n_omega) +
               " als richtlijn. Twee porties vette vis per week brengt je daar meestal."))
 
     _n_vezels = _norm("vezels", "norm_min", 30)
     if d["vezels"] < _n_vezels:
         voeg(kwaliteit, "geel", "Je vezels blijven onder de richtlijn",
-             (str(d["vezels"]) + " gram per dag tegenover " + str(round(_n_vezels)) +
+             (_getal(d["vezels"]) + " gram per dag tegenover " + _getal(_n_vezels) +
               " als richtlijn. Volkoren in plaats van wit brood of pasta is de snelste weg."))
     else:
         voeg(kwaliteit, "groen", "Je vezels zitten op peil",
-             (str(d["vezels"]) + " gram per dag, boven de richtlijn van " +
-              str(round(_n_vezels)) + "."))
+             (_getal(d["vezels"]) + " gram per dag, boven de richtlijn van " +
+              _getal(_n_vezels) + "."))
 
     # ── macro's ─────────────────────────────────────────────────────
     # KH-DOEL-DAGSCHEMA-V1 — het doel dat de sporter in zijn dagschema zag:
@@ -4424,10 +4479,13 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         laagste_dag = _dagnaam(slechtste)
 
         if pct_slecht < 0.6:
+            # KRANT-TEKST-V1 — "de rest zat er dicht bij" alleen als dat klopt
+            _rest = [p for _, p in dagpct[1:]]
+            _dicht = bool(_rest) and all(0.8 <= p <= 1.2 for p in _rest)
             voeg(macros, "geel", _dagnaam(slechtste).capitalize() + " valt uit de rij",
-                 ("Op die dag haalde je " + str(round(pct_slecht * 100)) + "% van je koolhydraatdoel — dat doel "
-                  "schaalt mee met je training, dus een zware dag legt de lat hoger — "
-                  "terwijl de rest van de week er dicht bij zat."))
+                 ("Op die dag haalde je " + str(round(pct_slecht * 100)) + "% van je koolhydraatdoel. Dat doel "
+                  "schaalt mee met je training, dus een zware dag legt de lat hoger" +
+                  (", terwijl de rest van de week er dicht bij zat." if _dicht else ".")))
         if binnen10 >= len(dagpct) - 1 and len(dagpct) >= 5:
             voeg(macros, "groen", "Je koolhydraten volgen je training",
                  ("Op " + str(binnen10) + " van de " + str(len(dagpct)) + " dagen zat je binnen tien procent "
@@ -4529,10 +4587,16 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     # eerst wat achteruitging, dan de grootste sprong
     verschillen.sort(key=lambda x: (x["beter"], -x["pct"]))
 
+    # KRANT-TEKST-V1 — meervoud krijgt een meervoudig werkwoord
+    _MEERVOUD = {"vezels", "groenten", "koolhydraten", "toegevoegde suikers"}
+
+    def _ww(v, enkel, meer):
+        return meer if v["naam"] in _MEERVOUD else enkel
+
     def _zin(v):
-        richting = "steeg" if v["omhoog"] else "zakte"
-        return ("Je " + v["naam"] + " " + richting + " van " + str(v["vorige"]) +
-                " naar " + str(v["nu"]) + " " + v["eenheid"] + " per dag, " +
+        richting = _ww(v, "steeg", "stegen") if v["omhoog"] else _ww(v, "zakte", "zakten")
+        return ("Je " + v["naam"] + " " + richting + " van " + _getal(v["vorige"]) +
+                " naar " + _getal(v["nu"]) + " " + v["eenheid"] + " per dag, " +
                 str(v["pct"]) + " procent verschil met vorige week.")
 
     # ── de kop ──
@@ -4542,7 +4606,8 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     kern = ""
     if verschillen and not verschillen[0]["beter"]:
         v = verschillen[0]
-        kop = "Je " + v["naam"] + (" loopt op." if v["omhoog"] else " zakt weg.")
+        kop = "Je " + v["naam"] + (_ww(v, " loopt op.", " lopen op.") if v["omhoog"]
+                                   else _ww(v, " zakt weg.", " zakken weg."))
         kern = _zin(v)
     elif rood:
         kop = rood[0]["kop"] + "."
@@ -4552,7 +4617,8 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         kern = geel[0]["tekst"]
     elif verschillen:
         v = verschillen[0]
-        kop = "Je " + v["naam"] + (" gaat vooruit." if v["beter"] else " verandert.")
+        kop = "Je " + v["naam"] + (_ww(v, " gaat vooruit.", " gaan vooruit.") if v["beter"]
+                                   else _ww(v, " verandert.", " veranderen."))
         kern = _zin(v)
     else:
         groen = [i for i in (kwaliteit + macros) if i["ernst"] == "groen"]
@@ -4658,9 +4724,10 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
             elif _richting == "bereik" and _min and _max:
                 if _w < _min:
                     _afw = (_w - _min) / _min * 100
-                elif _w > _max:
+                elif _w > _max and _s != "vocht_dag":
                     _afw = (_max - _w) / _max * 100
                 else:
+                    # binnen het bereik; ruim drinken is voor een sporter geen probleem
                     _afw = 0.0
             else:
                 continue
@@ -4675,19 +4742,53 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
                 "sleutel": _s,
                 "naam": _n.get("naam"), "eenheid": _n.get("eenheid"),
                 "waarde": _w, "norm": _min if _richting != "lager" else _max,
+                "norm_min": _min, "norm_max": _max,
                 "richting": _richting, "afw": round(_afw, 1),
                 "ver": None if _ver is None else round(_ver, 1),
                 "vorige": _vr.get(_s),
             })
 
+        # KRANT-TEKST-V1 — getallen met een komma, een bereik als bereik, en
+        # "hoofdmaaltijden op peil" als zin in plaats van als getal.
+        def _met_eenheid(w, k):
+            e = (k.get("eenheid") or "").strip()
+            return _getal(w) + (" " + e if e else "")
+
         def _zin_norm(k):
-            t = ("Je zat op " + str(k["waarde"]) + " " + k["eenheid"] +
-                 ", tegenover een norm van " + str(k["norm"]) + ".")
-            if k["ver"] is not None and abs(k["ver"]) >= 15:
-                t += (" Vorige week was dat " + str(k["vorige"]) + " " + k["eenheid"] + ".")
+            if k["sleutel"] == "eiwit_maaltijden_ok":
+                t = (_getal(k["waarde"]) + " van je hoofdmaaltijden hadden gemiddeld genoeg eiwit "
+                     "(0,3 gram per kilo lichaamsgewicht).")
+            else:
+                if k["richting"] == "bereik" and k.get("norm_min") and k.get("norm_max"):
+                    norm = _getal(k["norm_min"]) + " tot " + _met_eenheid(k["norm_max"], k)
+                else:
+                    norm = _met_eenheid(k["norm"], k)
+                t = "Je zat op " + _met_eenheid(k["waarde"], k) + ", tegenover " + norm + " als norm."
+            if k["ver"] is not None and abs(k["ver"]) >= 15 and k.get("vorige") is not None:
+                t += " Vorige week was dat " + _met_eenheid(k["vorige"], k) + "."
             return t
 
-        _onder = [k for k in _kandidaten if k["afw"] < 0]
+        def _te_hoog(k):
+            if k["richting"] == "lager":
+                return True
+            return k["richting"] == "bereik" and k.get("norm_max") is not None and k["waarde"] > k["norm_max"]
+
+        def _kop_aandacht(k):
+            laag, hoog = _KOP_AANDACHT.get(k["sleutel"], (None, None))
+            if _te_hoog(k):
+                return hoog or ("Je " + k["naam"] + " ligt te hoog.")
+            return laag or ("Je " + k["naam"] + " ligt te laag.")
+
+        def _kop_sterk(k):
+            return _KOP_STERK.get(k["sleutel"]) or ("Je " + k["naam"] + " zit goed.")
+
+        def _sterk_zin(k):
+            if k["sleutel"] == "eiwit_maaltijden_ok":
+                return "elke hoofdmaaltijd had genoeg eiwit"
+            return "je " + k["naam"] + " op " + _met_eenheid(k["waarde"], k)
+
+        # Micronutriënten niet als aandachtspunt bovenaan (zie _NIET_IN_KOP)
+        _onder = [k for k in _kandidaten if k["afw"] < 0 and k["sleutel"] not in _NIET_IN_KOP]
         _boven = [k for k in _kandidaten if k["afw"] >= 0]
 
         # NORMEN-AFWIJKING-V2 — de grootste afwijking van de norm wint, ongeacht of
@@ -4698,15 +4799,12 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         _sterk = max(_boven, key=lambda k: k["afw"]) if _boven else None
 
         if _aandacht:
-            kop = ("Je " + _aandacht["naam"] +
-                   (" ligt boven de norm." if _aandacht["richting"] == "lager"
-                    else " blijft onder de norm."))
+            kop = _kop_aandacht(_aandacht)
             kern = _zin_norm(_aandacht)
             if _sterk:
-                kern += (" Sterk punt deze week: je " + _sterk["naam"] + " op " +
-                         str(_sterk["waarde"]) + " " + _sterk["eenheid"] + ".")
+                kern += " Sterk punt deze week: " + _sterk_zin(_sterk) + "."
         elif _sterk:
-            kop = "Je " + _sterk["naam"] + " zit goed."
+            kop = _kop_sterk(_sterk)
             kern = _zin_norm(_sterk)
     except Exception as _e:
         print(f"[NORMEN-V1] selectie mislukt: {_e}")
@@ -4717,11 +4815,26 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     _rang = {"rood": 0, "geel": 1, "groen": 2}
     kwaliteit.sort(key=lambda i: _rang.get(i["ernst"], 3))
 
+    # STANDFIRST-BEPERKING-V1 — hoeveel dagen het rapport draagt, en bij weinig
+    # dagen de waarschuwing erbij. Voorheen verdween die zodra de normen de kop
+    # bepaalden, en las een rapport op twee dagen even stellig als een op zeven.
+    _n_dagen = res.get("dagen_gelogd") or 0
+    if not res.get("alleen_volledig", True):
+        _gelogd = ("Geen enkele dag volledig ingevuld; dit rapport steunt op " + str(_n_dagen) +
+                   " halve dagen en zegt dus weinig.")
+    elif _n_dagen >= 7:
+        _gelogd = "Zeven dagen op zeven volledig ingevuld."
+    elif _n_dagen >= 5:
+        _gelogd = str(_n_dagen) + " van de zeven dagen volledig ingevuld."
+    else:
+        _gelogd = ("Maar " + str(_n_dagen) + " van de zeven dagen volledig ingevuld: lees dit "
+                   "rapport met die beperking in gedachten.")
+
     return {
         "kop": kop,
         "standfirst": (_standfirst(res["dagen_gelogd"], laagste_dag or "één dag")
                        if not kern else
-                       (str(res["dagen_gelogd"]) + " van de zeven dagen gelogd. " + kern)),
+                       (_gelogd + " " + kern)),
         "inzichten_kwaliteit": kwaliteit[:5],
         "inzichten_macros": macros[:3],
         "inzichten_trainingen": trainingen_inz[:4],
