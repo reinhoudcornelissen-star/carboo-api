@@ -8952,6 +8952,221 @@ async def coach_mascotte_chat(klant_id: str, user=Depends(get_current_user),
     return {"berichten": r}
 
 
+# ─── RACE-VOORZET-V2: de mascotte stelt de carboloading voor ─────────────────
+# Claude puzzelt de 48 uur carboloading en de laatste maaltijd voor de race
+# samen met de producten die de sporter op trainingsdagen zelf eet, volgens
+# de maaltijdopbouw van Gezond Leven, aangepast voor carboloading. De app
+# rekent daarna de koolhydraten zelf opnieuw uit met de voedingswaarden uit
+# het dagboek en past de porties aan, zodat geen enkel dagdeel boven het doel
+# uitkomt (lib/race/voorzet.ts).
+#
+# Keuzes van de eigenaar: alleen voor wie het alles-in-één pakket (9,99) heeft,
+# want advies kan enkel met de logs van fueling, race en Train the Gut samen.
+# Een nieuw product mag, als het relevant is, maar alleen uit de basislijst van
+# Carboo (met gekende voedingswaarden); de app toont het als "nieuw voor jou".
+#
+# Tabel (SQL door de eigenaar): carboo_race_voorzet(id, user_id, aangemaakt,
+# model, input_tokens, output_tokens, voorstel).
+
+RACE_VOORZET_MODEL = "claude-sonnet-5"
+RACE_VOORZET_MAX_PER_DAG = 3
+RACE_DAGDELEN = ["Ontbijt", "Tussendoor VM", "Lunch", "Tussendoor NM", "Avondmaal", "Avond snack"]
+
+RACE_VOORZET_SYSTEEM = """Je bent de sportdiëtist van Carboo, een app voor sportvoeding. Je stelt voor een duursporter de carboloading van 48 uur voor een wedstrijd samen, en zijn laatste maaltijd voor de start. Je werkt met de producten die hij zelf eet, uit zijn dagboek op trainingsdagen.
+
+Je krijgt:
+- de koolhydraatdoelen per dagdeel voor dag 1 (twee dagen voor de race) en dag 2 (de dag voor de race);
+- het interval in gram koolhydraten voor de laatste maaltijd, en bij welk dagdeel die valt;
+- zijn eigen producten: per product bij welke dagdelen en op hoeveel trainingsdagen hij het at, zijn gewone portie in gram, en per 100 g de koolhydraten, vezels, vet en eiwit;
+- de basislijst van Carboo: producten met gekende voedingswaarden die hij nog niet logde.
+
+MAALTIJDOPBOUW (Gezond Leven, maaltijdsamenstelling)
+- Ontbijt en lunch: een graanproduct als basis (brood, pistolet, havermout, cornflakes), met beleg, eventueel zuivel, en fruit of een glas sap.
+- Warme maaltijd: een zetmeelbron als basis (pasta, rijst, aardappelen, couscous, noedels), een kleine portie gekookte groenten, en een kleine magere eiwitbron (kip, vis, ei, mager vlees of een vervanger).
+- Een tussendoortje is één product, eventueel met een drank: een stuk fruit, een reep, rijstwafels, een yoghurt, een koek. Nooit twee stukken fruit of twee koeken als tussendoortje.
+- Eén broodsoort per maaltijd. Eén soort hartig beleg per maaltijd, niet twee (dus geen kaas én ham, geen pesto met kaas).
+- Combinaties die een Vlaamse sporter echt zo eet: geen pasta bij het ontbijt, geen confituur bij kip, geen soep als tussendoortje.
+
+AANPASSINGEN VOOR CARBOLOADING
+- Koolhydraten: per dagdeel zo dicht mogelijk bij het doel, tussen 90 en 100 %. Nooit boven het doel. Reken zelf na met de waarden per 100 g.
+- Vezels beperken: witte graanproducten in plaats van volkoren (wit brood, witte pasta, witte rijst). Op dag 1 mag nog een deel van zijn gewone volkoren blijven; op dag 2 alleen wit. Geen peulvruchten, geen rauwkost of grote salades, geen muesli met veel noten of zaden. Groenten: klein en gekookt, bij de warme maaltijd.
+- Vet beperken: geen kaas, pesto, mayonaise, room, frituur, chips, noten, pure chocolade of gebak met veel boter. Hartig beleg mager en in kleine hoeveelheid (kipfilet, ham, magere kaas hoogstens één snede).
+- Eiwit: een kleine magere eiwitbron per hoofdmaaltijd volstaat; niet meer dan gewoonlijk.
+- Koolhydraatrijk beleg: bij brood vooral zoet beleg (confituur, honing, siroop, choco), 15 tot 25 g per snede. Hartig beleg op hoogstens een deel van de sneden.
+- Aanvullen met een drank met koolhydraten (fruitsap, sportdrank, chocolademelk, limonade) is beter dan extra vaste voeding of een tweede stuk fruit. Zeker op dag 2.
+- Realistische porties die hij kan opeten: hoogstens 6 sneden brood per maaltijd, 1 stuk fruit per dagdeel, een bord pasta of rijst van hoogstens 150 g droog gewicht. Tussendoortjes klein houden.
+- Op dag 2 lichter verteerbaar dan op dag 1; de avondmaaltijd van dag 2 zonder vette saus en zonder grote portie groenten.
+
+LAATSTE MAALTIJD VOOR DE START
+- Koolhydraten binnen het gegeven interval. Laag in vezels en vet, matig eiwit, licht verteerbaar.
+- Bij voorkeur wat hij gewoonlijk voor een training eet (die producten zijn gemarkeerd), wit in plaats van volkoren.
+
+KEUZE VAN DE PRODUCTEN
+- Neem eerst zijn eigen producten, liefst bij het dagdeel waar hij ze gewoonlijk eet. Hoe vaker gegeten, hoe beter: een race is geen moment om te experimenteren.
+- Een product uit de basislijst neem je alleen als het iets oplost wat zijn eigen producten niet kunnen: wit brood als hij alleen volkoren eet, zoet beleg als hij er geen logt, een sportdrank of sap om aan te vullen, witte pasta of rijst als hij die niet logt. Hoogstens 4 verschillende nieuwe producten over het hele plan.
+- Gebruik alleen producten uit de twee lijsten, met hun id. Verzin geen producten.
+- Stukproducten (sneden, pistolets, stuks fruit, repen) in hele stuks: aantal is een heel getal, portie_g het gewicht van één stuk. Voor andere producten is aantal 1 en portie_g de hoeveelheid in gram (of ml voor dranken).
+- Een dagdeel met doel 0 laat je leeg.
+
+UITLEG
+- In "uitleg" hoogstens drie korte zinnen voor de sporter: wat je vooral aanpaste aan zijn gewone eten en waarom. Nederlands zoals in Vlaanderen, spreek hem aan met "je". Geen cijfers per dagdeel herhalen."""
+
+_RACE_ITEM = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string"},
+        "aantal": {"type": "number"},
+        "portie_g": {"type": "number"},
+    },
+    "required": ["id", "aantal", "portie_g"],
+    "additionalProperties": False,
+}
+_RACE_MAALTIJD = {
+    "type": "object",
+    "properties": {
+        "dagdeel": {"type": "string", "enum": RACE_DAGDELEN},
+        "items": {"type": "array", "items": _RACE_ITEM},
+    },
+    "required": ["dagdeel", "items"],
+    "additionalProperties": False,
+}
+RACE_VOORZET_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "dag1": {"type": "array", "items": _RACE_MAALTIJD},
+        "dag2": {"type": "array", "items": _RACE_MAALTIJD},
+        "laatste_maaltijd": {"type": "array", "items": _RACE_ITEM},
+        "uitleg": {"type": "string"},
+    },
+    "required": ["dag1", "dag2", "laatste_maaltijd", "uitleg"],
+    "additionalProperties": False,
+}
+
+
+class RaceVoorzetVraag(BaseModel):
+    race: dict            # sport, duur_min, starttijd, gewicht_kg
+    doelen: dict          # {"dag1": {dagdeel: g}, "dag2": {...}}
+    laatste: dict         # {"dagdeel", "tijd", "kh_min", "kh_max"}
+    eigen: List[dict]     # zijn producten, samengevat in de app
+    basis: List[dict]     # de basislijst van Carboo
+
+
+def _heeft_alles_in_een(user_id: str, supabase: Client) -> bool:
+    """Alles-in-één (of coach), of de drie modules apart: fueling, race en gut."""
+    r = supabase.table("carboo_abonnementen").select("pakket") \
+        .eq("user_id", user_id).eq("status", "actief").execute().data or []
+    pakketten = {a.get("pakket") for a in r}
+    return bool(pakketten & {"alles", "coach"}) or {"fueling", "race", "gut"} <= pakketten
+
+
+def _race_voorzet_vandaag(user_id: str, supabase: Client) -> int:
+    begin = _nu_be().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    r = supabase.table("carboo_race_voorzet").select("id", count="exact") \
+        .eq("user_id", user_id).gte("aangemaakt", begin).execute()
+    return r.count or 0
+
+
+def _race_voorzet_opschonen(voorstel: dict, ids: set) -> dict:
+    """Alleen gekende producten, redelijke aantallen en porties, gekende dagdelen."""
+    def items(lijst):
+        uit = []
+        for it in lijst or []:
+            if it.get("id") not in ids:
+                continue
+            aantal = float(it.get("aantal") or 0)
+            portie = float(it.get("portie_g") or 0)
+            if not (0 < aantal <= 12 and 0 < portie <= 1000):
+                continue
+            uit.append({"id": it["id"], "aantal": aantal, "portie_g": portie})
+        return uit
+
+    def dag(lijst):
+        per = {}
+        for m in lijst or []:
+            if m.get("dagdeel") in RACE_DAGDELEN:
+                per.setdefault(m["dagdeel"], []).extend(items(m.get("items")))
+        return [{"dagdeel": d, "items": per[d]} for d in RACE_DAGDELEN if d in per]
+
+    return {"dag1": dag(voorstel.get("dag1")), "dag2": dag(voorstel.get("dag2")),
+            "laatste_maaltijd": items(voorstel.get("laatste_maaltijd")),
+            "uitleg": str(voorstel.get("uitleg") or "")[:600]}
+
+
+@app.get("/api/race/voorzet")
+async def race_voorzet_status(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    toegang = _heeft_alles_in_een(user.id, supabase)
+    over = max(0, RACE_VOORZET_MAX_PER_DAG - _race_voorzet_vandaag(user.id, supabase)) if toegang else 0
+    return {"toegang": toegang, "vandaag_over": over, "max_per_dag": RACE_VOORZET_MAX_PER_DAG}
+
+
+@app.post("/api/race/voorzet")
+async def race_voorzet(item: RaceVoorzetVraag, user=Depends(get_current_user),
+                       supabase: Client = Depends(get_supabase)):
+    if not _heeft_alles_in_een(user.id, supabase):
+        raise HTTPException(403, "De voorzet van de mascotte hoort bij het alles-in-één pakket.")
+    if not item.eigen:
+        raise HTTPException(400, "Er zijn nog geen producten van trainingsdagen.")
+    if len(item.eigen) > 150 or len(item.basis) > 300:
+        raise HTTPException(400, "Te veel producten meegegeven.")
+    gedaan = _race_voorzet_vandaag(user.id, supabase)
+    if gedaan >= RACE_VOORZET_MAX_PER_DAG:
+        raise HTTPException(429, f"Je vroeg vandaag al {RACE_VOORZET_MAX_PER_DAG} voorstellen. "
+                                 "Morgen kan het opnieuw.")
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY niet ingesteld op Render")
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(500, "anthropic pakket niet geinstalleerd")
+
+    ids = {str(p.get("id")) for p in item.eigen + item.basis if p.get("id")}
+    gegevens = {
+        "race": item.race,
+        "koolhydraatdoelen_gram": item.doelen,
+        "laatste_maaltijd": item.laatste,
+        "eigen_producten": item.eigen,
+        "basislijst_carboo": item.basis,
+    }
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model=RACE_VOORZET_MODEL,
+            max_tokens=16000,
+            system=[{"type": "text", "text": RACE_VOORZET_SYSTEEM, "cache_control": {"type": "ephemeral"}}],
+            output_config={"effort": "high",
+                           "format": {"type": "json_schema", "schema": RACE_VOORZET_SCHEMA}},
+            messages=[{"role": "user", "content":
+                       "Stel de carboloading en de laatste maaltijd samen.\n\n"
+                       + json.dumps(gegevens, ensure_ascii=False)}],
+        )
+    except Exception as e:
+        print(f"[RACE-VOORZET-V2] Claude-fout: {e}")
+        raise HTTPException(502, "De mascotte kan nu geen voorstel maken. Probeer het straks opnieuw.")
+
+    if msg.stop_reason == "refusal":
+        raise HTTPException(502, "De mascotte kan hier geen voorstel voor maken.")
+    if msg.stop_reason == "max_tokens":
+        print("[RACE-VOORZET-V2] antwoord afgekapt")
+        raise HTTPException(502, "De mascotte kan nu geen voorstel maken. Probeer het straks opnieuw.")
+    try:
+        tekst = next(b.text for b in msg.content if b.type == "text")
+        voorstel = _race_voorzet_opschonen(json.loads(tekst), ids)
+    except Exception as e:
+        print(f"[RACE-VOORZET-V2] onleesbaar antwoord: {e}")
+        raise HTTPException(502, "De mascotte kan nu geen voorstel maken. Probeer het straks opnieuw.")
+
+    u = msg.usage
+    supabase.table("carboo_race_voorzet").insert({
+        "user_id": user.id, "model": RACE_VOORZET_MODEL, "voorstel": voorstel,
+        "input_tokens": getattr(u, "input_tokens", None),
+        "output_tokens": getattr(u, "output_tokens", None),
+    }).execute()
+
+    return {"voorstel": voorstel, "vandaag_over": max(0, RACE_VOORZET_MAX_PER_DAG - gedaan - 1)}
+
+
 # ─── STRAVA INTEGRATIE ─────────────────────────────────────────────────────────
 
 STRAVA_CLIENT_ID = os.getenv("STRAVA_CLIENT_ID", "")
