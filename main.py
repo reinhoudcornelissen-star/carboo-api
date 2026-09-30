@@ -692,7 +692,9 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
     loop = asyncio.get_event_loop()
 
     def q_coach():      return supabase.table("carboo_coaches").select("*").eq("user_id", uid).execute().data
-    def q_mijn_coaches():return supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email)").eq("klant_id", uid).eq("status", "actief").execute().data or []
+    # PRIVACY-LADEN-V1 — de privacyvlaggen mee, anders opende het privacyvenster
+    # van de sporter altijd met alles uit en schreef opslaan alles op uit.
+    def q_mijn_coaches():return supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email), carboo_coach_privacy(*)").eq("klant_id", uid).eq("status", "actief").execute().data or []
     def q_opm_klant():  return supabase.table("carboo_coach_opmerkingen").select("*, carboo_coaches(naam), carboo_coach_reacties(*)").eq("klant_id", uid).order("aangemaakt", desc=True).limit(50).execute().data or []
     def q_aanv():       return supabase.table("carboo_coach_aanvragen").select("*").eq("user_id", uid).execute().data
     def q_rapporten():  return supabase.table("carboo_rapporten").select("id,naam,type,meta,datum").eq("user_id", uid).is_("verwijderd_op", "null").order("datum", desc=True).execute().data or []
@@ -1039,7 +1041,7 @@ async def weiger_invite(token: str, supabase: Client = Depends(get_supabase)):
 
 @app.get("/api/coach/mijn-coaches")
 async def get_mijn_coaches(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    r = supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email)").eq("klant_id", user.id).eq("status", "actief").execute()
+    r = supabase.table("carboo_coach_klanten").select("*, carboo_coaches(naam,bio,specialisatie,email), carboo_coach_privacy(*)").eq("klant_id", user.id).eq("status", "actief").execute()   # PRIVACY-LADEN-V1
     return {"coaches": r.data or []}
 
 @app.delete("/api/coach/mijn-coaches/{relatie_id}")
