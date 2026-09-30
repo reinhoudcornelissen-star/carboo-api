@@ -8960,8 +8960,8 @@ async def coach_mascotte_chat(klant_id: str, user=Depends(get_current_user),
 # het dagboek en past de porties aan, zodat geen enkel dagdeel boven het doel
 # uitkomt (lib/race/voorzet.ts).
 #
-# Keuzes van de eigenaar: alleen voor wie het alles-in-één pakket (9,99) heeft,
-# want advies kan enkel met de logs van fueling, race en Train the Gut samen.
+# Keuzes van de eigenaar: alleen voor het alles-in-één pakket (9,99), niet voor
+# coach of losse modules; advies kan enkel met de logs van alle modules samen.
 # Een nieuw product mag, als het relevant is, maar alleen uit de basislijst van
 # Carboo (met gekende voedingswaarden); de app toont het als "nieuw voor jou".
 #
@@ -9052,11 +9052,10 @@ class RaceVoorzetVraag(BaseModel):
 
 
 def _heeft_alles_in_een(user_id: str, supabase: Client) -> bool:
-    """Alles-in-één (of coach), of de drie modules apart: fueling, race en gut."""
+    """Alleen het alles-in-één pakket (9,99); coach of losse modules niet."""
     r = supabase.table("carboo_abonnementen").select("pakket") \
         .eq("user_id", user_id).eq("status", "actief").execute().data or []
-    pakketten = {a.get("pakket") for a in r}
-    return bool(pakketten & {"alles", "coach"}) or {"fueling", "race", "gut"} <= pakketten
+    return any(a.get("pakket") == "alles" for a in r)
 
 
 def _race_voorzet_vandaag(user_id: str, supabase: Client) -> int:
