@@ -392,6 +392,9 @@ class PrivacyInstellingen(BaseModel):
     performance: bool = False
     race_plannen: bool = False
     train_gut: bool = False
+    # MASCOTTE-CHAT-V1 — mag deze coach de vragen aan de mascotte zien?
+    # None = niet meegestuurd (een oudere app): dan blijft de kolom ongemoeid.
+    chat: Optional[bool] = None
     # DOSSIERVLAG-WEG-V1 — dossier is hier weg. De frontend stuurt het veld
     # mogelijk nog mee; pydantic negeert onbekende velden (extra='ignore'),
     # dus dat breekt niets in het venster tussen beide deploys.
@@ -1058,7 +1061,7 @@ async def get_privacy(relatie_id: str, user=Depends(get_current_user), supabase:
 
 @app.put("/api/coach/privacy/{relatie_id}")
 async def update_privacy(relatie_id: str, item: PrivacyInstellingen, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    supabase.table("carboo_coach_privacy").update({
+    velden = {
         "dagschema": item.dagschema,
         "gewicht": item.gewicht,
         "macros": item.macros,
@@ -1067,7 +1070,11 @@ async def update_privacy(relatie_id: str, item: PrivacyInstellingen, user=Depend
         "race_plannen": item.race_plannen,
         "train_gut": item.train_gut,
         "bijgewerkt": "now()"
-    }).eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
+    }
+    if item.chat is not None:
+        velden["chat"] = item.chat
+    supabase.table("carboo_coach_privacy").update(velden) \
+        .eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
     return {"ok": True}
 
 # ── Coach: klanten overzicht ────────────────────────────────────────────────────
@@ -8680,6 +8687,269 @@ async def verwijder_sjabloon(sjabloon_id: str, user=Depends(get_current_user), s
     supabase.table("carboo_sjablonen").delete().eq("id", sjabloon_id).eq("user_id", user.id).execute()
     return {"ok": True}
 
+
+
+# ─── MASCOTTE-CHAT-V1 — de sporter stelt de mascotte een vraag ──────────────
+# De mascotte antwoordt op basis van de EIGEN gegevens van de sporter:
+# profiel, dagdoelen en dagboek van vandaag en morgen, trainingen, het laatste
+# weekrapport en wat hij vaak eet. Fase 1: alleen lezen, niets wijzigen.
+#
+# Keuzes van de eigenaar: Claude Sonnet 5; hoogstens 3 vragen per sporter per
+# dag (Belgische kalenderdag); een coach ziet het gesprek alleen als de
+# sporter dat voor DIE coach aanvinkt (carboo_coach_privacy.chat).
+#
+# Tabel (SQL door de eigenaar): carboo_mascotte_chat(id, user_id, vraag,
+# antwoord, model, input_tokens, output_tokens, cache_read_tokens, aangemaakt).
+
+MASCOTTE_MODEL = "claude-sonnet-5"
+MASCOTTE_MAX_PER_DAG = 3
+MASCOTTE_MAX_TEKENS = 600          # lengte van een vraag, in tekens
+
+# Vaste instructies; staan vooraan en veranderen niet, zodat ze in de cache
+# van Anthropic blijven. Alles wat per sporter verschilt, komt in het bericht.
+MASCOTTE_SYSTEEM = """Je bent de mascotte van Carboo, een app voor sportvoeding. Je helpt duursporters (fietsen, lopen, triatlon en meer) met vragen over hun voeding en over de app.
+
+Hoe je antwoordt:
+- In het Nederlands zoals in Vlaanderen gesproken wordt. Spreek de sporter aan met "je".
+- Kort en concreet: hoogstens een 150 woorden. Gewone zinnen; een korte opsomming mag. Geen titels, geen tabellen.
+- Steun op de gegevens van de sporter die bij elke vraag meegegeven worden. Noem zijn eigen cijfers, trainingen en producten waar dat helpt.
+- Verzin nooit cijfers over de sporter. Ontbreekt iets in de gegevens, zeg dat dan en zeg waar hij het in de app invult.
+- Gebruik de dagdoelen uit de gegevens; die komen uit zijn dagschema. Reken ze niet opnieuw uit.
+- Je kan niets in de app veranderen of loggen. Leg uit hoe de sporter het zelf doet.
+
+Koolhydraten tijdens een training, dezelfde richtlijnen als de app (gram per uur):
+- Fietsen: tot 75 min niets nodig; 75-120 min 30-60; 120-180 min 60-90; langer dan 3 uur 85-110.
+- Lopen: tot 60 min niets; 60-90 min 30-60; 90-180 min 60-90; langer 75-90.
+- Triatlon: tot 90 min niets; 90-180 min 60-90; langer 80-110.
+- Drinken tijdens het sporten: ongeveer 500 tot 800 ml per uur, meer bij warm weer.
+Wie boven de 60 gram per uur wil, traint dat best op met Train the Gut in de app.
+
+Grenzen:
+- Geen medisch advies. Bij ziekte, blessures, medicatie, zwangerschap of klachten verwijs je vriendelijk naar een arts.
+- Merk je signalen van een eetstoornis of van te weinig energie (RED-S): heel weinig eten, angst om te eten, sterk gewichtsverlies nastreven, uitblijvende menstruatie, compenseren na het eten? Reageer dan warm en zonder oordeel, geef geen advies om minder te eten, en raad aan erover te praten met de coach of de huisarts.
+- Vragen die niets met sport, voeding of de app te maken hebben, beantwoord je niet; zeg vriendelijk waar je wel bij helpt.
+
+Waar vindt de sporter wat in de app:
+- Profiel, gewicht, leeftijd, doelen en maaltijdtijden: Fueling, tab Profiel.
+- Een training toevoegen of Strava koppelen: Fueling, tab Trainingen.
+- Eten loggen, sjablonen, "Kopieer gisteren": Fueling, tab Dagschema.
+- Eigen producten, recepten, etiket scannen, boodschappenlijst: Fueling, tab Bibliotheek.
+- Weekrapport De Bevoorrading: in het dagschema, "Lees je bevoorrading".
+- Grafieken en analyses: Fueling, tab Analyses.
+- Train the Gut: de knop Gut onderaan.
+- Een race plannen: de knop Race onderaan.
+- Coach, berichten en privacy per coach: de knop Club onderaan.
+- Abonnement: de knop Account onderaan."""
+
+
+class MascotteVraag(BaseModel):
+    vraag: str
+
+
+def _nu_be():
+    """Nu, in Belgische tijd: de dagteller loopt per Belgische kalenderdag."""
+    try:
+        from zoneinfo import ZoneInfo
+        return _dt.datetime.now(ZoneInfo("Europe/Brussels"))
+    except Exception:
+        return _dt.datetime.now(_dt.timezone.utc)
+
+
+def _mascotte_vandaag_gesteld(user_id: str, supabase: Client) -> int:
+    begin = _nu_be().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    r = supabase.table("carboo_mascotte_chat").select("id", count="exact") \
+        .eq("user_id", user_id).gte("aangemaakt", begin).execute()
+    return r.count or 0
+
+
+def _mascotte_context(user_id: str, supabase: Client) -> str:
+    """De gegevens van de sporter, als tekst voor bij de vraag."""
+    nu = _nu_be()
+    vandaag = nu.date()
+    morgen = vandaag + _dt.timedelta(days=1)
+    ctx: dict = {"vandaag": f"{DAGNAAM[vandaag.weekday()]} {vandaag.isoformat()}",
+                 "uur": nu.strftime("%H:%M")}
+
+    pr = supabase.table("fuelc_profiel").select("*").eq("user_id", user_id).limit(1).execute().data or []
+    profiel = pr[0] if pr else {}
+    # Alleen wat nodig is om te antwoorden: geen naam, geen e-mail (minimale gegevens)
+    ctx["profiel"] = {k: profiel.get(k) for k in (
+        "geslacht", "leeftijd", "gewicht_kg", "lengte_cm", "doelstelling",
+        "activiteit", "eet_patroon", "energie_doel", "momenten_tijden") if profiel.get(k) not in (None, "")}
+    ctx["eetmomenten"] = _moment_namen(profiel)
+
+    # Trainingen van de voorbije 7 tot de komende 7 dagen
+    tr = supabase.table("fuelc_trainingen") \
+        .select("datum,starttijd,sport,duur_min,kcal_verbranding,bron") \
+        .eq("user_id", user_id) \
+        .gte("datum", (vandaag - _dt.timedelta(days=7)).isoformat()) \
+        .lte("datum", (vandaag + _dt.timedelta(days=7)).isoformat()) \
+        .order("datum").execute().data or []
+    ctx["trainingen"] = [{k: t.get(k) for k in ("datum", "starttijd", "sport", "duur_min", "kcal_verbranding")}
+                         for t in tr]
+
+    # Dagdoelen zoals het dagschema ze berekent (KH-DOEL-DAGSCHEMA-V1)
+    e_basis = float(profiel.get("energie_doel") or 2000)
+    tr_kcal = _trainingskcal_per_dag(tr)
+    doelen = {}
+    for dag in (vandaag, morgen):
+        kcal = e_basis + tr_kcal.get(dag.isoformat(), 0)
+        vt = float(profiel.get("vet_doel_pct") or 25)
+        doelen[dag.isoformat()] = {
+            "kcal": round(kcal),
+            "koolhydraten_g": round(_kh_doel_dag(profiel, kcal)),
+            "eiwit_g": bereken_eiwit_doel(profiel),
+            "vet_g": max(round(kcal * vt / 100 / 9), round(kcal * 20 / 100 / 9)),
+        }
+    ctx["dagdoelen"] = doelen
+
+    # Wat er vandaag al gelogd is, per eetmoment
+    dg = supabase.table("fuelc_dagboek") \
+        .select("moment,naam,hoeveelheid_g,kcal,kh_g,eiwit_g,vet_g") \
+        .eq("user_id", user_id).eq("datum", vandaag.isoformat()).execute().data or []
+    ctx["gelogd_vandaag"] = [{
+        "moment": ("tijdens training" if (r.get("moment") or 0) >= 90
+                   else _moment_naam(profiel, int(r.get("moment") or 0))),
+        "product": r.get("naam"), "gram": r.get("hoeveelheid_g"),
+        "kcal": round(r.get("kcal") or 0), "kh": round(r.get("kh_g") or 0),
+        "eiwit": round(r.get("eiwit_g") or 0),
+    } for r in dg]
+    ctx["totaal_vandaag"] = {
+        "kcal": round(sum(r.get("kcal") or 0 for r in dg)),
+        "koolhydraten_g": round(sum(r.get("kh_g") or 0 for r in dg)),
+        "eiwit_g": round(sum(r.get("eiwit_g") or 0 for r in dg)),
+        "vet_g": round(sum(r.get("vet_g") or 0 for r in dg)),
+    }
+
+    # Wat hij vaak eet: de meest gelogde producten van de voorbije 30 dagen
+    recent = supabase.table("fuelc_dagboek").select("naam") \
+        .eq("user_id", user_id).gte("datum", (vandaag - _dt.timedelta(days=30)).isoformat()) \
+        .lt("moment", 90).execute().data or []
+    telling: dict = {}
+    for r in recent:
+        n = str(r.get("naam") or "").strip()
+        if n:
+            telling[n] = telling.get(n, 0) + 1
+    ctx["eet_vaak"] = [n for n, _ in sorted(telling.items(), key=lambda x: -x[1])[:25]]
+
+    try:
+        rc = supabase.table("fuelc_recepten_eigen").select("naam,type") \
+            .eq("user_id", user_id).limit(30).execute().data or []
+        ctx["eigen_recepten"] = [f"{x.get('naam')} ({x.get('type')})" for x in rc if x.get("naam")]
+    except Exception:
+        pass
+
+    # Het laatste weekrapport (vorige maandag tot zondag), alleen de vaststellingen
+    try:
+        dag = vandaag.isoweekday()
+        zondag = vandaag - _dt.timedelta(days=dag)
+        maandag = zondag - _dt.timedelta(days=6)
+        rap = _bereken_bevoorrading(user_id, maandag.isoformat(), zondag.isoformat(), supabase)
+        ctx["weekrapport"] = {
+            "week": f"{maandag.isoformat()} t/m {zondag.isoformat()}",
+            "kop": rap.get("kop"),
+            "vaststellingen": [f"{i['kop']}: {i['tekst']}" for rub in
+                               ("inzichten_kwaliteit", "inzichten_macros", "inzichten_trainingen")
+                               for i in (rap.get(rub) or [])],
+        }
+    except Exception as e:
+        print(f"[MASCOTTE-CHAT-V1] weekrapport niet opgehaald: {e}")
+
+    return json.dumps(ctx, ensure_ascii=False, default=str)
+
+
+@app.get("/api/mascotte/gesprek")
+async def mascotte_gesprek(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """De laatste vragen en antwoorden, en hoeveel vragen er vandaag nog over zijn."""
+    r = supabase.table("carboo_mascotte_chat").select("vraag,antwoord,aangemaakt") \
+        .eq("user_id", user.id).order("aangemaakt", desc=True).limit(10).execute().data or []
+    over = max(0, MASCOTTE_MAX_PER_DAG - _mascotte_vandaag_gesteld(user.id, supabase))
+    return {"berichten": list(reversed(r)), "vandaag_over": over, "max_per_dag": MASCOTTE_MAX_PER_DAG}
+
+
+@app.post("/api/mascotte/vraag")
+async def mascotte_vraag(item: MascotteVraag, user=Depends(get_current_user),
+                         supabase: Client = Depends(get_supabase)):
+    vraag = (item.vraag or "").strip()
+    if not vraag:
+        raise HTTPException(400, "Typ eerst je vraag.")
+    if len(vraag) > MASCOTTE_MAX_TEKENS:
+        raise HTTPException(400, f"Je vraag is te lang; hoogstens {MASCOTTE_MAX_TEKENS} tekens.")
+
+    gesteld = _mascotte_vandaag_gesteld(user.id, supabase)
+    if gesteld >= MASCOTTE_MAX_PER_DAG:
+        raise HTTPException(429, f"Je hebt vandaag je {MASCOTTE_MAX_PER_DAG} vragen gesteld. "
+                                 "Morgen kan je opnieuw vragen stellen.")
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY niet ingesteld op Render")
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(500, "anthropic pakket niet geinstalleerd")
+
+    context = _mascotte_context(user.id, supabase)
+
+    # De vragen van vandaag gaan mee, zodat een vervolgvraag begrepen wordt
+    begin = _nu_be().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    eerder = supabase.table("carboo_mascotte_chat").select("vraag,antwoord") \
+        .eq("user_id", user.id).gte("aangemaakt", begin).order("aangemaakt").execute().data or []
+    berichten = []
+    for e in eerder:
+        if e.get("vraag") and e.get("antwoord"):
+            berichten.append({"role": "user", "content": e["vraag"]})
+            berichten.append({"role": "assistant", "content": e["antwoord"]})
+    berichten.append({"role": "user", "content":
+                      "Gegevens van de sporter (uit de app):\n" + context + "\n\nVraag: " + vraag})
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model=MASCOTTE_MODEL,
+            max_tokens=2000,
+            system=[{"type": "text", "text": MASCOTTE_SYSTEEM, "cache_control": {"type": "ephemeral"}}],
+            output_config={"effort": "medium"},
+            messages=berichten,
+        )
+    except Exception as e:
+        print(f"[MASCOTTE-CHAT-V1] Claude-fout: {e}")
+        raise HTTPException(502, "De mascotte kan nu niet antwoorden. Probeer het straks opnieuw.")
+
+    if msg.stop_reason == "refusal":
+        antwoord = "Daar kan ik je niet mee helpen. Vraag het gerust aan je coach."
+    else:
+        antwoord = "".join(b.text for b in msg.content if b.type == "text").strip()
+        if not antwoord:
+            raise HTTPException(502, "De mascotte kan nu niet antwoorden. Probeer het straks opnieuw.")
+
+    u = msg.usage
+    supabase.table("carboo_mascotte_chat").insert({
+        "user_id": user.id, "vraag": vraag, "antwoord": antwoord, "model": MASCOTTE_MODEL,
+        "input_tokens": getattr(u, "input_tokens", None),
+        "output_tokens": getattr(u, "output_tokens", None),
+        "cache_read_tokens": getattr(u, "cache_read_input_tokens", None),
+    }).execute()
+
+    return {"antwoord": antwoord, "vandaag_over": max(0, MASCOTTE_MAX_PER_DAG - gesteld - 1)}
+
+
+@app.get("/api/coach/klant/{klant_id}/mascotte-chat")
+async def coach_mascotte_chat(klant_id: str, user=Depends(get_current_user),
+                              supabase: Client = Depends(get_supabase)):
+    """De vragen van een klant aan de mascotte. Alleen als de klant het vakje
+    voor DEZE coach heeft aangevinkt: de vlag van een andere coach telt niet."""
+    coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+    rel = supabase.table("carboo_coach_klanten").select("id, carboo_coach_privacy(chat)") \
+        .eq("coach_id", coach_id).eq("klant_id", klant_id).eq("status", "actief").execute().data or []
+    priv = (rel[0].get("carboo_coach_privacy") if rel else None) or {}
+    if isinstance(priv, list):
+        priv = priv[0] if priv else {}
+    if not priv.get("chat"):
+        raise HTTPException(403, "Klant heeft de vragen aan de mascotte niet gedeeld met deze coach")
+    r = supabase.table("carboo_mascotte_chat").select("vraag,antwoord,aangemaakt") \
+        .eq("user_id", klant_id).order("aangemaakt", desc=True).limit(30).execute().data or []
+    return {"berichten": r}
 
 
 # ─── STRAVA INTEGRATIE ─────────────────────────────────────────────────────────
