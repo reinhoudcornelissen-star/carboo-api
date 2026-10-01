@@ -3178,6 +3178,65 @@ async def push_test(user=Depends(get_current_user), supabase: Client = Depends(g
     return {"verzonden": n}
 
 
+# ── PUSH-VOEDINGSTIP-V1 ──────────────────────────────────────────────
+# Elke weekdag om 11u30 (Belgische tijd) een melding van de mascotte die
+# naar de voedingstip in het hulpmenu verwijst; niet in het weekend. Een
+# Render Cron Job roept deze route aan om 9u30 en 10u30 UTC: alleen de
+# oproep die in België op 11 uur valt, verstuurt (zomer- en wintertijd).
+# Beveiligd met de omgevingsvariabele CRON_SLEUTEL (header x-cron-sleutel).
+# Wie het niet wil, zet de soort "voedingstip" uit in fuelc_push_voorkeuren.
+
+VOEDINGSTIP_MELDINGEN = [   # maandag tot vrijdag
+    ("Nieuwe week, nieuwe kansen 💪",
+     "Ik zette je voedingstip voor deze week klaar. Wat pak jij vandaag als eerste aan?"),
+    ("Tijd voor een pitstop 🏁",
+     "Even bijtanken met kennis: je voedingstip wacht op je. Een kleine stap maakt je motor sterker."),
+    ("Halfweg de week, goed bezig! 🚴",
+     "Benieuwd waar je nog winst pakt? Je voedingstip wijst de weg. Welke keuze maak jij deze middag?"),
+    ("Kampioenen winnen in de details",
+     "Kleine gewoontes, grote prestaties. Bekijk je voedingstip en neem er vandaag één mee aan tafel."),
+    ("Sluit de week sterk af 🎉",
+     "Nog één tip voor het weekend: tik en kijk wat jou maandag nog fitter aan de start brengt."),
+]
+
+
+@app.post("/api/cron/voedingstip")
+async def cron_voedingstip(request: Request, test: Optional[str] = None,
+                           supabase: Client = Depends(get_supabase)):
+    sleutel = os.getenv("CRON_SLEUTEL")
+    if not sleutel or request.headers.get("x-cron-sleutel") != sleutel:
+        raise HTTPException(403, "Geen toegang")
+    nu = _nu_be()
+    dag = nu.weekday()
+    # ?test=<user_id>: meteen naar één gebruiker, ook buiten het uur (de melding van vandaag, of van vrijdag in het weekend)
+    if test:
+        titel, tekst = VOEDINGSTIP_MELDINGEN[min(dag, 4)]
+        n = stuur_push(test, titel, tekst, url="/app/fueling?hulp=tips", tag="voedingstip",
+                       soort="voedingstip", supabase=supabase)
+        return {"verzonden": n, "titel": titel}
+    if dag >= 5:
+        return {"verzonden": 0, "reden": "weekend"}
+    if nu.hour != 11:
+        return {"verzonden": 0, "reden": f"het is {nu.strftime('%H:%M')} in België, niet 11 uur"}
+
+    # Alleen wie fueling heeft (de tips komen uit het weekrapport) en een toestel met meldingen aan
+    abos = supabase.table("fuelc_push_abonnementen").select("user_id").eq("actief", True).execute().data or []
+    toestel = {a["user_id"] for a in abos if a.get("user_id")}
+    pk = supabase.table("carboo_abonnementen").select("user_id") \
+        .eq("status", "actief").in_("pakket", ["fueling", "alles", "coach"]).execute().data or []
+    fueling = {a["user_id"] for a in pk if a.get("user_id")}
+
+    titel, tekst = VOEDINGSTIP_MELDINGEN[dag]
+    verzonden = gebruikers = 0
+    for uid in toestel & fueling:
+        n = stuur_push(uid, titel, tekst, url="/app/fueling?hulp=tips", tag="voedingstip",
+                       soort="voedingstip", supabase=supabase)
+        verzonden += n
+        gebruikers += 1 if n else 0
+    print(f"[PUSH-VOEDINGSTIP-V1] {nu.date()}: {gebruikers} gebruikers, {verzonden} toestellen")
+    return {"verzonden": verzonden, "gebruikers": gebruikers, "titel": titel}
+
+
 # ============================================================
 # RACEMAPS-PUBLIEK-V1 — raceplannen delen op het open web
 # ============================================================
