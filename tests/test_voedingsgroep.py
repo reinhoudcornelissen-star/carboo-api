@@ -51,8 +51,9 @@ TS = (Path(__file__).resolve().parent.parent.parent
 
 NODIG_FUNC = {"_bevat_woord", "_haal_catwoorden", "herken_categorie",
               "_vg_heel_woord", "_vg_normaliseer", "_vg_basis",
-              "_voedingsgroep", "_gf_gram"}
+              "_voedingsgroep", "_gf_gram", "_bordrol_uit_groep"}
 NODIG_VAR = {"_catwoorden_cache", "_VG_STANDAARD", "_VG_NORM", "_VG_MAP",
+             "_BORDROL_UIT_GROEP",
              "_VG_CAT_KNOL",
              "_VG_CAT_GROENTE", "_VG_CAT_FRUIT", "_VG_GROENTE_NAMEN",
              "_VG_FRUIT_NAMEN", "_VG_VANGNET"}
@@ -203,6 +204,28 @@ g, fr = M["_gf_gram"]({"naam": "Spaghetti bolognese", "recept_id": "r1",
                        "hoeveelheid_g": 100}, {"r1": recept}, SB, bib)
 ok("alleen de tomaat telt als groente", round(g), 100)
 ok("het gehakt niet meer", round(g) < 150, True)
+
+print()
+print("HET MAANDBORD GEBRUIKT DEZELFDE VERTALER (BORD-FRUIT-V2)")
+# rol_van zit genest in get_bord en is niet los te laden; de brug ertussen
+# wel. Voorheen besliste herken_categorie hier, en die heeft geen vangnet op
+# de naam: een product zonder bruikbare categorie kreeg GEEN bordrol en viel
+# als niet_ingedeeld van het bord. Dezelfde fout als bij het fruit.
+def bordrol(naam, cat):
+    return M["_bordrol_uit_groep"](M["_voedingsgroep"](naam, cat))
+
+ok("banaan zonder categorie", bordrol("Banaan", ""), "fruit")
+ok("kipfilet zonder categorie", bordrol("Kipfilet", ""), "eiwit")
+ok("volkorenbrood zonder categorie", bordrol("Volkorenbrood", ""), "zetmeel")
+ok("aardappel in Groenten en fruit", bordrol("Aardappel gekookt", "Groenten en fruit"), "zetmeel")
+ok("zoete aardappel blijft groente", bordrol("Zoete aardappel gek.", "Groenten en fruit"), "groente")
+ok("amandelen", bordrol("Amandelen", ""), "noten")
+ok("olijfolie", bordrol("Olijfolie", ""), "vetstof")
+# een gerecht heeft niet EEN rol, en onbekend blijft onbekend: allebei None,
+# zodat ze als niet_ingedeeld zichtbaar blijven in plaats van stil bij een
+# willekeurige rol te landen
+ok("een gerecht krijgt geen rol", bordrol("Stoofpotje", "Maaltijden"), None)
+ok("onbekend krijgt geen rol", bordrol("Zzzz", ""), None)
 
 print("\nKAN DEZE TEST ZELF FALEN?")
 _echt = M["_vg_basis"]

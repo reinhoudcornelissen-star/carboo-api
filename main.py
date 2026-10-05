@@ -3801,6 +3801,40 @@ def _voedingsgroep(naam: str, cat: str) -> str:
     return _vg_basis(naam, cat)
 
 
+# BORD-FRUIT-V2 — van voedingsgroep naar bordrol.
+#
+# Het maandbord denkt in bordrollen (groente, zetmeel, eiwit, ...) en de rest
+# van de app in voedingsgroepen. Deze tabel is de brug, zodat het bord dezelfde
+# vertaler kan gebruiken als het weekrapport in plaats van een derde eigen
+# regelset.
+#
+# "Maaltijden" en "Overige" staan er BEWUST niet in: een gerecht heeft niet een
+# rol, en onbekend hoort onbekend te blijven. Die tellen als niet_ingedeeld, en
+# dat getal hoort zichtbaar te blijven.
+_BORDROL_UIT_GROEP = {
+    "Groenten": "groente",
+    "Fruit": "fruit",
+    "Granen & brood": "zetmeel",
+    "Vlees & vis": "eiwit",
+    "Eieren": "eiwit",
+    "Peulvruchten": "eiwit",
+    "Sojaproducten": "eiwit",
+    "Vleesvervanger": "eiwit",
+    "Zuivel": "zuivel",
+    "Noten & zaden": "noten",
+    "Snacks": "rest",
+    "Sauzen & spreads": "rest",
+    "Vetten & oliën": "vetstof",
+    "Dranken": "vocht",
+    "Sportvoeding": "sport",
+}
+
+
+def _bordrol_uit_groep(groep):
+    """De bordrol die bij een voedingsgroep hoort, of None."""
+    return _BORDROL_UIT_GROEP.get(groep)
+
+
 def _gf_gram(rij: dict, recepten: dict, supabase: Client, bib: dict = None):
     """Hoeveel gram groente en fruit zit er in deze logregel?
 
@@ -7513,14 +7547,23 @@ async def get_bord(maand: str,
         n = str(it.get("naam") or "").strip().lower()
         if n in op_naam:
             return op_naam[n]
-        # BORD-FRUIT-V1 — "Groenten en fruit" niet blind naar groente: dezelfde
-        # woordenlijst als het weekrapport splitst in groente, fruit en knollen.
-        # Anders telde een banaan zonder bordrol als groente, en klonk "fruit
-        # kwam nauwelijks op je ontbijt" onterecht.
+        # BORD-FRUIT-V2 — de bordrol uit de bibliotheek gaat voor; die is per
+        # product bewust gezet. Komt die er niet, dan beslist nu dezelfde
+        # vertaler als het weekrapport.
+        #
+        # Voorheen liep dat via herken_categorie, en alleen voor de categorie
+        # "Groenten en fruit". Alle andere producten vielen terug op CAT, en
+        # een product zonder bruikbare categorie kreeg dus GEEN rol: het viel
+        # als niet_ingedeeld van het bord. Dat is dezelfde fout als bij het
+        # fruit in het weekrapport, hier op de derde plek.
+        #
+        # CAT blijft erachter staan als vangnet voor categorieen die
+        # _voedingsgroep niet kent, zoals "Kruiden en specerijen" en
+        # "Gevogelte".
         cat = it.get("categorie") or ""
-        if cat.lower().strip() in ("groenten en fruit", "groenten & fruit"):
-            soort = herken_categorie(n, cat, supabase)
-            return {"Fruit": "fruit", "Granen & brood": "zetmeel"}.get(soort, "groente")
+        rol = _bordrol_uit_groep(_voedingsgroep(str(it.get("naam") or ""), cat))
+        if rol:
+            return rol
         return CAT.get(cat)
 
     # ── BORD-RECEPTEN-V1 — een recept uitpakken naar zijn ingredienten ──
