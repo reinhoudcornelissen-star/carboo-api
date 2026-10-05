@@ -50,7 +50,7 @@ MAIN = Path(__file__).resolve().parent.parent / "main.py"
 TS = (Path(__file__).resolve().parent.parent.parent
       / "carboo-next-v2" / "app" / "app" / "fueling" / "analyse-utils.ts")
 
-NODIG_FUNC = {"_bevat_woord", "_haal_catwoorden", "herken_categorie",
+NODIG_FUNC = {"_bevat_woord", "_haal_catwoorden",
               "_vg_heel_woord", "_vg_normaliseer", "_vg_basis",
               "_voedingsgroep", "_gf_gram", "_bordrol_uit_groep"}
 NODIG_VAR = {"_catwoorden_cache", "_VG_STANDAARD", "_VG_NORM", "_VG_MAP",
@@ -183,7 +183,8 @@ ok("puree ook", M["_voedingsgroep"]("Aardappelpuree", "Groenten en fruit"), "Gra
 ok("friet ook", M["_voedingsgroep"]("Friet", "Groenten en fruit"), "Granen & brood")
 ok("zoete aardappel blijft groente", M["_voedingsgroep"]("Zoete aardappel gek.", "Groenten en fruit"), "Groenten")
 ok("en een echte appel blijft fruit", M["_voedingsgroep"]("Appel", "Groenten en fruit"), "Fruit")
-ok("herken_categorie is NIET gewijzigd", M["herken_categorie"]("Banaan", "", SB), "Overige")
+# herken_categorie bestaat niet meer: hij was de laatste gebruiker van de
+# oude weg en werd dood toen _voedingsgroep ook de eiwit-as overnam.
 
 print("\nDE GRAMMEN VAN EEN LOGREGEL")
 g, fr = M["_gf_gram"]({"naam": "Banaan", "categorie": "", "hoeveelheid_g": 120}, {}, SB)

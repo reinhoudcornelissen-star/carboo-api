@@ -3489,28 +3489,15 @@ def _bevat_woord(naam: str, woord: str) -> bool:
     return bool(_re.search(r"(^|[^a-z0-9])" + _re.escape(woord), naam))
 
 
-def herken_categorie(naam: str, cat: str, supabase: Client) -> str:
-    """Zelfde uitkomst als normaliseerCategorie in de app.
-    Alleen "Groenten en fruit" wordt gesplitst; de rest blijft zoals ze is."""
-    c = (cat or "").lower().strip()
-    n = (naam or "").lower().strip()
-
-    if c in ("groenten en fruit", "groenten & fruit"):
-        woorden = _haal_catwoorden(supabase)
-        # eerst de knollen, die horen niet bij groenten of fruit
-        for w in woorden:
-            if w["categorie"] == "Granen & brood" and _bevat_woord(n, w["woord"]):
-                return "Granen & brood"
-        for w in woorden:
-            if w["categorie"] == "Groenten" and _bevat_woord(n, w["woord"]):
-                return "Groenten"
-        for w in woorden:
-            if w["categorie"] == "Fruit" and _bevat_woord(n, w["woord"]):
-                return "Fruit"
-        return "Groenten"
-
-    return cat or "Overige"
-
+# VOEDINGSGROEP-SPIEGEL-V1 — hier stond herken_categorie, de oorspronkelijke
+# vertaler. Hij had geen vangnet op de NAAM en gaf 'Overige' voor elke
+# logregel zonder bruikbare categorie; dat was de oorzaak van 54 g fruit waar
+# Analyses 139 toonde. _voedingsgroep verving hem stap voor stap: eerst in
+# _gf_gram, daarna in cat_kcal, het maandbord en de eiwit-as. Daarmee riep
+# niets hem nog aan.
+#
+# _haal_catwoorden blijft WEL: de barcodescanner gebruikt de woordenlijst nog
+# om een categorie te raden voor een gescand product (zie ~regel 2652).
 
 @app.get("/api/categorie-woorden")
 async def categorie_woorden(supabase: Client = Depends(get_supabase)):
