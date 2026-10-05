@@ -7481,13 +7481,16 @@ async def get_bord(maand: str,
         return {"maand": maand, "dagen": 0, "dagdelen": []}
 
     # bibliotheek eenmalig inlezen: op id en op naam
-    op_id, op_naam = {}, {}
+    op_id, op_naam, cat_naam = {}, {}, {}
     try:
         for b in (supabase.table("fuelc_bibliotheek")
                   .select("id,naam,bordrol,categorie").execute().data or []):
+            sleutel = str(b.get("naam") or "").strip().lower()
+            if sleutel:
+                cat_naam.setdefault(sleutel, b.get("categorie") or "")
             if b.get("bordrol"):
                 op_id[str(b["id"])] = b["bordrol"]
-                op_naam.setdefault(str(b.get("naam") or "").strip().lower(), b["bordrol"])
+                op_naam.setdefault(sleutel, b["bordrol"])
     except Exception as e:
         print(f"[BORD-MAAND-V1] bibliotheek inlezen mislukt: {e}")
 
@@ -7552,8 +7555,16 @@ async def get_bord(maand: str,
             print(f"[BORD-RECEPTEN-V1] recepten ophalen mislukt: {e}")
 
     def rol_van_naam(n):
-        n = str(n or "").strip().lower()
-        return op_naam.get(n)
+        # BORD-RECEPTEN-V2 — hier stond alleen "return op_naam.get(n)": een
+        # ingredient telde alleen mee als het IN de bibliotheek stond EN daar
+        # een bordrol had. Al het andere kreeg geen rol en verdween stil van
+        # het bord -- het telde zelfs niet als niet_ingedeeld. Nu dezelfde
+        # terugval als een los product: de gedeelde classificatie.
+        sleutel = str(n or "").strip().lower()
+        rol = op_naam.get(sleutel)
+        if rol:
+            return rol
+        return _bordrol_uit_groep(_voedingsgroep(str(n or ""), cat_naam.get(sleutel, "")))
 
     def pak_uit(it):
         """Geeft een lijst (bordrol, gram) voor een gelogd recept."""
@@ -7571,7 +7582,8 @@ async def get_bord(maand: str,
                 continue
             rol = rol_van_naam(ing.get("naam"))
             if rol:
-                uit_ing.append((rol, g / porties * deel))
+                uit_ing.append((rol, g / porties * deel,
+                                str(ing.get("naam") or "").strip()))
         return uit_ing
 
     per_moment, dagen, onbekend = {}, set(), 0
@@ -7590,10 +7602,16 @@ async def get_bord(maand: str,
                 onbekend += 1
                 continue
             naam_recept = str(it.get("naam") or "").strip().lstrip("\U0001F37D ").strip()
-            for rol, gram in delen_van_recept:
+            # BORD-RECEPTEN-V2 — het INGREDIENT onder de kleur, niet de naam
+            # van het gerecht. Voorheen werd "Spaghetti bolognese" geregistreerd
+            # onder groente (zijn tomaat), eiwit (zijn gehakt) en zetmeel (zijn
+            # pasta); het scherm haalt dubbele namen weg en toonde het gerecht
+            # dan onder een willekeurige van die drie. "Spaghetti bolognese" bij
+            # de groenten dus. De PERCENTAGES klopten al; alleen de namen niet.
+            for rol, gram, naam_ing in delen_van_recept:
                 vak["rollen"][rol] = vak["rollen"].get(rol, 0) + gram
                 if rol in BORD_ROLLEN:
-                    sleutel = (rol, naam_recept)
+                    sleutel = (rol, naam_ing or naam_recept)
                     vak["namen"][sleutel] = vak["namen"].get(sleutel, 0) + gram
             continue
 
