@@ -3665,8 +3665,11 @@ _VG_CAT_GROENTE = ("asperge", "aubergine", "avocado", "bloemkool", "broccoli",
     "prei", "biet", "rucola", "spinazie", "spruit", "tomaat", "tomat", "wortel",
     "groente", "witloof", "champignon", "augurk", "basilicum", "selder",
     "sjalot", "sperzieb", "nori", "salade", "erwt", "ui", "sla")
+# KORT-WOORD-V1 — "drui" in plaats van "druif", anders matcht "Druiven" niet;
+# en "fruit" erbij, want "Vers fruit" en "Fruitsalade" vielen op de terugval
+# Groenten.
 _VG_CAT_FRUIT = ("aardbei", "abrikoo", "abrikoz", "ananas", "appel", "banaan",
-    "bes", "bosbes", "dadel", "druif", "framboos", "grapefruit", "kiwi",
+    "bes", "bosbes", "dadel", "drui", "framboos", "fruit", "grapefruit", "kiwi",
     "mandarijn", "mango", "meloen", "nectarine", "peer", "pruim", "sinaasappel",
     "watermeloen", "vijg", "rozijn", "perzik", "kers")
 
@@ -3677,9 +3680,9 @@ _VG_GROENTE_NAMEN = ("asperge", "aubergine", "avocado", "bloemkool", "broccoli",
     "groente", "witloof", "champignon", "augurk", "basilicum", "selder",
     "sjalot", "sperzieb", "nori", "salade", "erwt")
 _VG_FRUIT_NAMEN = ("aardbei", "abrikoos", "ananas", "appel", "banaan",
-    "blauwe bes", "bes", "bosbes", "dadel", "druif", "framboos", "grapefruit",
-    "kers", "kiwi", "mandarijn", "mango", "meloen", "nectarine", "peer",
-    "pruim", "sinaasappel", "watermeloen", "vijg", "rozijn", "perzik")
+    "blauwe bes", "bes", "bosbes", "dadel", "drui", "framboos", "fruit",
+    "grapefruit", "kers", "kiwi", "mandarijn", "mango", "meloen", "nectarine",
+    "peer", "pruim", "sinaasappel", "watermeloen", "vijg", "rozijn", "perzik")
 
 _VG_VANGNET = (
     ("Sojaproducten", ("tofu", "tempeh", "sojayoghurt", "sojamelk")),
@@ -3718,7 +3721,20 @@ def _vg_normaliseer(cat: str, naam: str):
             return "Groenten"
         if any(w in n for w in _VG_CAT_KNOL):
             return "Granen & brood"
-        if any(w in n for w in _VG_CAT_GROENTE):
+        # KORT-WOORD-V1 — binnen deze categorie is een naam met het woord
+        # "fruit" erin vrijwel zeker fruit. Zonder deze regel won "salade" uit
+        # de groentelijst van "fruitsalade", want groente wordt eerst getoetst.
+        if "fruit" in n:
+            return "Fruit"
+        # KORT-WOORD-V1 — korte woorden op HEEL woord toetsen. "ui" staat in
+        # CAT_GROENTE en zit in "fr-ui-t": alles met het woord fruit in de naam
+        # kwam er als groente uit, en "sla" deed hetzelfde met "slagroom". Het
+        # vangnet verderop kende die voorzorg al (heelWoord voor sla en ui);
+        # deze splitsing niet. Drie letters of minder is de grens: daar zitten
+        # alleen "ui" en "sla" in, en langere woorden als "tomat" MOETEN juist
+        # op substring blijven matchen om kerstomaten te vangen.
+        if any(_vg_heel_woord(n, w) if len(w) <= 3 else w in n
+               for w in _VG_CAT_GROENTE):
             return "Groenten"
         if any(w in n for w in _VG_CAT_FRUIT):
             return "Fruit"

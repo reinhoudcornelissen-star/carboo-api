@@ -197,6 +197,22 @@ ok("eendenborst", M["_voedingsgroep"]("Eendenborst", "Gevogelte"), "Vlees & vis"
 ok("griekse yoghurt", M["_voedingsgroep"]("Griekse yoghurt", "Yoghurt en verse zuivel"), "Zuivel")
 ok("halfvolle melk", M["_voedingsgroep"]("Halfvolle melk", "Melk"), "Zuivel")
 
+print()
+print("KORTE WOORDEN BINNEN 'GROENTEN EN FRUIT' (KORT-WOORD-V1)")
+# "ui" staat in CAT_GROENTE en zit in "fr-ui-t": alles met fruit in de naam
+# kwam er als GROENTE uit. "sla" deed hetzelfde met "slagroom". Korte woorden
+# worden hier nu op heel woord getoetst; langere blijven substring, want
+# "tomat" moet kerstomaten blijven vangen.
+GF = "Groenten en fruit"
+ok("grapefruit", M["_voedingsgroep"]("Grapefruit", GF), "Fruit")
+ok("druiven", M["_voedingsgroep"]("Druiven", GF), "Fruit")
+ok("fruitsalade", M["_voedingsgroep"]("Fruitsalade", GF), "Fruit")
+ok("vers fruit", M["_voedingsgroep"]("Vers fruit", GF), "Fruit")
+ok("ui blijft groente", M["_voedingsgroep"]("Ui", GF), "Groenten")
+ok("gemengde sla blijft groente", M["_voedingsgroep"]("Gemengde sla", GF), "Groenten")
+ok("cherrytomaten (substring blijft)", M["_voedingsgroep"]("Cherrytomaten", GF), "Groenten")
+ok("kerstomaatjes (substring blijft)", M["_voedingsgroep"]("Kerstomaatjes", GF), "Groenten")
+
 print("\nDE HEEL-WOORDGEVALLEN")
 ok("sla is groente", M["_voedingsgroep"]("Sla", ""), "Groenten")
 ok("slagroom is dat niet", M["_voedingsgroep"]("Slagroom", ""), "Zuivel")
