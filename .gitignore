@@ -7,3 +7,7 @@ __pycache__/
 # sleutels nooit in git
 .env
 .env.*
+
+# Alle kopieen van patch-scripts. De regel *.bak-* hierboven ving
+# main.py.bak, main.py.bak2 en main.py.bak_par niet.
+*.bak*
