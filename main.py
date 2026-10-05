@@ -4354,7 +4354,14 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
         v["groenten"] += g
         v["fruit"] += fr
 
-        cat = herken_categorie(r.get("naam") or "", r.get("categorie") or "", supabase)
+        # VOEDINGSGROEP-SPIEGEL-V1 — ook hier _voedingsgroep, niet
+        # herken_categorie. cat_kcal voedt de diversiteitsterm van _nd_score
+        # (regel ~3861) en Analyses bouwt zijn catKcal met DEZELFDE
+        # herkenCategorie als zijn groente/fruit. Bleef dit op
+        # herken_categorie staan, dan stonden er twee classificeerders in een
+        # bestand: fruit met vangnet, diversiteit zonder. cat_kcal gaat niet
+        # mee in het antwoord, dus dit raakt alleen de nd-score.
+        cat = _voedingsgroep(r.get("naam") or "", r.get("categorie") or "")
         v["cat_kcal"][cat] = v["cat_kcal"].get(cat, 0) + (r.get("kcal") or 0)
 
         for _c, _e in eiwit_delen(r):
