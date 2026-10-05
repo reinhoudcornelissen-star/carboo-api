@@ -3607,6 +3607,15 @@ _VG_NORM = {
     "schaal- en schelpdieren": "Vlees & vis", "schaal en schelpdieren": "Vlees & vis",
     "zuivel": "Zuivel", "zuivel en alternativen": "Zuivel",
     "zuivel & alternativen": "Zuivel",
+    # CATEGORIE-KAAS-V1 — deze vier stonden wel in de oude CAT-kaart van het
+    # maandbord maar niet hier, en dus ook niet in de frontend waar deze tabel
+    # vandaan komt. Gevolg: een product met categorie "Kaas" en een naam zonder
+    # het woord "kaas" -- Burrata, Cheddar, Brie -- kwam als "Overige" uit de
+    # classificatie. Op het bord ving CAT dat nog op, maar in het weekrapport
+    # niet: die kaas telde daar bij dierlijk noch plantaardig eiwit, en niet mee
+    # als voedingsgroep voor de diversiteitsbonus.
+    "kaas": "Zuivel", "melk": "Zuivel", "yoghurt en verse zuivel": "Zuivel",
+    "gevogelte": "Vlees & vis",
     "eieren": "Eieren", "ei": "Eieren",
     "peulvruchten": "Peulvruchten",
     "noten & zaden": "Noten & zaden", "noten en zaden": "Noten & zaden",

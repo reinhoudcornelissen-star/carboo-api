@@ -137,6 +137,28 @@ else:
         uit_ts = list(re.findall(r'"([^"]*)"', m.group(1)))
         ok(f"{ts_naam} == {py_naam}", list(M[py_naam]), uit_ts)
 
+    # CATEGORIE-KAAS-V1 — ook de categorievertaling vergelijken. Die stond
+    # buiten deze test, en daardoor glipte er een gat doorheen: "Kaas",
+    # "Melk", "Yoghurt en verse zuivel" en "Gevogelte" ontbraken in BEIDE
+    # talen. Burrata en Cheddar kwamen als "Overige" uit de classificatie en
+    # telden in het weekrapport bij dierlijk noch plantaardig eiwit.
+    m = re.search(r"const CAT_NORM[^=]*=\s*{(.*?)\n}", ts, re.S)
+    if not m:
+        fouten.append("CAT_NORM niet gevonden in analyse-utils.ts")
+        print("  FOUT CAT_NORM niet gevonden")
+    else:
+        kaal = re.sub(r"/[*].*?[*]/", "", m.group(1), flags=re.S)
+        uit_ts = dict(re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"', kaal))
+        ok("CAT_NORM == _VG_NORM (aantal)", len(M["_VG_NORM"]), len(uit_ts))
+        ok("CAT_NORM == _VG_NORM (inhoud)", M["_VG_NORM"] == uit_ts, True)
+        if M["_VG_NORM"] != uit_ts:
+            alleen_py = set(M["_VG_NORM"]) - set(uit_ts)
+            alleen_ts = set(uit_ts) - set(M["_VG_NORM"])
+            if alleen_py:
+                print(f"       alleen in Python: {sorted(alleen_py)}")
+            if alleen_ts:
+                print(f"       alleen in TS    : {sorted(alleen_ts)}")
+
     groepen = []
     for regel in ts.splitlines():
         if ".some(w => n.includes(w))" not in regel or '["' not in regel:
@@ -162,6 +184,18 @@ ok("gewone aardappel is graan", M["_voedingsgroep"]("Aardappel gekookt", ""), "G
 ok("groentesoep is groente", M["_voedingsgroep"]("Groentesoep", ""), "Groenten")
 ok("tropifruit is snoep", M["_voedingsgroep"]("Tropifruit", ""), "Snacks")
 ok("skyr is zuivel", M["_voedingsgroep"]("Skyr naturel", ""), "Zuivel")
+
+print()
+print("CATEGORIEEN DIE DE NAAM NIET VERRAADT (CATEGORIE-KAAS-V1)")
+# Burrata en Cheddar bevatten het woord "kaas" niet. Zonder de categorie
+# "Kaas" in de vertaaltabel kwamen ze als "Overige" uit de classificatie en
+# telden ze bij dierlijk noch plantaardig eiwit.
+ok("burrata", M["_voedingsgroep"]("Burrata", "Kaas"), "Zuivel")
+ok("cheddar", M["_voedingsgroep"]("Cheddar", "Kaas"), "Zuivel")
+ok("brie", M["_voedingsgroep"]("Brie", "Kaas"), "Zuivel")
+ok("eendenborst", M["_voedingsgroep"]("Eendenborst", "Gevogelte"), "Vlees & vis")
+ok("griekse yoghurt", M["_voedingsgroep"]("Griekse yoghurt", "Yoghurt en verse zuivel"), "Zuivel")
+ok("halfvolle melk", M["_voedingsgroep"]("Halfvolle melk", "Melk"), "Zuivel")
 
 print("\nDE HEEL-WOORDGEVALLEN")
 ok("sla is groente", M["_voedingsgroep"]("Sla", ""), "Groenten")
