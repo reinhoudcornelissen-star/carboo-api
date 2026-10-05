@@ -18,8 +18,8 @@ zonder bruikbare categorie kwam als "Overige" terug, en _gf_gram telt
 gebruiker die elke dag ruim 120 g fruit logde, zag 139 g in Analyses en 54 g
 in zijn Bevoorrading. Hij merkte het; de app meldde niets.
 
-Deze test leest analyses.tsx in en legt de vier lijsten die groente van
-fruit scheiden woord voor woord naast de Python-kant. Wijzigt iemand daar
+Deze test leest analyses.tsx in en legt de vijf lijsten die de
+voedingsgroepen scheiden woord voor woord naast de Python-kant. Wijzigt iemand daar
 een woord, dan wordt dit script rood.
 
 WAT DEZE TEST NIET DOET. Hij bewijst dat de twee NU gelijk lopen, niet dat
@@ -53,6 +53,7 @@ NODIG_FUNC = {"_bevat_woord", "_haal_catwoorden", "herken_categorie",
               "_vg_heel_woord", "_vg_normaliseer", "_vg_basis",
               "_voedingsgroep", "_gf_gram"}
 NODIG_VAR = {"_catwoorden_cache", "_VG_STANDAARD", "_VG_NORM", "_VG_MAP",
+             "_VG_CAT_KNOL",
              "_VG_CAT_GROENTE", "_VG_CAT_FRUIT", "_VG_GROENTE_NAMEN",
              "_VG_FRUIT_NAMEN", "_VG_VANGNET"}
 
@@ -114,7 +115,7 @@ class NepSupabase:
 
 SB = NepSupabase()
 
-print("\nDE VIER LIJSTEN DIE GROENTE VAN FRUIT SCHEIDEN")
+print("\nDE VIJF LIJSTEN DIE DE VOEDINGSGROEPEN SCHEIDEN")
 if not TS.exists():
     print(f"  OVERGESLAGEN - analyses.tsx niet gevonden op {TS}")
     print("  (het gedrag hieronder wordt nog wel bewaakt)")
@@ -122,6 +123,7 @@ else:
     ts = io.open(TS, encoding="utf-8").read()
     for ts_naam, py_naam in (("CAT_GROENTE", "_VG_CAT_GROENTE"),
                              ("CAT_FRUIT", "_VG_CAT_FRUIT"),
+                             ("CAT_KNOL", "_VG_CAT_KNOL"),
                              ("GROENTE_NAMEN", "_VG_GROENTE_NAMEN"),
                              ("FRUIT_NAMEN", "_VG_FRUIT_NAMEN")):
         m = re.search(r"const\s+" + ts_naam + r"\s*=\s*\[([^\]]*)\]", ts)
@@ -167,6 +169,17 @@ print("\nWAT AL WERKTE, WERKT NOG")
 ok("appel in Groenten en fruit", M["_voedingsgroep"]("Appel", "Groenten en fruit"), "Fruit")
 ok("tomaat in Groenten en fruit", M["_voedingsgroep"]("Tomaat", "Groenten en fruit"), "Groenten")
 ok("onbekende vrucht valt op Groenten", M["_voedingsgroep"]("Kaki", "Groenten en fruit"), "Groenten")
+
+print("\nKNOL-FIX-V3: AARDAPPEL IS GEEN APPEL")
+# NEVO zet "Aardappel gekookt" in de categorie "Groenten en fruit", en
+# CAT_FRUIT matcht op substring: "appel" zit in "aardappel". Zonder de
+# knollijst kwamen aardappelen bij het FRUIT terecht -- ook de zoete, waarvan
+# de naamcorrectie nooit bereikt werd.
+ok("aardappel is graan", M["_voedingsgroep"]("Aardappel gekookt", "Groenten en fruit"), "Granen & brood")
+ok("puree ook", M["_voedingsgroep"]("Aardappelpuree", "Groenten en fruit"), "Granen & brood")
+ok("friet ook", M["_voedingsgroep"]("Friet", "Groenten en fruit"), "Granen & brood")
+ok("zoete aardappel blijft groente", M["_voedingsgroep"]("Zoete aardappel gek.", "Groenten en fruit"), "Groenten")
+ok("en een echte appel blijft fruit", M["_voedingsgroep"]("Appel", "Groenten en fruit"), "Fruit")
 ok("herken_categorie is NIET gewijzigd", M["herken_categorie"]("Banaan", "", SB), "Overige")
 
 print("\nDE GRAMMEN VAN EEN LOGREGEL")

@@ -3655,6 +3655,14 @@ _VG_MAP = {
     "vleesvervanger": "Vleesvervanger",
 }
 
+# KNOL-FIX-V3 — zetmeelrijke knollen horen bij de granen en tellen niet mee
+# voor de dagelijkse groenten. Zonder deze lijst kwam "Aardappel gekookt" met
+# de NEVO-categorie "Groenten en fruit" als FRUIT uit de splitser: "appel" zit
+# in "aardappel" en de vergelijking is een substring. analyse-utils.ts had die
+# reparatie al (CAT-FIX-V2), analyses.tsx niet -- en dat bestand voedt het
+# scherm. Zoete aardappel is de uitzondering en blijft groente.
+_VG_CAT_KNOL = ("aardappel", "friet", "frieten", "puree")
+
 # CAT_GROENTE en CAT_FRUIT uit analyses.tsx, voor normaliseerCategorie
 _VG_CAT_GROENTE = ("asperge", "aubergine", "avocado", "bloemkool", "broccoli",
     "courgette", "komkommer", "kool", "maïs", "mais", "paprika", "pompoen",
@@ -3707,6 +3715,13 @@ def _vg_normaliseer(cat: str, naam: str):
     if not c:
         return None
     if c in ("groenten en fruit", "groenten & fruit"):
+        # KNOL-FIX-V3 — de uitzondering eerst, dan de knollen, dan de rest.
+        # De naamcorrecties in _vg_basis staan NA deze functie en worden voor
+        # deze categorie dus nooit bereikt; "zoete aardappel" moet hier staan.
+        if "zoete aardappel" in n:
+            return "Groenten"
+        if any(w in n for w in _VG_CAT_KNOL):
+            return "Granen & brood"
         if any(w in n for w in _VG_CAT_GROENTE):
             return "Groenten"
         if any(w in n for w in _VG_CAT_FRUIT):
