@@ -54,6 +54,7 @@ NODIG_FUNC = {"_bevat_woord", "_haal_catwoorden", "herken_categorie",
               "_vg_heel_woord", "_vg_normaliseer", "_vg_basis",
               "_voedingsgroep", "_gf_gram", "_bordrol_uit_groep"}
 NODIG_VAR = {"_catwoorden_cache", "_VG_STANDAARD", "_VG_NORM", "_VG_MAP",
+             "_G_DIER", "_G_PLANT",
              "_BORDROL_UIT_GROEP",
              "_VG_CAT_KNOL",
              "_VG_CAT_GROENTE", "_VG_CAT_FRUIT", "_VG_GROENTE_NAMEN",
@@ -227,6 +228,27 @@ ok("olijfolie", bordrol("Olijfolie", ""), "vetstof")
 # willekeurige rol te landen
 ok("een gerecht krijgt geen rol", bordrol("Stoofpotje", "Maaltijden"), None)
 ok("onbekend krijgt geen rol", bordrol("Zzzz", ""), None)
+
+print()
+print("DIERLIJK TEGENOVER PLANTAARDIG EIWIT")
+# Deze as had een VIERDE classificeerder: _eiwit_categorie met een eigen
+# lijst _RAAD_CATEGORIE, een kopie van de OUDE cascade uit analyse-utils.ts.
+# Die vergeleek op woordbegin, dus "Volkorenbrood" kwam er als "Overige" uit
+# en telde bij geen van beide. Nu loopt het via _voedingsgroep.
+def as_eiwit(naam, cat):
+    g = M["_voedingsgroep"](naam, cat)
+    if g in M["_G_DIER"]:
+        return "dierlijk"
+    if g in M["_G_PLANT"]:
+        return "plantaardig"
+    return "geen van beide"
+
+ok("kipfilet", as_eiwit("Kipfilet", ""), "dierlijk")
+ok("griekse yoghurt", as_eiwit("Griekse yoghurt", ""), "dierlijk")
+ok("tofu", as_eiwit("Tofu naturel", ""), "plantaardig")
+ok("linzen", as_eiwit("Linzen gekookt", ""), "plantaardig")
+ok("volkorenbrood (was Overige)", as_eiwit("Volkorenbrood", ""), "plantaardig")
+ok("olijfolie telt niet mee", as_eiwit("Olijfolie", ""), "geen van beide")
 
 print("\nKAN DEZE TEST ZELF FALEN?")
 _echt = M["_vg_basis"]

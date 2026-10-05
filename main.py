@@ -4242,38 +4242,15 @@ _NIET_IN_KOP = {"kalium", "calcium", "ijzer", "vitb12", "vitd", "omega3"}
 _G_DIER = {"Vlees & vis", "Vlees", "Vis", "Schaal- en schelpdieren", "Zuivel", "Eieren"}
 _G_PLANT = {"Peulvruchten", "Sojaproducten", "Noten & zaden", "Noten en zaden", "Vleesvervanger",
             "Granen & brood", "Granen en brood", "Groenten", "Groenten en fruit", "Fruit"}
-_RAAD_CATEGORIE = [
-    ("Sojaproducten", ("tofu", "tempeh", "sojayoghurt", "sojamelk", "edamame")),
-    ("Peulvruchten", ("boon", "linze", "kikker", "hummus", "spliterwt", "erwt")),
-    ("Noten & zaden", ("noot", "amandel", "cashew", "walnoot", "pinda", "chiazaad", "lijnzaad", "pompoenpit")),
-    ("Vlees & vis", ("garnaal", "zalm", "tonijn", "kabeljauw", "makreel", "haring", "kip", "vlees", "gehakt",
-                     "varken", "rund", "lam", "steak", "ham", "worst", "filet", "kalkoen", "biefstuk", "vis")),
-    ("Zuivel", ("melk", "yoghurt", "kwark", "kaas", "room", "boter", "skyr", "plattekaas", "mozzarella")),
-    ("Eieren", ("ei ", "ei,", "eieren", "omelet", "roerei")),
-    ("Granen & brood", ("brood", "pasta", "rijst", "havermout", "wrap", "cracker", "muesli", "granola",
-                        "couscous", "quinoa", "aardappel", "pannenkoek", "wafel")),
-    ("Groenten", ("broccoli", "spinazie", "wortel", "tomaat", "paprika", "courgette", "sla", "komkommer",
-                  "champignon", "avocado", "ui", "prei", "witloof", "groente")),
-    ("Fruit", ("appel", "peer", "banaan", "aardbei", "bosbes", "mango", "kiwi", "sinaas", "druif", "dadel",
-               "rozijn", "fruit")),
-    ("Sportvoeding", ("shake", "proteine", "whey", "energiegel", "sportdrank", "recovery", "isotoon")),
-]
-
-
-def _eiwit_categorie(naam: str, cat: str, supabase: Client) -> str:
-    """De categorie zoals herkenCategorie in de app: de opgeslagen categorie
-    eerst, en pas als die ontbreekt een gok op naam."""
-    c = herken_categorie(naam, cat, supabase)
-    if c and c != "Overige":
-        return c
-    n = (naam or "").lower()
-    for categorie, woorden in _RAAD_CATEGORIE:
-        if any(_bevat_woord(n, w) for w in woorden):
-            return categorie
-        # zoals in de app: ook alles wat met "ei" begint, op de plaats van Eieren
-        if categorie == "Eieren" and n.startswith("ei"):
-            return categorie
-    return "Overige"
+# VOEDINGSGROEP-SPIEGEL-V1 — hier stonden _RAAD_CATEGORIE en
+# _eiwit_categorie: een met de hand nagebouwde cascade voor de as dierlijk
+# tegenover plantaardig eiwit. Ze was een kopie van de OUDE versie uit
+# analyse-utils.ts, met woordbegin in plaats van substring en zonder de
+# naamcorrecties. Een vierde classificeerder dus, en een verouderde.
+#
+# _voedingsgroep doet hetzelfde in een keer en spiegelt de frontend, dus de
+# twee aanroepen in eiwit_delen gaan daar nu rechtstreeks naartoe. _G_DIER en
+# _G_PLANT hierboven vertalen die uitkomst naar de as; die blijven.
 
 
 def _ingredienten(rc: dict) -> list:
@@ -4360,7 +4337,7 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
         rc = recepten.get(str(r.get("recept_id"))) if r.get("recept_id") else None
         ingr = _ingredienten(rc) if rc else []
         if not ingr:
-            return [(_eiwit_categorie(r.get("naam") or "", r.get("categorie") or "", supabase), e)]
+            return [(_voedingsgroep(r.get("naam") or "", r.get("categorie") or ""), e)]
         schaal = (float(r.get("hoeveelheid_g") or 100) / 100) / max(float(rc.get("aantal_porties") or 1), 1)
         rijen = []
         for i in ingr:
@@ -4368,7 +4345,7 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
             gram = float(i.get("gram") or i.get("hoeveelheid_g") or 0) * schaal
             b = bib_ing.get(naam.lower())
             kcal = float(b.get("kcal_100g") or 0) * gram / 100 if b else gram * 1.5
-            rijen.append((_eiwit_categorie(naam, (b or {}).get("categorie") or "", supabase), kcal))
+            rijen.append((_voedingsgroep(naam, (b or {}).get("categorie") or ""), kcal))
         totaal = sum(k for _, k in rijen) or 1
         return [(c, e * k / totaal) for c, k in rijen]
 
