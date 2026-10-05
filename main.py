@@ -3583,7 +3583,210 @@ def _trainingskcal_per_dag(trainingen: list) -> dict:
             for d, sporten in per_dag.items()}
 
 
-def _gf_gram(rij: dict, recepten: dict, supabase: Client):
+# ── VOEDINGSGROEP-SPIEGEL-V1 ──────────────────────────────────────────
+# Een GETROUWE port van herkenCategorie uit app/app/fueling/analyses.tsx.
+#
+# Waarom hier een kopie staat en geen eigen variant: het weekrapport gaf
+# 54 g fruit per dag waar Analyses 139 g toonde, op exact dezelfde
+# logregels. De oorzaak was dat herken_categorie geen vangnet op de NAAM
+# heeft: een logregel zonder bruikbare categorie kwam als "Overige" terug en
+# telde in _gf_gram bij groente noch fruit. Analyses heeft dat vangnet wel.
+#
+# tests/test_voedingsgroep.py leest analyses.tsx in en vergelijkt de lijsten
+# hieronder woord voor woord. Wijzigt iemand daar iets, dan wordt die test
+# rood. Dat is de enige bescherming die er is: de app rekent dit in twee
+# talen, en dat blijft zo zolang De Bevoorrading op de server gemaakt wordt
+# (ze heeft een coachroute en draait dus buiten de browser om).
+#
+# Twee dingen uit analyses.tsx staan hier BEWUST niet:
+#  - stap 3 van herkenCategorieBasis, de splitsing op GROENTE_NAMEN /
+#    FRUIT_NAMEN bij categorie "groenten en fruit". Die is daar
+#    ONBEREIKBAAR: normaliseerCategorie handelt die categorie al af en geeft
+#    altijd iets terug. Dode code, niet overgenomen.
+#  - de halvering van soep en sap. Die zit in analyse-utils.ts
+#    (groenteBijdrage) en voedt de COACHZONE, maar analyses.tsx telt het
+#    volle gewicht. De frontend is het met zichzelf oneens; het weekrapport
+#    volgt hier het sporterscherm.
+_VG_STANDAARD = ("Groenten", "Fruit", "Granen & brood", "Vlees & vis", "Zuivel",
+                 "Eieren", "Peulvruchten", "Noten & zaden", "Vetten & oliën",
+                 "Sauzen & spreads", "Sojaproducten", "Sportvoeding", "Dranken",
+                 "Snacks", "Vleesvervanger", "Maaltijden")
+
+_VG_NORM = {
+    "groenten": "Groenten", "fruit": "Fruit",
+    "granen & brood": "Granen & brood", "granen en brood": "Granen & brood",
+    "vlees & vis": "Vlees & vis", "vlees": "Vlees & vis", "vis": "Vlees & vis",
+    "vlees en vis": "Vlees & vis",
+    "schaal- en schelpdieren": "Vlees & vis", "schaal en schelpdieren": "Vlees & vis",
+    "zuivel": "Zuivel", "zuivel en alternativen": "Zuivel",
+    "zuivel & alternativen": "Zuivel",
+    "eieren": "Eieren", "ei": "Eieren",
+    "peulvruchten": "Peulvruchten",
+    "noten & zaden": "Noten & zaden", "noten en zaden": "Noten & zaden",
+    "vetten & oliën": "Vetten & oliën", "vetten en oliën": "Vetten & oliën",
+    "vetten en olien": "Vetten & oliën",
+    "sauzen & spreads": "Sauzen & spreads", "sauzen en spreads": "Sauzen & spreads",
+    "zoet beleg": "Sauzen & spreads", "sauzen": "Sauzen & spreads",
+    "sojaproducten": "Sojaproducten", "soja": "Sojaproducten",
+    "sportvoeding": "Sportvoeding",
+    "dranken": "Dranken", "drank": "Dranken",
+    "snacks": "Snacks", "snacks en zoetigheden": "Snacks",
+    "snacks & zoetigheden": "Snacks", "zoetigheden": "Snacks",
+    "vleesvervanger": "Vleesvervanger", "vleesvervangers": "Vleesvervanger",
+    "maaltijden": "Maaltijden", "maaltijd": "Maaltijden",
+}
+
+# de MAP binnen herkenCategorieBasis. Korter dan _VG_NORM en met ANDERE
+# uitkomsten: "eieren en zuivel" wordt hier Zuivel, "zoet beleg" wordt Snacks.
+_VG_MAP = {
+    "granen en brood": "Granen & brood", "noten en zaden": "Noten & zaden",
+    "vetten en oliën": "Vetten & oliën", "vlees": "Vlees & vis",
+    "vis": "Vlees & vis", "schaal- en schelpdieren": "Vlees & vis",
+    "zuivel": "Zuivel", "eieren": "Eieren", "peulvruchten": "Peulvruchten",
+    "sojaproducten": "Sojaproducten", "sportvoeding": "Sportvoeding",
+    "dranken": "Dranken", "snacks": "Snacks", "sauzen en spreads": "Sauzen & spreads",
+    "maaltijden": "Maaltijden", "fruit": "Fruit", "groenten": "Groenten",
+    "eieren en zuivel": "Zuivel", "zuivel en eieren": "Zuivel",
+    "zuivel en alternativen": "Zuivel",
+    "snacks en zoetigheden": "Snacks", "zoet beleg": "Snacks",
+    "granen & brood": "Granen & brood", "noten & zaden": "Noten & zaden",
+    "vetten & oliën": "Vetten & oliën",
+    "vlees & vis": "Vlees & vis", "sauzen & spreads": "Sauzen & spreads",
+    "vleesvervanger": "Vleesvervanger",
+}
+
+# CAT_GROENTE en CAT_FRUIT uit analyses.tsx, voor normaliseerCategorie
+_VG_CAT_GROENTE = ("asperge", "aubergine", "avocado", "bloemkool", "broccoli",
+    "courgette", "komkommer", "kool", "maïs", "mais", "paprika", "pompoen",
+    "prei", "biet", "rucola", "spinazie", "spruit", "tomaat", "tomat", "wortel",
+    "groente", "witloof", "champignon", "augurk", "basilicum", "selder",
+    "sjalot", "sperzieb", "nori", "salade", "erwt", "ui", "sla")
+_VG_CAT_FRUIT = ("aardbei", "abrikoo", "abrikoz", "ananas", "appel", "banaan",
+    "bes", "bosbes", "dadel", "druif", "framboos", "grapefruit", "kiwi",
+    "mandarijn", "mango", "meloen", "nectarine", "peer", "pruim", "sinaasappel",
+    "watermeloen", "vijg", "rozijn", "perzik", "kers")
+
+# GROENTE_NAMEN en FRUIT_NAMEN uit het vangnet van herkenCategorieBasis
+_VG_GROENTE_NAMEN = ("asperge", "aubergine", "avocado", "bloemkool", "broccoli",
+    "courgette", "komkommer", "kool", "maïs", "mais", "paprika", "pompoen",
+    "prei", "biet", "rucola", "spinazie", "spruit", "tomaat", "tomat", "wortel",
+    "groente", "witloof", "champignon", "augurk", "basilicum", "selder",
+    "sjalot", "sperzieb", "nori", "salade", "erwt")
+_VG_FRUIT_NAMEN = ("aardbei", "abrikoos", "ananas", "appel", "banaan",
+    "blauwe bes", "bes", "bosbes", "dadel", "druif", "framboos", "grapefruit",
+    "kers", "kiwi", "mandarijn", "mango", "meloen", "nectarine", "peer",
+    "pruim", "sinaasappel", "watermeloen", "vijg", "rozijn", "perzik")
+
+_VG_VANGNET = (
+    ("Sojaproducten", ("tofu", "tempeh", "sojayoghurt", "sojamelk")),
+    ("Peulvruchten", ("edamame", "linze", "kikker", "hummus", "spliterwt",
+                      "kidneyboon", "witte boon", "zwarte boon", "tuinboon")),
+    ("Noten & zaden", ("noot", "amandel", "cashew", "walnoot", "pinda",
+                       "chiazaad", "lijnzaad", "pompoenpit")),
+    ("Vlees & vis", ("garnaal", "zalm", "tonijn", "kabeljauw", "makreel",
+                     "haring", "kip", "vlees", "gehakt", "varken", "rund",
+                     "lam", "steak", "ham", "worst", "filet", "kalkoen",
+                     "biefstuk", "vis")),
+    ("Zuivel", ("melk", "yoghurt", "kwark", "kaas", "room", "boter", "skyr",
+                "plattekaas", "mozzarella")),
+    ("Eieren", ("ei ", "ei,", "eieren", "omelet", "roerei")),
+    ("Granen & brood", ("brood", "pasta", "rijst", "havermout", "wrap",
+                        "cracker", "muesli", "granola", "couscous", "quinoa",
+                        "pannenkoek", "wafel")),
+)
+
+
+def _vg_heel_woord(n: str, w: str) -> bool:
+    """heelWoord uit analyses.tsx: sla matcht niet in slagroom."""
+    return bool(_re.search(r"(^|[^a-z])" + _re.escape(w) + r"([^a-z]|$)", n))
+
+
+def _vg_normaliseer(cat: str, naam: str):
+    c = (cat or "").lower().strip()
+    n = (naam or "").lower().strip()
+    if not c:
+        return None
+    if c in ("groenten en fruit", "groenten & fruit"):
+        if any(w in n for w in _VG_CAT_GROENTE):
+            return "Groenten"
+        if any(w in n for w in _VG_CAT_FRUIT):
+            return "Fruit"
+        return "Groenten"
+    if c in ("eieren en zuivel", "zuivel en eieren"):
+        if _re.search(r"roerei|omelet|eieren", n) or n == "ei":
+            return "Eieren"
+        return "Zuivel"
+    if c in _VG_NORM:
+        return _VG_NORM[c]
+    for s in _VG_STANDAARD:
+        if s.lower() == c:
+            return s
+    return None
+
+
+def _vg_basis(naam: str, cat: str) -> str:
+    n = (naam or "").lower().strip()
+    c = (cat or "").lower().strip()
+    gevonden = _vg_normaliseer(cat, naam)
+    if gevonden:
+        return gevonden
+    if "zoete aardappel" in n:
+        return "Groenten"
+    if "groentesoep" in n or "groentensoep" in n:
+        return "Groenten"
+    if "aardappel" in n:
+        return "Granen & brood"
+    if "skyr" in n:
+        return "Zuivel"
+    if "cottage cheese" in n or "amandelmelk" in n:
+        return "Zuivel"
+    if n == "roerei":
+        return "Eieren"
+    if "kaasschnitzel" in n:
+        return "Vleesvervanger"
+    if any(w in n for w in ("hazelnootpasta", "chocolade smeerpasta", "hazelnoot pasta")):
+        return "Sauzen & spreads"
+    if any(w in n for w in ("haribo", "milka", "snoep", "gummies", "tropifruit")):
+        return "Snacks"
+    if c and c in _VG_MAP:
+        return _VG_MAP[c]
+    for groep, woorden in _VG_VANGNET:
+        if any(w in n for w in woorden):
+            return groep
+        if groep == "Eieren" and n.startswith("ei"):
+            return "Eieren"
+    if _vg_heel_woord(n, "sla") or _vg_heel_woord(n, "ui"):
+        return "Groenten"
+    if _vg_heel_woord(n, "peer"):
+        return "Fruit"
+    if any(w in n for w in _VG_GROENTE_NAMEN):
+        return "Groenten"
+    if any(w in n for w in _VG_FRUIT_NAMEN):
+        return "Fruit"
+    if any(w in n for w in ("shake", "proteine", "whey", "energiegel",
+                            "sportdrank", "recovery", "isotoon")):
+        return "Sportvoeding"
+    if any(w in n for w in ("olijfolie", "zonnebloemolie", "kokosolie", "olie")):
+        return "Vetten & oliën"
+    return "Overige"
+
+
+def _voedingsgroep(naam: str, cat: str) -> str:
+    """De voedingsgroep van een logregel, zoals Analyses hem bepaalt.
+
+    MAALTIJD-BRON-V1 uit analyses.tsx: een product dat als "Maaltijden" in de
+    bibliotheek staat zegt niets over zijn inhoud, dus eerst de naam proberen
+    en alleen terugvallen op "Maaltijden" als dat niets oplevert."""
+    c = (cat or "").lower().strip()
+    if c in ("maaltijden", "maaltijd"):
+        gok = _vg_basis(naam, "")
+        if gok and gok not in ("Maaltijden", "Overige"):
+            return gok
+        return "Maaltijden"
+    return _vg_basis(naam, cat)
+
+
+def _gf_gram(rij: dict, recepten: dict, supabase: Client, bib: dict = None):
     """Hoeveel gram groente en fruit zit er in deze logregel?
 
     Een gewoon product telt met zijn eigen gewicht. Een gelogd gerecht
@@ -3606,14 +3809,23 @@ def _gf_gram(rij: dict, recepten: dict, supabase: Client):
         schaal = porties_gelogd / max(float(rc.get("aantal_porties") or 1), 1)
         for i in (ingr or []):
             gram = (i.get("gram") or i.get("hoeveelheid_g") or 0) * schaal
-            cat = herken_categorie(i.get("naam") or "", "Groenten en fruit", supabase)
+            naam_i = str(i.get("naam") or "")
+            # CATWOORDEN-SPIEGEL-V1 — hier stond "Groenten en fruit" als
+            # categorie voor ELK ingredient. Dat duwde alles door de
+            # groente/fruit-splitser, en die valt bij onbekend terug op
+            # "Groenten": het vlees, de pasta en de kaas in een stoofpot
+            # telden mee als GROENTEGRAM. Nu krijgt een ingredient zijn eigen
+            # categorie uit de bibliotheek; ontbreekt die, dan beslist de naam.
+            eigen_cat = str((bib or {}).get(naam_i.strip().lower(), {}).get("categorie") or "")
+            cat = _voedingsgroep(naam_i, eigen_cat)
             if cat == "Groenten":
                 groente += gram
             elif cat == "Fruit":
                 fruit += gram
         return groente, fruit
 
-    cat = herken_categorie(rij.get("naam") or "", rij.get("categorie") or "", supabase)
+    naam_r = str(rij.get("naam") or "")
+    cat = _voedingsgroep(naam_r, rij.get("categorie") or "")
     gram = rij.get("hoeveelheid_g") or 0
     if cat == "Groenten":
         groente += gram
@@ -4138,7 +4350,7 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
         v["vitd"] += r.get("vitd_mcg") or 0
         v["vitb12"] += r.get("vitb12_mcg") or 0
 
-        g, fr = _gf_gram(r, recepten, supabase)
+        g, fr = _gf_gram(r, recepten, supabase, bib_ing)
         v["groenten"] += g
         v["fruit"] += fr
 

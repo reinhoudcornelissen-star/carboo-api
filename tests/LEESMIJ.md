@@ -1,7 +1,7 @@
 # Tests
 
-Twee scripts, met dezelfde reden van bestaan: er staat een regel op twee
-plekken in `main.py`, en zulke paren lopen ooit uit de pas. Ze controleren
+Drie scripts, met dezelfde reden van bestaan: er staat een regel op twee
+plekken, en zulke paren lopen ooit uit de pas. Ze controleren
 daarom niet elke functie apart, maar of het paar op **elk pad hetzelfde zegt**.
 
 Allebei draaien ze zonder database en zonder netwerk. Ze lezen `main.py` via
@@ -11,6 +11,7 @@ verouderen.
 
 ```
 python tests/test_herstart.py       python tests/test_fasedoorbraak.py
+python tests/test_voedingsgroep.py
 ```
 
 ---
@@ -112,3 +113,35 @@ Het laatste blok van het script, `KAN DEZE TEST ZELF FALEN?`, saboteert
 opzettelijk de vaststeller en controleert dat de oneens-melding afgaat. Zonder
 die controle is een test die altijd groen is niet te onderscheiden van een test
 die niets meet.
+
+
+---
+
+## test_voedingsgroep.py
+
+**Wat het bewaakt.** "Tot welke voedingsgroep hoort dit?" wordt in TWEE talen
+beantwoord: `herkenCategorie` in `analyses.tsx` voor het sporterscherm, en
+`_voedingsgroep` in `main.py` voor De Bevoorrading. Dit script leest
+`analyses.tsx` in en legt de vier lijsten die groente van fruit scheiden
+woord voor woord naast de Python-kant.
+
+**Waarom dat gevaarlijk is.** Het is al misgegaan. `herken_categorie` had geen
+vangnet op de NAAM, dus een logregel zonder bruikbare categorie kwam als
+"Overige" terug en telde in `_gf_gram` bij groente noch fruit. Een gebruiker
+die elke dag ruim 120 g fruit logde, zag 139 g in Analyses en 54 g in zijn
+Bevoorrading. Er kwam geen fout; het rapport beweerde gewoon iets anders dan
+het scherm, en het hing er een oordeel aan ("je fruit blijft achter").
+
+**Waarom er twee zijn.** Het weekrapport wordt op de server gemaakt: er hangt
+een coachroute aan (`/api/coach/klant/{id}/bevoorrading`) die buiten de
+browser om draait. Zolang dat zo is, bestaat het antwoord twee keer en is deze
+test de enige bescherming.
+
+**Wat het niet bewaakt.** Het vergelijkt de lijsten, niet elk pad: de
+naamcorrecties en de twee MAP-tabellen worden alleen via gedrag getoetst. En
+twee verschillen zijn bekend en bewust: het weekrapport pakt gelogde RECEPTEN
+uit in ingredienten en Analyses niet, en de twee delen door een ander aantal
+dagen (volledige dagen tegenover dagen met enige kcal).
+
+**Draai het** bij elke wijziging aan `herkenCategorie` of de woordenlijsten in
+`analyses.tsx`, en aan `_voedingsgroep` of `_gf_gram` in `main.py`.
