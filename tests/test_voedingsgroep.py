@@ -4,8 +4,9 @@
 
 "Tot welke voedingsgroep hoort dit?" wordt op twee plekken beslist:
 
-  - herkenCategorie in app/app/fueling/analyses.tsx (TypeScript), voor het
-    scherm Analyses dat de sporter zelf leest;
+  - herkenCategorie in app/app/fueling/analyse-utils.ts (TypeScript). Daar
+    staat sinds oktober 2026 de ENIGE frontendkopie: analyses.tsx (het scherm
+    van de sporter) en de coachzone importeren hem allebei;
   - _voedingsgroep in main.py (Python), voor De Bevoorrading.
 
 Die tweede moet er zijn: het weekrapport wordt op de server gemaakt, want er
@@ -18,7 +19,7 @@ zonder bruikbare categorie kwam als "Overige" terug, en _gf_gram telt
 gebruiker die elke dag ruim 120 g fruit logde, zag 139 g in Analyses en 54 g
 in zijn Bevoorrading. Hij merkte het; de app meldde niets.
 
-Deze test leest analyses.tsx in en legt de vijf lijsten die de
+Deze test leest analyse-utils.ts in en legt de vijf lijsten die de
 voedingsgroepen scheiden woord voor woord naast de Python-kant. Wijzigt iemand daar
 een woord, dan wordt dit script rood.
 
@@ -47,7 +48,7 @@ from pathlib import Path
 
 MAIN = Path(__file__).resolve().parent.parent / "main.py"
 TS = (Path(__file__).resolve().parent.parent.parent
-      / "carboo-next-v2" / "app" / "app" / "fueling" / "analyses.tsx")
+      / "carboo-next-v2" / "app" / "app" / "fueling" / "analyse-utils.ts")
 
 NODIG_FUNC = {"_bevat_woord", "_haal_catwoorden", "herken_categorie",
               "_vg_heel_woord", "_vg_normaliseer", "_vg_basis",
@@ -118,7 +119,7 @@ SB = NepSupabase()
 
 print("\nDE VIJF LIJSTEN DIE DE VOEDINGSGROEPEN SCHEIDEN")
 if not TS.exists():
-    print(f"  OVERGESLAGEN - analyses.tsx niet gevonden op {TS}")
+    print(f"  OVERGESLAGEN - analyse-utils.ts niet gevonden op {TS}")
     print("  (het gedrag hieronder wordt nog wel bewaakt)")
 else:
     ts = io.open(TS, encoding="utf-8").read()
@@ -129,8 +130,8 @@ else:
                              ("FRUIT_NAMEN", "_VG_FRUIT_NAMEN")):
         m = re.search(r"const\s+" + ts_naam + r"\s*=\s*\[([^\]]*)\]", ts)
         if not m:
-            fouten.append(f"{ts_naam} niet gevonden in analyses.tsx")
-            print(f"  FOUT {ts_naam} niet gevonden in analyses.tsx")
+            fouten.append(f"{ts_naam} niet gevonden in analyse-utils.ts")
+            print(f"  FOUT {ts_naam} niet gevonden in analyse-utils.ts")
             continue
         uit_ts = list(re.findall(r'"([^"]*)"', m.group(1)))
         ok(f"{ts_naam} == {py_naam}", list(M[py_naam]), uit_ts)
@@ -154,7 +155,7 @@ ok("kipfilet zonder categorie", M["_voedingsgroep"]("Kipfilet", ""), "Vlees & vi
 ok("volkorenbrood (substring!)", M["_voedingsgroep"]("Volkorenbrood", ""), "Granen & brood")
 ok("onbekend blijft Overige", M["_voedingsgroep"]("Zzzz", ""), "Overige")
 
-print("\nDE NAAMCORRECTIES VAN analyses.tsx")
+print("\nDE NAAMCORRECTIES VAN analyse-utils.ts")
 ok("zoete aardappel is groente", M["_voedingsgroep"]("Zoete aardappel gek.", ""), "Groenten")
 ok("gewone aardappel is graan", M["_voedingsgroep"]("Aardappel gekookt", ""), "Granen & brood")
 ok("groentesoep is groente", M["_voedingsgroep"]("Groentesoep", ""), "Groenten")
