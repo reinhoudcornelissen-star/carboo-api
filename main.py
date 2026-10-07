@@ -1365,9 +1365,15 @@ async def plaats_reactie(item: CoachReactie, user=Depends(get_current_user), sup
     coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
     if coach.data:
         coach_id = coach.data[0]["id"]
-        opm = supabase.table("carboo_coach_opmerkingen").select("id").eq("id", item.opmerking_id).eq("coach_id", coach_id).execute()
+        opm = supabase.table("carboo_coach_opmerkingen").select("id,klant_id").eq("id", item.opmerking_id).eq("coach_id", coach_id).execute()
         if opm.data:
             supabase.table("carboo_coach_reacties").insert({"opmerking_id": item.opmerking_id, "coach_id": coach_id, "tekst": item.tekst, "auteur_type": "coach"}).execute()
+            # OPMERKINGSDRAAD-V1 — een antwoord van de coach maakt de draad weer
+            # ongelezen: zo komt hij terug in het rode bolletje bij de clubtab.
+            supabase.table("carboo_coach_opmerkingen").update({"gelezen": False}).eq("id", item.opmerking_id).execute()
+            stuur_push_async(opm.data[0]["klant_id"], "Antwoord van je coach",
+                             (item.tekst or "")[:120], url="/app/coach-zone",
+                             tag="coachopmerking", soort="coachopmerking", supabase=supabase)
             return {"ok": True}
     opm = supabase.table("carboo_coach_opmerkingen").select("id").eq("id", item.opmerking_id).eq("klant_id", user.id).execute()
     if not opm.data:
@@ -1716,6 +1722,8 @@ async def coach_sla_gut_protocol(klant_id: str, item: GutProtocol, user=Depends(
     else:
         data["week_huidig"] = 1
         supabase.table("carboo_gut_protocol").insert(data).execute()
+    coach_signaal(supabase, klant_id, "gut_protocol", "Je coach paste je Train the Gut-protocol aan",
+                  "Bekijk de nieuwe instellingen in Train the Gut.")
     return {"ok": True, "dosis": dosis}
 # === EINDE COACH BEHEERT GUT-PROFIEL ========================================
 
@@ -1747,6 +1755,8 @@ async def coach_sla_gut_testplan(klant_id: str, data: dict, user=Depends(get_cur
         supabase.table("carboo_gut_testplan").update(rij).eq("user_id", klant_id).eq("week_nummer", week).execute()
     else:
         supabase.table("carboo_gut_testplan").insert(rij).execute()
+    coach_signaal(supabase, klant_id, "gut_testplan", f"Je coach plande week {week} van je gut-test",
+                  f"Bekijk je testmomenten voor week {week} in Train the Gut.")
     return {"ok": True}
 
 
@@ -1922,6 +1932,9 @@ async def coach_maak_volgend_moment(klant_id: str, data: dict,
         rij["bron"] = "protocol"
 
     nieuw_moment, bestond = _gut_voeg_moment_toe(supabase, klant_id, rij)
+    if not bestond:
+        coach_signaal(supabase, klant_id, "gut_moment", "Je volgende testmoment staat klaar",
+                      rij.get("coach_notitie") or f"Je coach zette het voor je klaar: {nieuw_doel} g koolhydraten per uur.")
     return {"ok": True, "bestond_al": bestond,
             "moment": _gut_moment_uit(nieuw_moment, None if bestond else "protocol"),
             "waarschuwingen": waarschuwingen}
@@ -1987,6 +2000,8 @@ async def coach_stuur_moment_bij(klant_id: str, data: dict,
     velden["bijgewerkt"] = "now()"
     (supabase.table("carboo_gut_testmomenten").update(velden)
      .eq("id", open_moment["id"]).eq("user_id", klant_id).execute())
+    coach_signaal(supabase, klant_id, "gut_moment", "Je coach stuurde je testmoment bij",
+                  notitie if (heeft_notitie and notitie) else "Bekijk wat er veranderde voor je volgende test.")
     return {"ok": True, "moment_id": open_moment["id"], "waarschuwingen": waarschuwingen}
 # === EINDE COACH STUURT BIJ =================================================
 
@@ -2305,6 +2320,10 @@ async def maak_gut_concept(klant_id: str, data: dict, user=Depends(get_current_u
         "door_coach": coach_id,
         "bijgewerkt": "now()",
     }).execute()
+    # PUSHKOPPEL-V1
+    stuur_push_async(klant_id, "Je gut-protocol staat klaar",
+                     "Je coach zette een Train the Gut-protocol klaar. Bekijk en keur goed.",
+                     url="/app/gut", tag="gutprotocol", soort="gutprotocol", supabase=supabase)
     return {"ok": True}
 
 
@@ -3120,6 +3139,39 @@ def stuur_push_async(*args, **kwargs):
         return stuur_push(*args, **kwargs)
     except Exception:
         return 0
+
+
+# ── COACH-SIGNAAL-V1 ─────────────────────────────────────────────────
+# Wat een coach aanpast zonder eigen ongelezen-teller (Train the Gut) laat
+# hier een spoor na. /api/notificaties toont het onder het belletje, en zo
+# telt het mee in het rode bolletje bij de clubtab.
+# Tabel: coach-signalen.sql (SQL door de eigenaar). Ontbreekt ze nog, dan
+# faalt dit stil en werkt de coachactie zelf gewoon.
+def coach_signaal(supabase: Client, klant_id: str, soort: str, titel: str,
+                  tekst: str = "", link: str = "/app/gut", coach_id: str = None):
+    """Hoogstens één ongelezen signaal per soort per dag: drie keer bijsturen
+    op een middag geeft één melding, met de laatste tekst."""
+    try:
+        van = _nu_be().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        r = supabase.table("carboo_coach_signalen").select("id") \
+            .eq("klant_id", klant_id).eq("soort", soort).gte("aangemaakt", van).execute()
+        ids = [x["id"] for x in (r.data or [])]
+        gelezen = set()
+        if ids:
+            g = supabase.table("carboo_notificatie_gelezen").select("notificatie_key") \
+                .eq("user_id", klant_id).in_("notificatie_key", [f"coach_signaal_{i}" for i in ids]).execute()
+            gelezen = {x["notificatie_key"] for x in (g.data or [])}
+        open_ids = [i for i in ids if f"coach_signaal_{i}" not in gelezen]
+        if open_ids:
+            supabase.table("carboo_coach_signalen").update({"titel": titel, "tekst": tekst, "link": link}) \
+                .eq("id", open_ids[0]).execute()
+            return
+        supabase.table("carboo_coach_signalen").insert({
+            "klant_id": klant_id, "coach_id": coach_id, "soort": soort,
+            "titel": titel, "tekst": tekst, "link": link,
+        }).execute()
+    except Exception as e:
+        print(f"[COACH-SIGNAAL-V1] {soort}: {e}")
 
 
 @app.get("/api/push/sleutel")
@@ -8873,6 +8925,31 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             add(f"gut_concept_{_g['id']}", "🏁½ï¸", "Gut-protocol klaargezet door je coach",
                 "Je coach heeft een Train the Gut-protocol klaargezet - bekijk en keur goed.", "/app/gut", "info")
     except Exception as e: print(f"notif gut concept fout: {e}")
+
+    # 12. COACH-VOEDINGSTIP-V1 — coach plande een voedingstip in (laatste 7 dagen).
+    #     Een tip bijwerken geeft geen nieuwe melding, alleen een nieuwe tip.
+    try:
+        _sinds = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        _vt = supabase.table("fuelc_coach_voedingstips").select("id,datum,dagdeel,tip") \
+            .eq("user_id", user.id).gte("created_at", _sinds).order("created_at", desc=True).limit(10).execute()
+        for _t in (_vt.data or []):
+            _d = str(_t.get("datum") or "")[:10]
+            _wanneer = " ".join(x for x in [f"{_d[8:10]}/{_d[5:7]}" if _d else "", _t.get("dagdeel") or ""] if x)
+            _tip = _t.get("tip") or ""
+            add(f"coach_tip_{_t['id']}", "🥗", "Voedingstip van je coach",
+                (f"{_wanneer}: " if _wanneer else "") + _tip[:80] + ("..." if len(_tip) > 80 else ""),
+                "/app/fueling", "info")
+    except Exception as e: print(f"notif coach voedingstip fout: {e}")
+
+    # 13. COACH-SIGNAAL-V1 — coach paste Train the Gut aan (laatste 14 dagen)
+    try:
+        _sinds = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+        _cs = supabase.table("carboo_coach_signalen").select("id,titel,tekst,link") \
+            .eq("klant_id", user.id).gte("aangemaakt", _sinds).order("aangemaakt", desc=True).limit(10).execute()
+        for _s in (_cs.data or []):
+            add(f"coach_signaal_{_s['id']}", "🧪", _s.get("titel") or "Je coach paste iets aan",
+                _s.get("tekst") or "", _s.get("link") or "/app/gut", "info")
+    except Exception as e: print(f"notif coach signaal fout: {e}")
 
     # Sorteer op niveau dan datum
     niveau_orde = {"warning": 0, "info": 1}
