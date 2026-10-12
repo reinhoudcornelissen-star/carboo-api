@@ -7527,6 +7527,130 @@ BORD_MOMENTEN = {
 BORD_ROLLEN = ("groente", "zetmeel", "eiwit", "fruit", "zuivel", "noten", "rest")
 
 
+# ─── LUNCHVRAAG-V1 — de mascotte stelt rond de middag de kern van je lunch voor ──
+# Een lunch wisselt meer dan een ontbijt (vandaag volkoren, morgen een pistolet;
+# kaas of kippenham), dus de kern zoekt per bordrol en niet per exacte
+# combinatie: een rol die op minstens de helft van de lunches terugkomt hoort
+# erbij, met het product dat binnen die rol het vaakst gegeten werd, in de
+# hoeveelheid die er meestal genomen werd. Een gerecht (recept) heeft geen rol
+# en telt als zichzelf. De bordrol komt uit dezelfde volgorde als het maandbord:
+# bibliotheek (product_id, dan naam), dan _voedingsgroep, dan de categorie.
+# "groente" is de groente die de sporter zelf het vaakst eet: die biedt de
+# mascotte aan als de Bevoorrading zegt dat er bij de lunch groente ontbreekt.
+_LUNCH_CAT_ROL = {
+    "Groenten en fruit": "groente", "Granen en brood": "zetmeel",
+    "Vlees": "eiwit", "Vis": "eiwit", "Gevogelte": "eiwit",
+    "Eieren": "eiwit", "Peulvruchten": "eiwit",
+    "Schaal- en schelpdieren": "eiwit",
+    "Melk": "zuivel", "Yoghurt en verse zuivel": "zuivel",
+    "Zuivel": "zuivel", "Kaas": "zuivel",
+    "Noten en zaden": "noten", "Snacks": "rest",
+    "Vetten en oliën": "vetstof", "Dranken": "vocht",
+    "Kruiden en specerijen": "kruiden", "Sportvoeding": "sport",
+}
+# Op brood is kaas net zo goed beleg als kippenham: eiwit en zuivel tellen
+# samen als één soort, anders haalt geen van beide de helft van de lunches.
+_LUNCH_SAMEN = {"eiwit": "beleg", "zuivel": "beleg"}
+_LUNCH_VOLGORDE = ("gerecht", "zetmeel", "beleg", "vetstof", "groente", "fruit", "noten", "rest", "sport", "vocht")
+_LUNCH_MIN_DAGEN = 5
+_LUNCH_WEG = ("id", "user_id", "datum", "moment", "created_at", "tijdstip", "training_id", "schema_id", "notitie")
+
+
+@app.get("/api/fuelc/lunchvraag")
+async def get_lunchvraag(moment: int, user=Depends(get_current_user),
+                         supabase: Client = Depends(get_supabase)):
+    from datetime import timedelta
+    from collections import Counter, defaultdict
+    vandaag = _nu_be().date()
+    van = (vandaag - timedelta(days=30)).isoformat()
+    tot = (vandaag - timedelta(days=1)).isoformat()
+    rijen = supabase.table("fuelc_dagboek").select("*").eq("user_id", user.id) \
+        .eq("moment", moment).gte("datum", van).lte("datum", tot).execute().data or []
+    dagen = defaultdict(list)
+    for r in rijen:
+        dagen[str(r.get("datum") or "")[:10]].append(r)
+    n = len(dagen)
+    if n < _LUNCH_MIN_DAGEN:
+        return {"dagen": n, "kern": [], "groente": None}
+
+    op_id, op_naam = {}, {}
+    try:
+        for b in (supabase.table("fuelc_bibliotheek").select("id,naam,bordrol").execute().data or []):
+            if b.get("bordrol"):
+                op_id[str(b["id"])] = b["bordrol"]
+                op_naam.setdefault(str(b.get("naam") or "").strip().lower(), b["bordrol"])
+    except Exception as e:
+        print(f"[LUNCHVRAAG-V1] bibliotheek inlezen mislukt: {e}")
+
+    def rol_van(it):
+        if it.get("recept_id"):
+            return "gerecht"
+        pid = it.get("product_id")
+        if pid and str(pid) in op_id:
+            return op_id[str(pid)]
+        nm = str(it.get("naam") or "").strip().lower()
+        if nm in op_naam:
+            return op_naam[nm]
+        cat = it.get("categorie") or ""
+        return _bordrol_uit_groep(_voedingsgroep(str(it.get("naam") or ""), cat)) or _LUNCH_CAT_ROL.get(cat) or "gerecht"
+
+    def regel(naam, kandidaten):
+        """Dit product in de hoeveelheid die er op een gewone dag van genomen werd.
+        Per dag opgeteld: wie per sneetje een regel kippenham logt, eet er
+        drie, niet één. De voedingswaarden van de laatste regel worden naar
+        die hoeveelheid omgerekend."""
+        eigen = [r for r in kandidaten if str(r.get("naam") or "").strip() == naam]
+        per_dag = defaultdict(float)
+        for r in eigen:
+            per_dag[str(r.get("datum") or "")[:10]] += float(r.get("hoeveelheid_g") or 0)
+        # Mediaan, niet de vaakste waarde: bij 60, 20, 80, 20 g is 20 g geen gewone lunch
+        from statistics import median
+        gewoon = max(5, int(round(median(per_dag.values()) / 5) * 5))
+        r = max(eigen, key=lambda r: str(r.get("datum") or ""))
+        f = gewoon / float(r.get("hoeveelheid_g") or gewoon or 1)
+        uit = {k: v for k, v in r.items() if k not in _LUNCH_WEG}
+        for k, v in list(uit.items()):
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and \
+                    (k == "kcal" or k.endswith(("_g", "_mg", "_mcg"))) and k != "hoeveelheid_g":
+                uit[k] = round(v * f, 1)
+        uit["hoeveelheid_g"] = gewoon
+        return uit
+
+    rol_dagen = defaultdict(set)
+    product_dagen = defaultdict(lambda: defaultdict(set))
+    for dag, its in dagen.items():
+        for it in its:
+            rol = rol_van(it)
+            if rol == "kruiden":
+                continue
+            rol = _LUNCH_SAMEN.get(rol, rol)
+            rol_dagen[rol].add(dag)
+            product_dagen[rol][str(it.get("naam") or "").strip()].add(dag)
+
+    kern = []
+    for rol in _LUNCH_VOLGORDE:
+        if len(rol_dagen.get(rol, ())) * 2 < n:
+            continue
+        naam, d = max(product_dagen[rol].items(), key=lambda kv: len(kv[1]))
+        kern.append({**regel(naam, rijen), "rol": rol, "dagen": len(d)})
+
+    # De groente die de sporter zelf het vaakst eet (alle eetmomenten, 60 dagen)
+    groente = None
+    try:
+        van60 = (vandaag - timedelta(days=60)).isoformat()
+        alle = supabase.table("fuelc_dagboek").select("*").eq("user_id", user.id) \
+            .gte("datum", van60).lt("moment", 90).order("datum", desc=True).limit(1000).execute().data or []
+        in_kern = {k["naam"].strip() for k in kern}
+        tel = Counter(str(r.get("naam") or "").strip() for r in alle
+                      if rol_van(r) == "groente" and str(r.get("naam") or "").strip() not in in_kern)
+        if tel:
+            groente = regel(tel.most_common(1)[0][0], alle)
+    except Exception as e:
+        print(f"[LUNCHVRAAG-V1] groente zoeken mislukt: {e}")
+
+    return {"dagen": n, "kern": kern, "groente": groente}
+
+
 @app.get("/api/fuelc/bord")
 async def get_bord(maand: str,
                    user=Depends(get_current_user),
