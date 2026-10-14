@@ -7569,9 +7569,6 @@ async def get_lunchvraag(moment: int, user=Depends(get_current_user),
     dagen = defaultdict(list)
     for r in rijen:
         dagen[str(r.get("datum") or "")[:10]].append(r)
-    n = len(dagen)
-    if n < _LUNCH_MIN_DAGEN:
-        return {"dagen": n, "kern": [], "groente": None}
 
     op_id, op_naam = {}, {}
     try:
@@ -7593,6 +7590,16 @@ async def get_lunchvraag(moment: int, user=Depends(get_current_user),
             return op_naam[nm]
         cat = it.get("categorie") or ""
         return _bordrol_uit_groep(_voedingsgroep(str(it.get("naam") or ""), cat)) or _LUNCH_CAT_ROL.get(cat) or "gerecht"
+
+    # Alleen dagen met echt eten tellen als lunch. Wie 's ochtends water bij elk
+    # eetmoment zet, had anders elke dag een "lunch", en dan haalde het brood
+    # nooit meer de helft (13/10: de kern werd alleen water).
+    dagen = {d: its for d, its in dagen.items()
+             if any(rol_van(it) not in ("vocht", "kruiden") for it in its)}
+    n = len(dagen)
+    if n < _LUNCH_MIN_DAGEN:
+        return {"dagen": n, "kern": [], "groente": None}
+    rijen = [r for its in dagen.values() for r in its]
 
     def regel(naam, kandidaten):
         """Dit product in de hoeveelheid die er op een gewone dag van genomen werd.
