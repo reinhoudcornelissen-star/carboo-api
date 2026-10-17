@@ -4055,6 +4055,41 @@ async def dataset_foto(bord_id: str, request: Request, toestel: Optional[str] = 
     return {"id": r[0]["id"], "pad": pad}
 
 
+@app.get("/api/dataset/borden")
+async def dataset_borden(limiet: int = 40, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """De laatst toegevoegde borden, met hun items en een tijdelijke link
+    (10 min) naar de eerste foto. Ladderstappen tonen de naam van de ladder."""
+    await _dataset_beheerder(user, supabase)
+    borden = supabase.table("carboo_dataset_borden").select("*").eq("user_id", user.id) \
+        .order("aangemaakt", desc=True).limit(max(1, min(limiet, 100))).execute().data or []
+    if not borden:
+        return {"borden": []}
+    ids = [b["id"] for b in borden]
+    items = supabase.table("carboo_dataset_items").select("bord_id,naam,gram,volgorde").in_("bord_id", ids).execute().data or []
+    fotos = supabase.table("carboo_dataset_fotos").select("bord_id,pad,aangemaakt").in_("bord_id", ids) \
+        .order("aangemaakt").execute().data or []
+    reeks_ids = list({b["reeks_id"] for b in borden if b.get("reeks_id")})
+    reeksen = {r["id"]: r["naam"] for r in (supabase.table("carboo_dataset_reeksen").select("id,naam")
+                                            .in_("id", reeks_ids).execute().data or [])} if reeks_ids else {}
+    eerste, aantal = {}, {}
+    for f in fotos:
+        aantal[f["bord_id"]] = aantal.get(f["bord_id"], 0) + 1
+        eerste.setdefault(f["bord_id"], f["pad"])
+    links = {}
+    for bid, pad in eerste.items():
+        try:
+            s = supabase.storage.from_("dataset-fotos").create_signed_url(pad, 600)
+            links[bid] = s.get("signedURL") or s.get("signedUrl")
+        except Exception:
+            pass
+    for b in borden:
+        b["items"] = sorted([i for i in items if i["bord_id"] == b["id"]], key=lambda i: i.get("volgorde") or 0)
+        b["fotos"] = aantal.get(b["id"], 0)
+        b["foto_url"] = links.get(b["id"])
+        b["reeks_naam"] = reeksen.get(b.get("reeks_id"))
+    return {"borden": borden}
+
+
 @app.delete("/api/dataset/bord/{bord_id}")
 async def dataset_bord_weg(bord_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     """Verwijdert een bord met zijn items en foto's. Wat al in het dagschema
