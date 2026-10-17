@@ -3839,7 +3839,90 @@ async def camera_voorstellen(datum: Optional[str] = None, user=Depends(get_curre
     d = datum or _nu_be().date().isoformat()
     r = supabase.table("carboo_camera_voorstellen").select("*").eq("user_id", user.id) \
         .eq("datum", d).eq("status", "open").order("begin_op").execute().data or []
+    # CAMERA-VOORSTEL-V1 — een tijdelijke link (10 min) naar de gekozen foto
+    fotos = {}
+    ids = [v["foto_id"] for v in r if v.get("foto_id")]
+    if ids:
+        for f in supabase.table("carboo_camera_fotos").select("id,pad,verwijderd_op").in_("id", ids).execute().data or []:
+            if not f.get("verwijderd_op"):
+                try:
+                    s = supabase.storage.from_("camera-fotos").create_signed_url(f["pad"], 600)
+                    fotos[f["id"]] = s.get("signedURL") or s.get("signedUrl")
+                except Exception as e:
+                    print(f"[CAMERA-VOORSTEL-V1] fotolink mislukt: {e}")
+    for v in r:
+        v["foto_url"] = fotos.get(v.get("foto_id"))
     return {"voorstellen": r}
+
+
+# ── CAMERA-VOORSTEL-V1 — Klopt / Bijna / Anders ──
+_CAM_DAGBOEK_TOEGELATEN = ("naam", "hoeveelheid_g", "gi", "categorie", "product_id", "recept_id") + _CAM_DAGBOEK_VELDEN
+
+
+class CameraAfhandeling(BaseModel):
+    actie: str                          # 'klopt', 'aangepast' of 'geweigerd'
+    items: Optional[List[dict]] = None  # bij 'aangepast': wat er echt gelogd wordt
+    moment: Optional[int] = None        # bij 'aangepast': een ander eetmoment
+
+
+@app.post("/api/camera/voorstellen/{voorstel_id}/afhandelen")
+async def camera_afhandelen(voorstel_id: str, item: CameraAfhandeling, user=Depends(get_current_user),
+                            supabase: Client = Depends(get_supabase)):
+    """Klopt: alles uit het voorstel (behalve wat niet gevonden werd) komt in het
+    dagboek. Aangepast: de items die de gebruiker opsloeg; het verschil wordt
+    een leervoorbeeld voor de volgende foto's. Geweigerd: niets gelogd. In alle
+    gevallen verdwijnt de foto uit de bucket."""
+    if item.actie not in ("klopt", "aangepast", "geweigerd"):
+        raise HTTPException(400, "Onbekende actie")
+    rij = supabase.table("carboo_camera_voorstellen").select("*").eq("id", voorstel_id) \
+        .eq("user_id", user.id).execute().data
+    if not rij:
+        raise HTTPException(404, "Voorstel niet gevonden")
+    v = rij[0]
+    if v["status"] != "open":
+        raise HTTPException(409, "Dit voorstel is al afgehandeld")
+
+    moment = v.get("moment")
+    if item.actie == "klopt":
+        te_loggen = [i for i in (v.get("items") or []) if i.get("bron") != "onbekend"]
+    elif item.actie == "aangepast":
+        te_loggen = item.items or []
+        if item.moment is not None:
+            moment = item.moment
+    else:
+        te_loggen = []
+    if te_loggen and moment is None:
+        raise HTTPException(400, "Kies eerst een eetmoment")
+
+    gelogd = 0
+    for i in te_loggen:
+        regel = {k: i[k] for k in _CAM_DAGBOEK_TOEGELATEN if i.get(k) not in (None, "")}
+        if not regel.get("naam") or float(regel.get("hoeveelheid_g") or 0) <= 0:
+            continue
+        for k in ("kcal", "kh_g", "eiwit_g", "vet_g"):
+            regel.setdefault(k, 0)
+        regel.update({"user_id": user.id, "datum": v["datum"], "moment": moment})
+        supabase.table("fuelc_dagboek").insert(regel).execute()
+        gelogd += 1
+    if gelogd:
+        update_user_streak(user.id, v["datum"], supabase)
+
+    status = {"klopt": "bevestigd", "aangepast": "aangepast", "geweigerd": "geweigerd"}[item.actie]
+    supabase.table("carboo_camera_voorstellen").update({
+        "status": status, "moment": moment, "afgehandeld_op": "now()",
+        "eindresultaat": te_loggen if item.actie != "geweigerd" else None,
+    }).eq("id", voorstel_id).execute()
+
+    # Privacy: na het afhandelen is de foto niet meer nodig
+    if v.get("foto_id"):
+        try:
+            f = supabase.table("carboo_camera_fotos").select("pad,verwijderd_op").eq("id", v["foto_id"]).execute().data
+            if f and not f[0].get("verwijderd_op"):
+                supabase.storage.from_("camera-fotos").remove([f[0]["pad"]])
+                supabase.table("carboo_camera_fotos").update({"verwijderd_op": "now()"}).eq("id", v["foto_id"]).execute()
+        except Exception as e:
+            print(f"[CAMERA-VOORSTEL-V1] foto wissen mislukt: {e}")
+    return {"ok": True, "status": status, "gelogd": gelogd}
 
 
 # ============================================================
