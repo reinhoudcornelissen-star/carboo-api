@@ -3385,6 +3385,464 @@ async def camera_foto(request: Request, supabase: Client = Depends(get_supabase)
 
 
 # ============================================================
+# CAMERA-HERKENNING-V1 — van camerafoto's naar een logvoorstel
+# ============================================================
+# Foto's die minder dan 20 min uit elkaar liggen vormen één maaltijd. De
+# backend kiest zelf (Pillow, gratis) de scherpste foto, plus eventueel een
+# tweede die minstens 5 min later genomen werd (het dessert). Claude Haiku 5.5
+# zegt of er eten op staat en wat; twijfelt het (zekerheid < 0,7), dan kijkt
+# Claude Sonnet 5.5 opnieuw. Het model krijgt de 30 producten die de gebruiker
+# het vaakst logt en zijn laatste correcties mee. De voedingswaarden komen
+# NOOIT uit het model: altijd uit de bibliotheek, een recept, of de eigen
+# eerdere logs van dat product. Het voorstel komt niet in fuelc_dagboek; dat
+# beslist de gebruiker (fase 3). Tabel: camera-voorstellen.sql.
+_CAM_GROEP_MIN = 20
+_CAM_DESSERT_MIN = 5
+_CAM_TWIJFEL = 0.7
+_CAM_MODELLEN = {   # (prijs invoer, prijs uitvoer) in dollar per miljoen tokens
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-sonnet-5-5": (2.00, 10.00),
+}
+_CAM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "eten": {"type": "boolean"},
+        "items": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "naam": {"type": "string"},
+                "hoeveelheid": {"type": "number"},
+                "eenheid": {"type": "string", "enum": ["g", "ml", "portie"]},
+                "zekerheid": {"type": "number"},
+            },
+            "required": ["naam", "hoeveelheid", "eenheid", "zekerheid"],
+            "additionalProperties": False,
+        }},
+    },
+    "required": ["eten", "items"],
+    "additionalProperties": False,
+}
+_CAM_SYSTEEM = """Je bekijkt foto's die een sporter met een camera om de pols nam van wat hij gaat eten, voor zijn voedingsdagboek in de app Carboo. De foto kan gedraaid zijn.
+
+Zeg eerst of er eten of drinken op de foto staat (eten: true/false). Staat er niets eetbaars op, geef dan een lege lijst.
+
+Geef anders per onderdeel dat je ziet:
+- naam: gebruik EXACT de naam uit de lijst "wat deze sporter vaak eet" als het onderdeel daarin voorkomt. Anders een korte, gewone Nederlandse naam zoals "Volkoren brood", "Banaan", "Spaghetti bolognese".
+- hoeveelheid en eenheid: gram ("g") voor eten, milliliter ("ml") voor drank, en "portie" voor een gerecht uit de lijst dat met 🍽 begint.
+- zekerheid: 0 tot 1, hoe zeker je bent van dit onderdeel EN de hoeveelheid samen.
+
+Schat de hoeveelheid aan de hand van het bord, het bestek en de gewone hoeveelheid van deze sporter. Tel wat je niet ziet (olie, boter, saus onder het eten) niet mee, tenzij het duidelijk zichtbaar is. Verzin niets dat je niet ziet."""
+
+_CAM_DAGBOEK_VELDEN = ("kcal", "kh_g", "eiwit_g", "vet_g", "vezels_g", "suikers_g", "suikers_toegevoegd_g",
+                       "verz_g", "natrium_mg", "kalium_mg", "calcium_mg", "ijzer_mg", "vitd_mcg",
+                       "vitb12_mcg", "omega3_g")
+# dagboekveld -> kolom per 100 g in fuelc_bibliotheek
+_CAM_BIB_KOLOM = {"kcal": "kcal_100g", "kh_g": "kh_100g", "eiwit_g": "eiwit_100g", "vet_g": "vet_100g",
+                  "vezels_g": "vezels_100g", "suikers_g": "suikers_100g",
+                  "suikers_toegevoegd_g": "suikers_toegevoegd_100g", "verz_g": "verzadigd_100g",
+                  "natrium_mg": "natrium_100g", "kalium_mg": "kalium_100g", "calcium_mg": "calcium_100g",
+                  "ijzer_mg": "ijzer_100g", "vitd_mcg": "vitd_100g", "vitb12_mcg": "vitb12_100g",
+                  "omega3_g": "omega3_100g"}
+# dagboekveld -> kolom per portie in fuelc_recepten_eigen
+_CAM_RECEPT_KOLOM = {"kcal": "kcal", "kh_g": "kh", "eiwit_g": "eiwit", "vet_g": "vet", "vezels_g": "vezels",
+                     "suikers_g": "suikers", "verz_g": "verz", "natrium_mg": "natrium", "kalium_mg": "kalium",
+                     "calcium_mg": "calcium", "ijzer_mg": "ijzer", "vitd_mcg": "vitd", "vitb12_mcg": "vitb12",
+                     "omega3_g": "omega3"}
+
+
+# ── Zoeken zoals het zoekvak in de app (lib/zoeken.ts): per woord, zonder
+#    accenten, met een tikfout (één vanaf 4 letters, twee vanaf 8) ──
+def _zk_norm(s) -> str:
+    import unicodedata
+    s = unicodedata.normalize("NFD", str(s or "").replace("🍽", ""))
+    s = "".join(c for c in s if not unicodedata.combining(c)).lower()
+    return _re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+def _zk_afstand(a: str, b: str) -> int:
+    m, n = len(a), len(b)
+    if not m or not n:
+        return m or n
+    d = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m + 1):
+        d[i][0] = i
+    for j in range(n + 1):
+        d[0][j] = j
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            k = 0 if a[i - 1] == b[j - 1] else 1
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + k)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
+    return d[m][n]
+
+
+def _zk_woord(q: str, w: str) -> float:
+    if w == q:
+        return 100
+    if w.startswith(q):
+        return 90
+    if len(q) >= 3 and q in w:
+        return 70
+    mx = 2 if len(q) >= 8 else 1 if len(q) >= 4 else 0
+    if not mx or q[0] != w[0]:
+        return 0
+    best = _zk_afstand(q, w)
+    if len(q) >= 5:
+        for l in range(len(q) - 1, len(q) + 2):
+            if 0 < l < len(w):
+                best = min(best, _zk_afstand(q, w[:l]))
+    return 60 - 10 * best if best <= mx else 0
+
+
+def _zk_score(naam: str, zoek: str) -> float:
+    q, nn = _zk_norm(zoek), _zk_norm(naam)
+    if not q or not nn:
+        return 0
+    woorden = nn.split(" ")
+    som = 0.0
+    for qw in q.split(" "):
+        best = max(_zk_woord(qw, w) for w in woorden)
+        if not best:
+            return 0
+        som += best
+    # Woorden in de naam die niet gevraagd werden, kosten een beetje:
+    # "kaas" past beter bij "Kaas" dan bij "Pindakaas naturel"
+    extra = max(0, len(woorden) - len(q.split(" ")))
+    return som / len(q.split(" ")) + (10 if nn.startswith(q) else 0) - min(10, len(nn) / 10) - 3 * extra
+
+
+# ── Wat de gebruiker gewoonlijk eet ──
+def _cam_gewoonten(supabase: Client, user_id: str):
+    """De 30 producten en gerechten die de gebruiker de voorbije 60 dagen het
+    vaakst logde, met de mediane hoeveelheid per dag, en zijn eerdere logs
+    (om voedingswaarden van producten buiten de bibliotheek terug te vinden)."""
+    from statistics import median
+    from collections import defaultdict
+    van = (_nu_be().date() - _dt.timedelta(days=60)).isoformat()
+    rijen = supabase.table("fuelc_dagboek").select("*").eq("user_id", user_id).gte("datum", van) \
+        .lt("moment", 90).order("datum", desc=True).limit(1000).execute().data or []
+    per_dag = defaultdict(lambda: defaultdict(float))
+    for r in rijen:
+        per_dag[str(r.get("naam") or "").strip()][str(r.get("datum"))[:10]] += float(r.get("hoeveelheid_g") or 0)
+    top = sorted(per_dag.items(), key=lambda kv: -len(kv[1]))[:30]
+    lijst = []
+    for naam, dagen in top:
+        g = median(dagen.values())
+        if naam.startswith("🍽"):
+            lijst.append(f"- {naam}: meestal {round(g / 100, 1)} portie")
+        else:
+            lijst.append(f"- {naam}: meestal {round(g)} g")
+    return lijst, rijen
+
+
+def _cam_correcties(supabase: Client, user_id: str) -> List[str]:
+    rij = supabase.table("carboo_camera_voorstellen").select("items,eindresultaat") \
+        .eq("user_id", user_id).eq("status", "aangepast").order("afgehandeld_op", desc=True) \
+        .limit(10).execute().data or []
+    uit = []
+    for v in rij:
+        voor = ", ".join(f"{i.get('naam')} {round(float(i.get('gram') or 0))} g" for i in (v.get("items") or []))
+        na = ", ".join(f"{i.get('naam')} {round(float(i.get('hoeveelheid_g') or i.get('gram') or 0))} g"
+                       for i in (v.get("eindresultaat") or []))
+        if voor and na:
+            uit.append(f"- voorstel was: {voor} -> het was eigenlijk: {na}")
+    return uit
+
+
+# ── Beelden ──
+def _cam_scherpte(jpg: bytes) -> float:
+    """Hoe scherp en gedetailleerd een foto is: de spreiding van de randen."""
+    from PIL import Image, ImageFilter, ImageStat
+    import io
+    try:
+        im = Image.open(io.BytesIO(jpg)).convert("L").resize((512, 384))
+        return ImageStat.Stat(im.filter(ImageFilter.FIND_EDGES)).var[0]
+    except Exception:
+        return 0.0
+
+
+def _cam_verklein(jpg: bytes, breedte: int = 768) -> str:
+    """Kleiner beeld = minder tokens. Herkennen lukt prima op 768 px."""
+    from PIL import Image
+    import io, base64
+    im = Image.open(io.BytesIO(jpg)).convert("RGB")
+    if im.width > breedte:
+        im = im.resize((breedte, round(im.height * breedte / im.width)))
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=80)
+    return base64.standard_b64encode(buf.getvalue()).decode()
+
+
+# ── Het eetmoment bij een tijdstip (zoals momenten.ts in de app) ──
+_CAM_STANDAARD_TIJDEN = {
+    "Ontbijt": "07:30", "Voormiddag": "10:00", "Lunch": "12:30", "Namiddag": "15:30",
+    "Avondmaal": "18:30", "Avondtussendoortje": "20:00",
+    "Eerste maaltijd": "12:00", "Tweede maaltijd": "16:00", "Derde maaltijd": "20:00",
+}
+
+
+def _cam_moment(supabase: Client, user_id: str, tijd: _dt.datetime) -> Optional[int]:
+    try:
+        p = (supabase.table("fuelc_profiel").select("eet_patroon,td_0,td_1,td_2,momenten_tijden")
+             .eq("user_id", user_id).execute().data or [{}])[0]
+    except Exception:
+        p = {}
+    if "fasting" in str(p.get("eet_patroon") or ""):
+        namen = ["Eerste maaltijd", "Tweede maaltijd", "Derde maaltijd"]
+    else:
+        vl = [p.get("td_0"), p.get("td_1"), p.get("td_2")]
+        if all(x is None for x in vl):
+            vl = [True, True, True]
+        namen = ["Ontbijt"] + (["Voormiddag"] if vl[0] else []) + ["Lunch"] + \
+                (["Namiddag"] if vl[1] else []) + ["Avondmaal"] + (["Avondtussendoortje"] if vl[2] else [])
+    try:
+        tijden = json.loads(p.get("momenten_tijden") or "{}")
+    except Exception:
+        tijden = {}
+    nu_min = tijd.hour * 60 + tijd.minute
+    beste, beste_d = None, 10 ** 6
+    for i, n in enumerate(namen):
+        t = tijden.get(n) or _CAM_STANDAARD_TIJDEN.get(n)
+        if not t:
+            continue
+        h, m = (int(x) for x in t.split(":"))
+        d = abs(h * 60 + m - nu_min)
+        if d < beste_d:
+            beste, beste_d = i, d
+    return beste
+
+
+# ── Het model ──
+def _cam_vraag(model: str, beelden: List[str], gewoonten: List[str], correcties: List[str]):
+    import anthropic
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    context = "Wat deze sporter vaak eet (naam: gewone hoeveelheid per dag):\n" + ("\n".join(gewoonten) or "- (nog niets)")
+    if correcties:
+        context += "\n\nEerdere voorstellen die de sporter verbeterde (leer hieruit):\n" + "\n".join(correcties)
+    inhoud = [{"type": "text", "text": context, "cache_control": {"type": "ephemeral"}}]
+    for b in beelden:
+        inhoud.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b}})
+    inhoud.append({"type": "text", "text": "Wat staat er op deze foto('s)?" if len(beelden) > 1 else "Wat staat er op deze foto?"})
+    msg = client.messages.create(
+        model=model,
+        max_tokens=4000,
+        system=[{"type": "text", "text": _CAM_SYSTEEM, "cache_control": {"type": "ephemeral"}}],
+        output_config={"effort": "low", "format": {"type": "json_schema", "schema": _CAM_SCHEMA}},
+        messages=[{"role": "user", "content": inhoud}],
+    )
+    u = msg.usage
+    pin, puit = _CAM_MODELLEN[model]
+    cache_w = getattr(u, "cache_creation_input_tokens", 0) or 0
+    cache_r = getattr(u, "cache_read_input_tokens", 0) or 0
+    kost = (u.input_tokens * pin + cache_w * pin * 1.25 + cache_r * pin * 0.1 + u.output_tokens * puit) / 1e6
+    gebruik = {"in": u.input_tokens + cache_w + cache_r, "uit": u.output_tokens, "kost": kost}
+    if msg.stop_reason == "refusal":
+        return None, gebruik
+    tekst = next((b.text for b in msg.content if b.type == "text"), "")
+    try:
+        return json.loads(tekst), gebruik
+    except ValueError:
+        return None, gebruik
+
+
+# ── Koppelen aan de bibliotheek: de waarden komen nooit uit het model ──
+def _cam_koppel(supabase: Client, user_id: str, items: List[dict], eerdere_logs: List[dict]) -> List[dict]:
+    try:
+        bib = supabase.table("fuelc_bibliotheek").select("*") \
+            .or_(f"user_id.eq.{user_id},is_globaal.eq.true").limit(2000).execute().data or []
+    except Exception:
+        bib = []
+    try:
+        rec = supabase.table("fuelc_recepten_eigen").select("*") \
+            .or_(f"user_id.eq.{user_id},is_globaal.eq.true").execute().data or []
+    except Exception:
+        rec = []
+    logs_op_naam = {}
+    for r in eerdere_logs:                         # nieuwste eerst
+        logs_op_naam.setdefault(str(r.get("naam") or "").strip(), r)
+
+    def beste(kandidaten, naam_van, zoek, eigen_van):
+        top, top_s = None, 0.0
+        for k in kandidaten:
+            s = _zk_score(naam_van(k), zoek)
+            if s > 0 and eigen_van(k):
+                s += 15                            # eerst de eigen producten
+            if s > top_s:
+                top, top_s = k, s
+        return top
+
+    uit = []
+    for it in items:
+        naam = str(it.get("naam") or "").strip()
+        eenheid = it.get("eenheid") or "g"
+        hoeveel = max(0.0, float(it.get("hoeveelheid") or 0))
+        regel = {"model_naam": naam, "zekerheid": round(float(it.get("zekerheid") or 0), 2), "eenheid": eenheid}
+        recept = beste(rec, lambda r: r.get("naam"), naam, lambda r: r.get("user_id") == user_id) \
+            if (eenheid == "portie" or naam.startswith("🍽")) else None
+        if recept:
+            porties = hoeveel if eenheid == "portie" else 1.0
+            regel.update({"bron": "recept", "naam": "🍽 " + str(recept.get("naam") or "").strip(),
+                          "recept_id": recept["id"], "hoeveelheid_g": round(porties * 100), "gram": round(porties * 100)})
+            for veld, kol in _CAM_RECEPT_KOLOM.items():
+                regel[veld] = round(float(recept.get(kol) or 0) * porties, 1)
+            uit.append(regel)
+            continue
+        product = beste(bib, lambda b: b.get("naam"), naam, lambda b: b.get("user_id") == user_id)
+        if product:
+            f = hoeveel / 100.0
+            regel.update({"bron": "bibliotheek", "naam": str(product.get("naam") or "").strip(),
+                          "product_id": product["id"], "hoeveelheid_g": round(hoeveel), "gram": round(hoeveel),
+                          "categorie": product.get("categorie"), "gi": product.get("gi")})
+            for veld, kol in _CAM_BIB_KOLOM.items():
+                regel[veld] = round(float(product.get(kol) or 0) * f, 1)
+            uit.append(regel)
+            continue
+        # Niet in de bibliotheek (bv. een snelkeuzeproduct van de app): de
+        # waarden van de laatste eigen log van dit product, omgerekend
+        log_naam = max(logs_op_naam, key=lambda n: _zk_score(n, naam), default=None)
+        if log_naam and _zk_score(log_naam, naam) > 0 and float(logs_op_naam[log_naam].get("hoeveelheid_g") or 0) > 0:
+            log = logs_op_naam[log_naam]
+            f = hoeveel / float(log["hoeveelheid_g"])
+            regel.update({"bron": "dagboek", "naam": log_naam, "hoeveelheid_g": round(hoeveel), "gram": round(hoeveel),
+                          "categorie": log.get("categorie"), "product_id": log.get("product_id")})
+            for veld in _CAM_DAGBOEK_VELDEN:
+                regel[veld] = round(float(log.get(veld) or 0) * f, 1)
+            uit.append(regel)
+            continue
+        regel.update({"bron": "onbekend", "naam": naam, "hoeveelheid_g": round(hoeveel), "gram": round(hoeveel)})
+        uit.append(regel)
+    return uit
+
+
+# ── Eén maaltijd verwerken ──
+def _cam_verwerk_groep(supabase: Client, user_id: str, groep: List[dict]) -> Optional[dict]:
+    ids = [f["id"] for f in groep]
+    # Vergrendelen: wie de foto's van 'nieuw' op 'verwerkt' krijgt, verwerkt ze
+    genomen = supabase.table("carboo_camera_fotos").update({"status": "verwerkt"}) \
+        .in_("id", ids).eq("status", "nieuw").execute().data or []
+    if len(genomen) < len(ids):
+        if genomen:
+            supabase.table("carboo_camera_fotos").update({"status": "nieuw"}).in_("id", [g["id"] for g in genomen]).execute()
+        return None
+    try:
+        beelden = {}
+        for f in groep:
+            try:
+                beelden[f["id"]] = supabase.storage.from_("camera-fotos").download(f["pad"])
+            except Exception as e:
+                print(f"[CAMERA-HERKENNING-V1] foto ophalen mislukt: {e}")
+        if not beelden:
+            raise RuntimeError("geen foto's op te halen")
+        scherp = {fid: _cam_scherpte(b) for fid, b in beelden.items()}
+        kies = [max(scherp, key=scherp.get)]
+        t0 = next(_dt.datetime.fromisoformat(f["genomen_op"]) for f in groep if f["id"] == kies[0])
+        later = [f for f in groep if f["id"] in beelden and
+                 _dt.datetime.fromisoformat(f["genomen_op"]) - t0 >= _dt.timedelta(minutes=_CAM_DESSERT_MIN)]
+        if later:
+            kies.append(max(later, key=lambda f: scherp[f["id"]])["id"])
+
+        gewoonten, eerdere = _cam_gewoonten(supabase, user_id)
+        correcties = _cam_correcties(supabase, user_id)
+        b64 = [_cam_verklein(beelden[fid]) for fid in kies]
+        antwoord, gebruik = _cam_vraag("claude-haiku-5-5", b64, gewoonten, correcties)
+        model = "haiku"
+        twijfel = antwoord is None or any(float(i.get("zekerheid") or 0) < _CAM_TWIJFEL
+                                          for i in (antwoord or {}).get("items", []))
+        if twijfel:
+            a2, g2 = _cam_vraag("claude-sonnet-5-5", b64, gewoonten, correcties)
+            gebruik = {k: gebruik[k] + g2[k] for k in gebruik}
+            model = "haiku+sonnet"
+            if a2 is not None:
+                antwoord = a2
+        if antwoord is None:
+            raise RuntimeError("geen bruikbaar antwoord van het model")
+
+        tijden = sorted(_dt.datetime.fromisoformat(f["genomen_op"]) for f in groep)
+        try:
+            from zoneinfo import ZoneInfo
+            lokaal = tijden[0].astimezone(ZoneInfo("Europe/Brussels"))
+        except Exception:
+            lokaal = tijden[0]
+
+        if not antwoord.get("eten") or not antwoord.get("items"):
+            supabase.table("carboo_camera_fotos").update({"status": "geen_eten", "verwijderd_op": "now()"}).in_("id", ids).execute()
+            supabase.storage.from_("camera-fotos").remove([f["pad"] for f in groep])
+            print(f"[CAMERA-HERKENNING-V1] {user_id[:8]}: geen eten, ${gebruik['kost']:.5f}")
+            return {"geen_eten": True, "kost_usd": gebruik["kost"]}
+
+        items = _cam_koppel(supabase, user_id, antwoord["items"], eerdere)
+        v = supabase.table("carboo_camera_voorstellen").insert({
+            "user_id": user_id, "begin_op": tijden[0].isoformat(), "einde_op": tijden[-1].isoformat(),
+            "datum": lokaal.date().isoformat(), "moment": _cam_moment(supabase, user_id, lokaal),
+            "foto_id": kies[0], "items": items, "status": "open", "model": model,
+            "tokens_in": gebruik["in"], "tokens_uit": gebruik["uit"], "kost_usd": round(gebruik["kost"], 6),
+        }).execute().data[0]
+        supabase.table("carboo_camera_fotos").update({"maaltijd_id": v["id"]}).in_("id", ids).execute()
+        # Privacy: alleen de gekozen foto blijft, tot het voorstel afgehandeld is
+        weg = [f for f in groep if f["id"] != kies[0]]
+        if weg:
+            supabase.storage.from_("camera-fotos").remove([f["pad"] for f in weg])
+            supabase.table("carboo_camera_fotos").update({"verwijderd_op": "now()"}).in_("id", [f["id"] for f in weg]).execute()
+        print(f"[CAMERA-HERKENNING-V1] {user_id[:8]}: {len(items)} items, {model}, ${gebruik['kost']:.5f}")
+        return v
+    except Exception as e:
+        print(f"[CAMERA-HERKENNING-V1] verwerken mislukt, foto's terug op nieuw: {e}")
+        supabase.table("carboo_camera_fotos").update({"status": "nieuw"}).in_("id", ids).execute()
+        return None
+
+
+def _cam_verwerk(supabase: Client, user_id: str, meteen: bool = False) -> List[dict]:
+    """Groepeert de nieuwe foto's van een gebruiker in maaltijden en verwerkt
+    die. Een maaltijd is 'af' als er 20 min geen foto bijkwam, of meteen als de
+    gebruiker zelf kijkt (meteen=True)."""
+    fotos = supabase.table("carboo_camera_fotos").select("id,pad,genomen_op") \
+        .eq("user_id", user_id).eq("status", "nieuw").is_("verwijderd_op", "null") \
+        .order("genomen_op").execute().data or []
+    groepen, nu = [], _dt.datetime.now(_dt.timezone.utc)
+    for f in fotos:
+        t = _dt.datetime.fromisoformat(f["genomen_op"])
+        if groepen and t - _dt.datetime.fromisoformat(groepen[-1][-1]["genomen_op"]) < _dt.timedelta(minutes=_CAM_GROEP_MIN):
+            groepen[-1].append(f)
+        else:
+            groepen.append([f])
+    uit = []
+    for g in groepen:
+        laatste = _dt.datetime.fromisoformat(g[-1]["genomen_op"])
+        if meteen or nu - laatste >= _dt.timedelta(minutes=_CAM_GROEP_MIN):
+            r = _cam_verwerk_groep(supabase, user_id, g)
+            if r:
+                uit.append(r)
+    return uit
+
+
+@app.post("/api/cron/camera")
+async def cron_camera(request: Request, supabase: Client = Depends(get_supabase)):
+    """Om de 5 minuten via een Render Cron Job (header x-cron-sleutel)."""
+    sleutel = os.getenv("CRON_SLEUTEL")
+    if not sleutel or request.headers.get("x-cron-sleutel") != sleutel:
+        raise HTTPException(403, "Geen toegang")
+    rij = supabase.table("carboo_camera_fotos").select("user_id").eq("status", "nieuw") \
+        .is_("verwijderd_op", "null").execute().data or []
+    verwerkt = 0
+    for uid in {r["user_id"] for r in rij}:
+        verwerkt += len(_cam_verwerk(supabase, uid))
+    return {"verwerkt": verwerkt}
+
+
+@app.get("/api/camera/voorstellen")
+async def camera_voorstellen(datum: Optional[str] = None, user=Depends(get_current_user),
+                             supabase: Client = Depends(get_supabase)):
+    """De open voorstellen van een dag. Verwerkt eerst wat er nog wacht, zodat
+    een net genomen foto meteen verschijnt als de gebruiker het dagschema opent."""
+    _cam_verwerk(supabase, user.id, meteen=True)
+    d = datum or _nu_be().date().isoformat()
+    r = supabase.table("carboo_camera_voorstellen").select("*").eq("user_id", user.id) \
+        .eq("datum", d).eq("status", "open").order("begin_op").execute().data or []
+    return {"voorstellen": r}
+
+
+# ============================================================
 # RACEMAPS-PUBLIEK-V1 — raceplannen delen op het open web
 # ============================================================
 
