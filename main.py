@@ -3290,6 +3290,101 @@ async def cron_voedingstip(request: Request, test: Optional[str] = None,
 
 
 # ============================================================
+# CAMERA-FOTO-V1 — de maaltijdcamera (M5Stack Timer Camera X) stuurt foto's
+# ============================================================
+# De camera post een JPEG met zijn camerasleutel in de header X-Camera-Sleutel.
+# In carboo_camera_sleutels staat alleen de sha256 van die sleutel; daaruit
+# volgt de user_id. De foto gaat naar de PRIVATE bucket camera-fotos, onder
+# <user_id>/<datum>/<uurminsec>.jpg in Belgische tijd. X-Genomen-Op (unix-tijd)
+# is het moment van de foto volgens de klok van de camera: een foto die zonder
+# wifi bewaard werd, komt zo later toch op het juiste tijdstip binnen.
+# Privacy: bij elke upload verdwijnen de foto's van die gebruiker die ouder dan
+# 7 dagen zijn uit de bucket (de rij blijft, met verwijderd_op).
+# Tabellen en bucket: camera.sql (SQL door de eigenaar).
+_CAMERA_MAX_BYTES = 1024 * 1024
+_CAMERA_PER_MINUUT = 15         # meer dan dit per sleutel: een camera die op hol slaat
+_CAMERA_BEWAREN_DAGEN = 7
+
+
+def _camera_opruimen(supabase: Client, user_id: str):
+    try:
+        grens = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=_CAMERA_BEWAREN_DAGEN)).isoformat()
+        oud = supabase.table("carboo_camera_fotos").select("id,pad").eq("user_id", user_id) \
+            .lt("genomen_op", grens).is_("verwijderd_op", "null").limit(50).execute().data or []
+        if not oud:
+            return
+        supabase.storage.from_("camera-fotos").remove([r["pad"] for r in oud])
+        supabase.table("carboo_camera_fotos").update({"verwijderd_op": "now()"}) \
+            .in_("id", [r["id"] for r in oud]).execute()
+    except Exception as e:
+        print(f"[CAMERA-FOTO-V1] opruimen mislukt: {e}")
+
+
+@app.post("/api/camera/foto")
+async def camera_foto(request: Request, supabase: Client = Depends(get_supabase)):
+    sleutel = (request.headers.get("x-camera-sleutel") or "").strip()
+    if not sleutel:
+        raise HTTPException(401, "Camerasleutel ontbreekt")
+    h = _hashlib.sha256(sleutel.encode()).hexdigest()
+    r = supabase.table("carboo_camera_sleutels").select("id,user_id,actief") \
+        .eq("sleutel_hash", h).limit(1).execute().data
+    if not r or not r[0].get("actief"):
+        raise HTTPException(401, "Onbekende of uitgeschakelde camera")
+    sleutel_id, user_id = r[0]["id"], r[0]["user_id"]
+
+    data = await request.body()
+    if len(data) > _CAMERA_MAX_BYTES:
+        raise HTTPException(413, "Foto groter dan 1 MB")
+    if len(data) < 1000 or not data.startswith(b"\xff\xd8"):
+        raise HTTPException(400, "Geen JPEG")
+
+    nu = _dt.datetime.now(_dt.timezone.utc)
+    recent = supabase.table("carboo_camera_fotos").select("id", count="exact") \
+        .eq("sleutel_id", sleutel_id).gte("ontvangen_op", (nu - _dt.timedelta(minutes=1)).isoformat()) \
+        .execute()
+    if (recent.count or 0) >= _CAMERA_PER_MINUUT:
+        raise HTTPException(429, "Te veel foto's na elkaar")
+
+    # Het tijdstip van de camera, als het aannemelijk is; anders nu
+    genomen = nu
+    try:
+        t = _dt.datetime.fromtimestamp(int(request.headers.get("x-genomen-op") or 0), _dt.timezone.utc)
+        if nu - _dt.timedelta(days=_CAMERA_BEWAREN_DAGEN) <= t <= nu + _dt.timedelta(minutes=5):
+            genomen = t
+    except (ValueError, OverflowError, OSError):
+        pass
+    try:
+        from zoneinfo import ZoneInfo
+        lokaal = genomen.astimezone(ZoneInfo("Europe/Brussels"))
+    except Exception:
+        lokaal = genomen
+
+    basis = f"{user_id}/{lokaal:%Y-%m-%d}/{lokaal:%H%M%S}"
+    pad = None
+    for i in range(5):
+        kandidaat = f"{basis}.jpg" if i == 0 else f"{basis}-{i + 1}.jpg"
+        try:
+            supabase.storage.from_("camera-fotos").upload(
+                kandidaat, data, {"content-type": "image/jpeg", "upsert": "false"})
+            pad = kandidaat
+            break
+        except Exception as e:
+            if "exist" not in str(e).lower() and "duplicate" not in str(e).lower():
+                print(f"[CAMERA-FOTO-V1] upload mislukt: {e}")
+                raise HTTPException(502, "Opslaan mislukt")
+    if not pad:
+        raise HTTPException(409, "Dubbele foto")
+
+    rij = supabase.table("carboo_camera_fotos").insert({
+        "user_id": user_id, "sleutel_id": sleutel_id, "genomen_op": genomen.isoformat(),
+        "pad": pad, "bytes": len(data), "status": "nieuw",
+    }).execute().data
+    supabase.table("carboo_camera_sleutels").update({"laatst_gezien": "now()"}).eq("id", sleutel_id).execute()
+    _camera_opruimen(supabase, user_id)
+    return {"ok": True, "id": rij[0]["id"] if rij else None, "pad": pad}
+
+
+# ============================================================
 # RACEMAPS-PUBLIEK-V1 — raceplannen delen op het open web
 # ============================================================
 
