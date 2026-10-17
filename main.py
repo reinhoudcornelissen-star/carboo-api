@@ -3926,6 +3926,195 @@ async def camera_afhandelen(voorstel_id: str, item: CameraAfhandeling, user=Depe
 
 
 # ============================================================
+# DATASET-V1 — fotodatabank met gewogen borden en portieladders
+# ============================================================
+# Alleen voor beheerders. Een bord wordt eerst aangemaakt (met de gewogen
+# items, en desgewenst meteen gelogd in het dagschema), daarna komen de foto's
+# één voor één als JPEG. Bij een eigen gewogen bord beslist het toeval of het
+# in de testset gaat (1 op 5): die borden worden nooit als voorbeeld gebruikt,
+# alleen om te meten. Tabellen en bucket: dataset.sql.
+_DATASET_BRONNEN = ("eigen", "reeks", "fotoboek", "camera")
+_DATASET_MAX_BYTES = 5 * 1024 * 1024
+_DATASET_TESTSET_KANS = 0.2
+
+
+async def _dataset_beheerder(user, supabase: Client):
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Alleen voor beheerders")
+
+
+class DatasetItem(BaseModel):
+    naam: str
+    gram: float
+    product_id: Optional[str] = None
+    recept_id: Optional[str] = None
+    plaats_op_foto: Optional[str] = None
+
+
+class DatasetBord(BaseModel):
+    bron: str = "eigen"
+    gewogen: bool = True
+    reeks_id: Optional[str] = None
+    stap: Optional[str] = None
+    gegeten_op: Optional[str] = None
+    moment: Optional[int] = None
+    bord_type: Optional[str] = None
+    bord_cm: Optional[float] = None
+    licht: Optional[str] = None
+    plaats: Optional[str] = None
+    rest_gram: Optional[float] = 0
+    rechten: Optional[str] = None
+    notitie: Optional[str] = None
+    bronmap: Optional[str] = None            # bij import: de mapnaam
+    camera_voorstel_id: Optional[str] = None
+    items: List[DatasetItem]
+    dagboek: Optional[List[dict]] = None      # regels om ook in het dagschema te loggen
+    datum: Optional[str] = None               # de dag voor het dagschema
+
+
+class DatasetReeks(BaseModel):
+    naam: str
+    bron: str = "fotoboek"
+    rechten: Optional[str] = None
+    product_id: Optional[str] = None
+    recept_id: Optional[str] = None
+
+
+@app.post("/api/dataset/reeks")
+async def dataset_reeks(item: DatasetReeks, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _dataset_beheerder(user, supabase)
+    if item.bron not in ("reeks", "fotoboek"):
+        raise HTTPException(400, "Bron moet 'reeks' of 'fotoboek' zijn")
+    r = supabase.table("carboo_dataset_reeksen").insert({**item.dict(), "user_id": user.id}).execute().data
+    return {"id": r[0]["id"]}
+
+
+@app.post("/api/dataset/bord")
+async def dataset_bord(item: DatasetBord, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    import random
+    await _dataset_beheerder(user, supabase)
+    if item.bron not in _DATASET_BRONNEN:
+        raise HTTPException(400, "Onbekende bron")
+    if not item.items:
+        raise HTTPException(400, "Een bord heeft minstens één onderdeel")
+    if item.bronmap:
+        al = supabase.table("carboo_dataset_borden").select("id").eq("user_id", user.id) \
+            .eq("bronmap", item.bronmap).execute().data
+        if al:
+            raise HTTPException(409, "Deze map werd al geïmporteerd")
+    gewogen = item.gewogen and item.bron != "camera"
+    bord = {k: v for k, v in item.dict().items() if k not in ("items", "dagboek", "datum") and v is not None}
+    bord.update({"user_id": user.id, "gewogen": gewogen,
+                 "testset": item.bron == "eigen" and gewogen and random.random() < _DATASET_TESTSET_KANS})
+    b = supabase.table("carboo_dataset_borden").insert(bord).execute().data[0]
+    supabase.table("carboo_dataset_items").insert([
+        {**{k: v for k, v in i.dict().items() if v is not None}, "bord_id": b["id"], "volgorde": n}
+        for n, i in enumerate(item.items)]).execute()
+
+    gelogd = 0
+    if item.dagboek and item.datum and item.moment is not None and item.bron in ("eigen", "camera"):
+        for i in item.dagboek:
+            regel = {k: i[k] for k in _CAM_DAGBOEK_TOEGELATEN if i.get(k) not in (None, "")}
+            if not regel.get("naam") or float(regel.get("hoeveelheid_g") or 0) <= 0:
+                continue
+            for k in ("kcal", "kh_g", "eiwit_g", "vet_g"):
+                regel.setdefault(k, 0)
+            regel.update({"user_id": user.id, "datum": item.datum, "moment": item.moment})
+            supabase.table("fuelc_dagboek").insert(regel).execute()
+            gelogd += 1
+        if gelogd:
+            update_user_streak(user.id, item.datum, supabase)
+            supabase.table("carboo_dataset_borden").update({"gelogd": True}).eq("id", b["id"]).execute()
+    return {"id": b["id"], "testset": b["testset"], "gelogd": gelogd}
+
+
+@app.post("/api/dataset/bord/{bord_id}/foto")
+async def dataset_foto(bord_id: str, request: Request, toestel: Optional[str] = None, hoek: Optional[str] = None,
+                       afstand_cm: Optional[float] = None, user=Depends(get_current_user),
+                       supabase: Client = Depends(get_supabase)):
+    import io, uuid
+    from PIL import Image
+    await _dataset_beheerder(user, supabase)
+    if not supabase.table("carboo_dataset_borden").select("id").eq("id", bord_id).eq("user_id", user.id).execute().data:
+        raise HTTPException(404, "Bord niet gevonden")
+    data = await request.body()
+    if len(data) > _DATASET_MAX_BYTES:
+        raise HTTPException(413, "Foto groter dan 5 MB")
+    if len(data) < 1000 or not data.startswith(b"\xff\xd8"):
+        raise HTTPException(400, "Geen JPEG")
+    try:
+        breedte, hoogte = Image.open(io.BytesIO(data)).size
+    except Exception:
+        raise HTTPException(400, "Onleesbare foto")
+    pad = f"{user.id}/{bord_id}/{uuid.uuid4().hex[:12]}.jpg"
+    supabase.storage.from_("dataset-fotos").upload(pad, data, {"content-type": "image/jpeg", "upsert": "false"})
+    r = supabase.table("carboo_dataset_fotos").insert({
+        "bord_id": bord_id, "pad": pad, "toestel": toestel, "hoek": hoek, "afstand_cm": afstand_cm,
+        "breedte": breedte, "hoogte": hoogte, "bytes": len(data),
+    }).execute().data
+    return {"id": r[0]["id"], "pad": pad}
+
+
+@app.delete("/api/dataset/bord/{bord_id}")
+async def dataset_bord_weg(bord_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Verwijdert een bord met zijn items en foto's. Wat al in het dagschema
+    gelogd werd, blijft daar staan."""
+    await _dataset_beheerder(user, supabase)
+    if not supabase.table("carboo_dataset_borden").select("id").eq("id", bord_id).eq("user_id", user.id).execute().data:
+        raise HTTPException(404, "Bord niet gevonden")
+    paden = [f["pad"] for f in supabase.table("carboo_dataset_fotos").select("pad").eq("bord_id", bord_id).execute().data or []]
+    if paden:
+        supabase.storage.from_("dataset-fotos").remove(paden)
+    supabase.table("carboo_dataset_borden").delete().eq("id", bord_id).execute()
+    return {"ok": True}
+
+
+@app.get("/api/dataset/overzicht")
+async def dataset_overzicht(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Hoeveel er al is, en waar het nog ontbreekt: de 50 producten en gerechten
+    die de beheerder de voorbije 90 dagen het vaakst logde, met hoeveel borden
+    en welke hoeveelheden er al voor in de databank staan."""
+    from collections import Counter, defaultdict
+    await _dataset_beheerder(user, supabase)
+    borden = supabase.table("carboo_dataset_borden").select("id,bron,gewogen,testset") \
+        .eq("user_id", user.id).execute().data or []
+    ids = [b["id"] for b in borden]
+    items, fotos = [], 0
+    for i in range(0, len(ids), 200):            # in stukken: een lange in_() wordt een te lange URL
+        deel = ids[i:i + 200]
+        items += supabase.table("carboo_dataset_items").select("bord_id,naam,gram").in_("bord_id", deel).execute().data or []
+        fotos += supabase.table("carboo_dataset_fotos").select("id", count="exact").in_("bord_id", deel).execute().count or 0
+    reeksen = supabase.table("carboo_dataset_reeksen").select("id", count="exact").eq("user_id", user.id).execute().count or 0
+
+    van = (_nu_be().date() - _dt.timedelta(days=90)).isoformat()
+    logs = supabase.table("fuelc_dagboek").select("naam,datum").eq("user_id", user.id).gte("datum", van) \
+        .lt("moment", 90).limit(5000).execute().data or []
+    dagen = defaultdict(set)
+    for r in logs:
+        n = str(r.get("naam") or "").strip()
+        if n and not _re.search(r"(?i)^(water|koffie|thee)\b", n):   # drank zie je niet op een foto
+            dagen[n].add(str(r.get("datum"))[:10])
+    top = sorted(dagen, key=lambda n: -len(dagen[n]))[:50]
+
+    per_naam = defaultdict(lambda: {"borden": set(), "grammen": set()})
+    for it in items:
+        k = _zk_norm(it["naam"])
+        per_naam[k]["borden"].add(it["bord_id"])
+        per_naam[k]["grammen"].add(round(float(it["gram"] or 0)))
+    dekking = [{"naam": n, "dagen_gelogd": len(dagen[n]),
+                "borden": len(per_naam[_zk_norm(n)]["borden"]),
+                "grammen": sorted(per_naam[_zk_norm(n)]["grammen"])} for n in top]
+    tel = Counter(b["bron"] for b in borden)
+    return {
+        "borden": len(borden), "fotos": fotos, "reeksen": reeksen,
+        "per_bron": dict(tel), "testset": sum(1 for b in borden if b["testset"]),
+        "gewogen": sum(1 for b in borden if b["gewogen"]),
+        "gedekt": sum(1 for d in dekking if d["borden"] > 0), "top": len(dekking),
+        "dekking": dekking,
+    }
+
+
+# ============================================================
 # RACEMAPS-PUBLIEK-V1 — raceplannen delen op het open web
 # ============================================================
 
