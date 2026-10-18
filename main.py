@@ -3321,7 +3321,7 @@ def _camera_opruimen(supabase: Client, user_id: str):
 
 
 @app.post("/api/camera/foto")
-async def camera_foto(request: Request, supabase: Client = Depends(get_supabase)):
+async def camera_foto(request: Request, achtergrond: BackgroundTasks, supabase: Client = Depends(get_supabase)):
     sleutel = (request.headers.get("x-camera-sleutel") or "").strip()
     if not sleutel:
         raise HTTPException(401, "Camerasleutel ontbreekt")
@@ -3381,6 +3381,8 @@ async def camera_foto(request: Request, supabase: Client = Depends(get_supabase)
     }).execute().data
     supabase.table("carboo_camera_sleutels").update({"laatst_gezien": "now()"}).eq("id", sleutel_id).execute()
     _camera_opruimen(supabase, user_id)
+    # CAMERA-SNEL-V1 — meteen verwerken tot een voorstel, na het antwoord aan de camera
+    achtergrond.add_task(_cam_verwerk_na_upload, user_id)
     return {"ok": True, "id": rij[0]["id"] if rij else None, "pad": pad}
 
 
@@ -3424,7 +3426,7 @@ _CAM_SCHEMA = {
 }
 _CAM_SYSTEEM = """Je bekijkt foto's die een sporter met een camera om de pols nam van wat hij gaat eten, voor zijn voedingsdagboek in de app Carboo. De foto kan gedraaid zijn.
 
-Zeg eerst of er eten of drinken op de foto staat (eten: true/false). Staat er niets eetbaars op, geef dan een lege lijst.
+Zeg eerst of er eten of drinken op de foto staat (eten: true/false). Drank telt altijd mee: een tas koffie of thee, een glas water, melk, sap of een sportdrank is eten: true, met de drank als onderdeel in ml. Alleen als er niets eetbaars of drinkbaars op staat (een toetsenbord, een muur, een leeg bord), geef je eten: false en een lege lijst.
 
 Geef anders per onderdeel dat je ziet:
 - naam: gebruik EXACT de naam uit de lijst "wat deze sporter vaak eet" als het onderdeel daarin voorkomt. Anders een korte, gewone Nederlandse naam zoals "Volkoren brood", "Banaan", "Spaghetti bolognese".
@@ -3716,7 +3718,12 @@ def _cam_koppel(supabase: Client, user_id: str, items: List[dict], eerdere_logs:
 
 
 # ── Eén maaltijd verwerken ──
-def _cam_verwerk_groep(supabase: Client, user_id: str, groep: List[dict]) -> Optional[dict]:
+def _cam_verwerk_groep(supabase: Client, user_id: str, groep: List[dict],
+                       bestaand: Optional[dict] = None) -> Optional[dict]:
+    """CAMERA-SNEL-V1 — verwerkt nieuwe foto's. Is er een open voorstel van
+    minder dan 20 min geleden (bestaand), dan vult deze foto dat voorstel aan:
+    het model kijkt opnieuw naar de foto van dat voorstel samen met de nieuwe,
+    en het voorstel krijgt de nieuwe lijst."""
     ids = [f["id"] for f in groep]
     # Vergrendelen: wie de foto's van 'nieuw' op 'verwerkt' krijgt, verwerkt ze
     genomen = supabase.table("carboo_camera_fotos").update({"status": "verwerkt"}) \
@@ -3726,21 +3733,26 @@ def _cam_verwerk_groep(supabase: Client, user_id: str, groep: List[dict]) -> Opt
             supabase.table("carboo_camera_fotos").update({"status": "nieuw"}).in_("id", [g["id"] for g in genomen]).execute()
         return None
     try:
+        alle = list(groep)
+        if bestaand and bestaand.get("foto_id"):
+            oud = supabase.table("carboo_camera_fotos").select("id,pad,genomen_op,verwijderd_op") \
+                .eq("id", bestaand["foto_id"]).execute().data
+            if oud and not oud[0].get("verwijderd_op"):
+                alle.insert(0, oud[0])
         beelden = {}
-        for f in groep:
+        for f in alle:
             try:
                 beelden[f["id"]] = supabase.storage.from_("camera-fotos").download(f["pad"])
             except Exception as e:
                 print(f"[CAMERA-HERKENNING-V1] foto ophalen mislukt: {e}")
-        if not beelden:
+        if not any(f["id"] in beelden for f in groep):
             raise RuntimeError("geen foto's op te halen")
         scherp = {fid: _cam_scherpte(b) for fid, b in beelden.items()}
-        kies = [max(scherp, key=scherp.get)]
-        t0 = next(_dt.datetime.fromisoformat(f["genomen_op"]) for f in groep if f["id"] == kies[0])
-        later = [f for f in groep if f["id"] in beelden and
-                 _dt.datetime.fromisoformat(f["genomen_op"]) - t0 >= _dt.timedelta(minutes=_CAM_DESSERT_MIN)]
-        if later:
-            kies.append(max(later, key=lambda f: scherp[f["id"]])["id"])
+        # Hoogstens twee beelden naar het model: de scherpste nieuwe, en de foto van
+        # het bestaande voorstel (of anders de scherpste andere nieuwe)
+        nieuw_best = max((f["id"] for f in groep if f["id"] in beelden), key=scherp.get)
+        anders = [fid for fid in beelden if fid != nieuw_best]
+        kies = [nieuw_best] + ([max(anders, key=scherp.get)] if anders else [])
 
         gewoonten, eerdere = _cam_gewoonten(supabase, user_id)
         correcties = _cam_correcties(supabase, user_id)
@@ -3758,7 +3770,7 @@ def _cam_verwerk_groep(supabase: Client, user_id: str, groep: List[dict]) -> Opt
         if antwoord is None:
             raise RuntimeError("geen bruikbaar antwoord van het model")
 
-        tijden = sorted(_dt.datetime.fromisoformat(f["genomen_op"]) for f in groep)
+        tijden = sorted(_dt.datetime.fromisoformat(f["genomen_op"]) for f in alle)
         try:
             from zoneinfo import ZoneInfo
             lokaal = tijden[0].astimezone(ZoneInfo("Europe/Brussels"))
@@ -3766,25 +3778,35 @@ def _cam_verwerk_groep(supabase: Client, user_id: str, groep: List[dict]) -> Opt
             lokaal = tijden[0]
 
         if not antwoord.get("eten") or not antwoord.get("items"):
+            # Alleen de nieuwe foto's gaan weg; een bestaand voorstel blijft zoals het was
             supabase.table("carboo_camera_fotos").update({"status": "geen_eten", "verwijderd_op": "now()"}).in_("id", ids).execute()
             supabase.storage.from_("camera-fotos").remove([f["pad"] for f in groep])
             print(f"[CAMERA-HERKENNING-V1] {user_id[:8]}: geen eten, ${gebruik['kost']:.5f}")
             return {"geen_eten": True, "kost_usd": gebruik["kost"]}
 
         items = _cam_koppel(supabase, user_id, antwoord["items"], eerdere)
-        v = supabase.table("carboo_camera_voorstellen").insert({
-            "user_id": user_id, "begin_op": tijden[0].isoformat(), "einde_op": tijden[-1].isoformat(),
-            "datum": lokaal.date().isoformat(), "moment": _cam_moment(supabase, user_id, lokaal),
-            "foto_id": kies[0], "items": items, "status": "open", "model": model,
-            "tokens_in": gebruik["in"], "tokens_uit": gebruik["uit"], "kost_usd": round(gebruik["kost"], 6),
-        }).execute().data[0]
+        bewaar = max(kies, key=scherp.get)          # de scherpste foto blijft bij het voorstel
+        if bestaand:
+            v = supabase.table("carboo_camera_voorstellen").update({
+                "einde_op": tijden[-1].isoformat(), "foto_id": bewaar, "items": items, "model": model,
+                "tokens_in": (bestaand.get("tokens_in") or 0) + gebruik["in"],
+                "tokens_uit": (bestaand.get("tokens_uit") or 0) + gebruik["uit"],
+                "kost_usd": round(float(bestaand.get("kost_usd") or 0) + gebruik["kost"], 6),
+            }).eq("id", bestaand["id"]).execute().data[0]
+        else:
+            v = supabase.table("carboo_camera_voorstellen").insert({
+                "user_id": user_id, "begin_op": tijden[0].isoformat(), "einde_op": tijden[-1].isoformat(),
+                "datum": lokaal.date().isoformat(), "moment": _cam_moment(supabase, user_id, lokaal),
+                "foto_id": bewaar, "items": items, "status": "open", "model": model,
+                "tokens_in": gebruik["in"], "tokens_uit": gebruik["uit"], "kost_usd": round(gebruik["kost"], 6),
+            }).execute().data[0]
         supabase.table("carboo_camera_fotos").update({"maaltijd_id": v["id"]}).in_("id", ids).execute()
         # Privacy: alleen de gekozen foto blijft, tot het voorstel afgehandeld is
-        weg = [f for f in groep if f["id"] != kies[0]]
+        weg = [f for f in alle if f["id"] != bewaar]
         if weg:
             supabase.storage.from_("camera-fotos").remove([f["pad"] for f in weg])
             supabase.table("carboo_camera_fotos").update({"verwijderd_op": "now()"}).in_("id", [f["id"] for f in weg]).execute()
-        print(f"[CAMERA-HERKENNING-V1] {user_id[:8]}: {len(items)} items, {model}, ${gebruik['kost']:.5f}")
+        print(f"[CAMERA-HERKENNING-V1] {user_id[:8]}: {len(items)} items, {model}{', aangevuld' if bestaand else ''}, ${gebruik['kost']:.5f}")
         return v
     except Exception as e:
         print(f"[CAMERA-HERKENNING-V1] verwerken mislukt, foto's terug op nieuw: {e}")
@@ -3793,13 +3815,15 @@ def _cam_verwerk_groep(supabase: Client, user_id: str, groep: List[dict]) -> Opt
 
 
 def _cam_verwerk(supabase: Client, user_id: str, meteen: bool = False) -> List[dict]:
-    """Groepeert de nieuwe foto's van een gebruiker in maaltijden en verwerkt
-    die. Een maaltijd is 'af' als er 20 min geen foto bijkwam, of meteen als de
-    gebruiker zelf kijkt (meteen=True)."""
+    """CAMERA-SNEL-V1 — verwerkt de nieuwe foto's van een gebruiker meteen.
+    Foto's die minder dan 20 min uit elkaar liggen horen bij dezelfde
+    maaltijd. Staat er van die maaltijd al een open voorstel (laatste foto
+    minder dan 20 min voor de nieuwe), dan wordt dat aangevuld in plaats van een
+    tweede voorstel te maken. (meteen blijft als parameter voor de aanroepers.)"""
     fotos = supabase.table("carboo_camera_fotos").select("id,pad,genomen_op") \
         .eq("user_id", user_id).eq("status", "nieuw").is_("verwijderd_op", "null") \
         .order("genomen_op").execute().data or []
-    groepen, nu = [], _dt.datetime.now(_dt.timezone.utc)
+    groepen = []
     for f in fotos:
         t = _dt.datetime.fromisoformat(f["genomen_op"])
         if groepen and t - _dt.datetime.fromisoformat(groepen[-1][-1]["genomen_op"]) < _dt.timedelta(minutes=_CAM_GROEP_MIN):
@@ -3808,12 +3832,27 @@ def _cam_verwerk(supabase: Client, user_id: str, meteen: bool = False) -> List[d
             groepen.append([f])
     uit = []
     for g in groepen:
-        laatste = _dt.datetime.fromisoformat(g[-1]["genomen_op"])
-        if meteen or nu - laatste >= _dt.timedelta(minutes=_CAM_GROEP_MIN):
-            r = _cam_verwerk_groep(supabase, user_id, g)
-            if r:
-                uit.append(r)
+        eerste = _dt.datetime.fromisoformat(g[0]["genomen_op"])
+        bestaand = (supabase.table("carboo_camera_voorstellen").select("*").eq("user_id", user_id)
+                    .eq("status", "open").gte("einde_op", (eerste - _dt.timedelta(minutes=_CAM_GROEP_MIN)).isoformat())
+                    .lte("begin_op", (eerste + _dt.timedelta(minutes=1)).isoformat())
+                    .order("einde_op", desc=True).limit(1).execute().data or [None])[0]
+        r = _cam_verwerk_groep(supabase, user_id, g, bestaand)
+        if r:
+            uit.append(r)
     return uit
+
+
+def _cam_verwerk_na_upload(user_id: str):
+    """Na een upload: even wachten (een tweede foto komt vaak meteen erna, die
+    gaat dan mee in dezelfde beurt) en dan verwerken. Loopt na het antwoord aan
+    de camera, die dus niet hoeft te wachten."""
+    import time
+    time.sleep(15)
+    try:
+        _cam_verwerk(get_supabase(), user_id)
+    except Exception as e:
+        print(f"[CAMERA-SNEL-V1] verwerken na upload mislukt: {e}")
 
 
 @app.post("/api/cron/camera")
