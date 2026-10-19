@@ -10038,13 +10038,15 @@ async def turnstile_verify(data: TurnstileVerify):
 
 @app.post("/api/auth/trial-starten")
 async def start_trial(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    """Geeft een 7-daags 'alles' trial abo aan een nieuwe user. Eénmalig per user_id."""
+    """Geeft een 2-daags 'alles' trial abo aan een nieuwe user. Eénmalig per user_id.
+    TRIAL-2-DAGEN-V1: was 7 dagen. De id-tekst trial_auto_7d blijft, want daaraan
+    herkennen de app en de etiketscanlimiet een proefabonnement."""
     from datetime import date, timedelta
     # Check of user al ooit een abo had
     bestaand = supabase.table("carboo_abonnementen").select("id").eq("user_id", user.id).execute()
     if bestaand.data:
         return {"ok": False, "reden": "Al abonnement gehad"}
-    verval = date.today() + timedelta(days=7)
+    verval = date.today() + timedelta(days=2)
     supabase.table("carboo_abonnementen").insert({
         "user_id": user.id,
         "pakket": "alles",
