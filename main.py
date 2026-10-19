@@ -9856,7 +9856,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             if "afval" in doel or "verlies" in doel or "gewichtsverlies" in doel:
                 gewicht = supabase.table("fuelc_gewicht").select("datum").eq("user_id", user.id).gte("datum", (today - timedelta(days=8)).isoformat()).execute()
                 if not gewicht.data:
-                    add(f"gewicht_inactief_{today.isoformat()}", "âš–ï¸", "Gewicht bijhouden",
+                    add(f"gewicht_inactief_{today.isoformat()}", "⚖️", "Gewicht bijhouden",
                         "Je hebt je gewicht 7+ dagen niet ingegeven. Wekelijks wegen helpt bij gewichtsverlies!",
                         "/app/fueling", "warning")
     except Exception as e: print(f"notif gewicht fout: {e}")
@@ -9928,7 +9928,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             eindigend = supabase.table("carboo_challenges").select("id,titel,eind_datum").in_("id", ch_ids).eq("actief", True).gte("eind_datum", eind1).lte("eind_datum", eind3).execute()
             for ch in (eindigend.data or []):
                 dagen = (date.fromisoformat(ch["eind_datum"]) - today).days
-                add(f"challenge_eind_{ch['id']}_{today.isoformat()}", "â°", "Challenge bijna afgelopen",
+                add(f"challenge_eind_{ch['id']}_{today.isoformat()}", "⏰", "Challenge bijna afgelopen",
                     f"'{ch['titel']}' eindigt over {dagen} dag{'en' if dagen != 1 else ''}!", "/app/coach-zone", "warning")
     except Exception as e: print(f"notif challenge eind fout: {e}")
 
@@ -9951,7 +9951,7 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
                         f"{date.fromisoformat(a['verval_datum']).strftime('%d/%m')}.",
                         "/app/abonnement", "info")
                 continue
-            add(f"abo_vervalt_{a['id']}_{today.isoformat()}", "âš ï¸", "Abonnement verloopt",
+            add(f"abo_vervalt_{a['id']}_{today.isoformat()}", "⚠️", "Abonnement verloopt",
                 f"Je '{a['pakket']}' abonnement vervalt over {dagen} dag{'en' if dagen != 1 else ''}",
                 "/app/account", "warning")
     except Exception as e: print(f"notif abo fout: {e}")
