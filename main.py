@@ -7095,10 +7095,13 @@ def _gut_nummer_labels(rijen: list):
             continue
 
         v = vorige.get(reeks)
-        bijgestuurd = bool(r.get("door_coach"))
+        # GUT-COACH-V2 — het nummer hangt alleen aan de dosis. door_coach telde
+        # hier vroeger mee als herhaling, maar werd nooit ingevuld; nu het wel
+        # bewaard wordt, zou een coach die een stap hoger klaarzet "T2b" krijgen
+        # in plaats van "T3". Zelfde dosis = herhaling, andere dosis = nieuwe stap.
         if v is None:
             stap, herhaling = 1, 0
-        elif doel == v[2] or bijgestuurd:
+        elif doel == v[2]:
             stap, herhaling = v[0], v[1] + 1
         else:
             stap, herhaling = v[0] + 1, 0
