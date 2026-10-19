@@ -382,6 +382,27 @@ class CoachProfiel(BaseModel):
     # COACH-PAKKETTEN-V1 — welke modules de coach zelf krijgt
     pakketten: Optional[List[str]] = None
     duur_maanden: Optional[int] = 12
+    # COACH-ACCOUNT-V1 — alleen gebruikt als het e-mailadres nog geen account heeft
+    wachtwoord: Optional[str] = None
+
+
+# COACH-ACCOUNT-V1 — list_users() geeft standaard maar 50 accounts terug. Vanaf
+# het 51ste vond elke opzoeking op e-mail bestaande klanten niet meer. Dit
+# bladert door alle pagina's en vergelijkt zonder hoofdletters.
+def _zoek_auth_id(sb, email: str):
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    for pagina in range(1, 201):
+        lijst = sb.auth.admin.list_users(page=pagina, per_page=1000) or []
+        for u in lijst:
+            ue = getattr(u, "email", None) or (u.get("email") if isinstance(u, dict) else None)
+            if ue and ue.lower() == email:
+                uid = getattr(u, "id", None) or (u.get("id") if isinstance(u, dict) else None)
+                return str(uid)
+        if len(lijst) < 1000:
+            return None
+    return None
 
 class PrivacyInstellingen(BaseModel):
     relatie_id: str
@@ -516,14 +537,31 @@ async def dien_aanvraag_in(item: CoachAanvraag, user=Depends(get_current_user), 
 async def admin_maak_coach(item: CoachProfiel, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     if not await is_admin(user, supabase):
         raise HTTPException(403, "Geen toegang")
-    gebruiker = supabase.auth.admin.list_users()
-    klant_id = None
-    for u in (gebruiker or []):
-        if hasattr(u, 'email') and u.email == item.email:
-            klant_id = u.id
-            break
+    item.email = (item.email or "").strip().lower()
+    klant_id = _zoek_auth_id(supabase, item.email)
+    # COACH-ACCOUNT-V1 — geen account: met een wachtwoord maakt de admin er
+    # meteen een aan, al bevestigd. Bestaat het account wel, dan blijft het
+    # wachtwoord onaangeroerd: nooit per ongeluk dat van een klant wijzigen.
+    account_nieuw = False
+    wachtwoord_genegeerd = bool(klant_id and item.wachtwoord)
     if not klant_id:
-        raise HTTPException(404, f"Geen Carboo account gevonden voor {item.email}")
+        ww = (item.wachtwoord or "").strip()
+        if not ww:
+            raise HTTPException(404, f"Geen Carboo account voor {item.email}. Vul een wachtwoord in om er een aan te maken.")
+        if len(ww) < 8:
+            raise HTTPException(400, "Het wachtwoord moet minstens 8 tekens lang zijn.")
+        try:
+            gemaakt = supabase.auth.admin.create_user({
+                "email": item.email, "password": ww, "email_confirm": True,
+                "user_metadata": {"naam": item.naam},
+            })
+        except Exception as e:
+            print(f"[COACH-ACCOUNT-V1] account aanmaken mislukt voor {item.email}: {type(e).__name__}")
+            raise HTTPException(400, "Account aanmaken mislukt. Bestaat dit e-mailadres misschien al?")
+        if not (gemaakt and gemaakt.user):
+            raise HTTPException(500, "Account aanmaken mislukt.")
+        klant_id = str(gemaakt.user.id)
+        account_nieuw = True
     bestaand = supabase.table("carboo_coaches").select("id").eq("user_id", klant_id).execute()
     if bestaand.data:
         supabase.table("carboo_coaches").update({"verified": True, "naam": item.naam, "email": item.email}).eq("user_id", klant_id).execute()
@@ -565,7 +603,8 @@ async def admin_maak_coach(item: CoachProfiel, user=Depends(get_current_user), s
         except Exception as e:
             print(f"[COACH-PAKKETTEN-V1] {pak} toewijzen mislukt: {e}")
 
-    return {"ok": True, "pakketten": gegeven, "verval_datum": verval}
+    return {"ok": True, "pakketten": gegeven, "verval_datum": verval,
+            "account_nieuw": account_nieuw, "wachtwoord_genegeerd": wachtwoord_genegeerd}
 
 @app.get("/api/admin/coaches")
 async def admin_lijst_coaches(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -824,13 +863,7 @@ async def genereer_invite(data: dict, user=Depends(get_current_user), supabase: 
     # Zoek klant in auth.users via Supabase admin API
     klant_id = None
     try:
-        all_users = supabase.auth.admin.list_users()
-        for u in (all_users or []):
-            user_email = getattr(u, 'email', None) or (u.get('email') if isinstance(u, dict) else None)
-            user_uid = getattr(u, 'id', None) or (u.get('id') if isinstance(u, dict) else None)
-            if user_email and user_email.lower() == klant_email:
-                klant_id = str(user_uid)
-                break
+        klant_id = _zoek_auth_id(supabase, klant_email)
     except Exception as e:
         raise HTTPException(500, f"Fout bij zoeken gebruiker: {e}")
     if not klant_id:
@@ -889,12 +922,7 @@ async def klant_direct_toevoegen(data: dict, user=Depends(get_current_user), sup
     klant_id = None
     nieuwe_gebruiker = False
     try:
-        all_users = supabase.auth.admin.list_users()
-        for u in (all_users or []):
-            ue = getattr(u, 'email', None)
-            if ue and ue.lower() == klant_email:
-                klant_id = str(getattr(u, 'id', None))
-                break
+        klant_id = _zoek_auth_id(supabase, klant_email)
     except Exception as e:
         raise HTTPException(500, f"Fout bij zoeken gebruiker: {e}")
 
@@ -11543,10 +11571,9 @@ async def abonnement_toewijzen(item: dict, user=Depends(get_current_user)):
     if email and not user_id:
         # Zoek of gebruiker al bestaat
         try:
-            users = supabase_admin.auth.admin.list_users()
-            match = next((u for u in users if getattr(u, 'email', None) == email), None)
-            if match:
-                user_id = str(match.id)
+            gevonden = _zoek_auth_id(supabase_admin, email)
+            if gevonden:
+                user_id = gevonden
             elif wachtwoord:
                 # Maak nieuwe gebruiker aan
                 if len(wachtwoord) < 6:
