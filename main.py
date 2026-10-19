@@ -9935,9 +9935,22 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
     # 9. Abonnement vervalt over 7 dagen
     try:
         vervalt = (today + timedelta(days=7)).isoformat()
-        abo = supabase.table("carboo_abonnementen").select("id,pakket,verval_datum").eq("user_id", user.id).eq("status", "actief").lte("verval_datum", vervalt).gte("verval_datum", today.isoformat()).execute()
+        abo = supabase.table("carboo_abonnementen").select("id,pakket,verval_datum,start_datum,mollie_payment_id").eq("user_id", user.id).eq("status", "actief").lte("verval_datum", vervalt).gte("verval_datum", today.isoformat()).execute()
         for a in (abo.data or []):
             dagen = (date.fromisoformat(a["verval_datum"]) - today).days
+            # TRIAL-MELDING-V1 — een proefperiode is geen abonnement: alleen een
+            # melding op de startdag en op de laatste dag, met eigen woorden.
+            if str(a.get("mollie_payment_id") or "").startswith("trial") or a.get("mollie_payment_id") == "admin_trial":
+                if dagen == 0:
+                    add(f"proef_laatste_{a['id']}", "⏳", "Laatste dag van je proefperiode",
+                        "Vandaag kan je Carboo nog gratis gebruiken. Kies een pakket om verder te gaan.",
+                        "/app/abonnement", "warning")
+                elif str(a.get("start_datum") or "")[:10] == today.isoformat():
+                    add(f"proef_start_{a['id']}", "🎁", "Je proefperiode is gestart",
+                        f"Je kan Carboo {dagen} dag{'en' if dagen != 1 else ''} gratis gebruiken, tot en met "
+                        f"{date.fromisoformat(a['verval_datum']).strftime('%d/%m')}.",
+                        "/app/abonnement", "info")
+                continue
             add(f"abo_vervalt_{a['id']}_{today.isoformat()}", "âš ï¸", "Abonnement verloopt",
                 f"Je '{a['pakket']}' abonnement vervalt over {dagen} dag{'en' if dagen != 1 else ''}",
                 "/app/account", "warning")
