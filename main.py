@@ -1670,7 +1670,9 @@ def bereken_startdosis(niveau: str, ervaring: str, sport: str, max_kh_per_uur=No
     }
 async def _coach_mag_gut(user, klant_id, supabase):
     # Coach moet gekoppeld zijn EN de klant moet train_gut-toestemming hebben gegeven.
-    await _verifieer_coach_klant(user, klant_id, supabase)
+    # GUT-COACH-V2 — geeft de coach-id terug: de routes die door_coach invullen
+    # kregen tot nu None, waardoor nooit bewaard werd welke coach bijstuurde.
+    coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
     rel = supabase.table("carboo_coach_klanten").select("id, carboo_coach_privacy(train_gut)").eq("klant_id", klant_id).eq("status", "actief").execute()
     toegestaan = False
     for r in (rel.data or []):
@@ -1682,13 +1684,16 @@ async def _coach_mag_gut(user, klant_id, supabase):
             break
     if not toegestaan:
         raise HTTPException(403, "Klant heeft Train the Gut niet gedeeld met de coach")
+    return coach_id
 
 
 @app.get("/api/coach/klant/{klant_id}/gut-protocol")
 async def coach_get_gut_protocol(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     await _coach_mag_gut(user, klant_id, supabase)
     r = supabase.table("carboo_gut_protocol").select("*").eq("user_id", klant_id).eq("status", "actief").execute()
-    return {"protocol": r.data[0] if r.data else None}
+    c = supabase.table("carboo_gut_protocol").select("*").eq("user_id", klant_id).eq("status", "concept").execute()
+    return {"protocol": r.data[0] if r.data else None,
+            "concept": c.data[0] if c.data else None}
 
 
 @app.post("/api/coach/klant/{klant_id}/gut-protocol")
@@ -1816,6 +1821,9 @@ async def coach_get_gut_momenten(klant_id: str, user=Depends(get_current_user),
         "momenten": rijen,
         "reeks_nu": reeks_nu,
         "open_moment_id": open_moment["id"] if open_moment else None,
+        # GUT-COACH-V2 — het coachscherm zegt vooraf wat kan en wat niet
+        "protocol_aan": _gut_protocol_aan(supabase, klant_id),
+        "doel": _gut_protocol_doel(supabase, klant_id).get("grens"),
     }
 
 
@@ -2293,16 +2301,59 @@ async def verwijder_sessie(sessie_id: str, user=Depends(get_current_user), supab
 
 
 # === COACH-CONCEPT: TRAIN THE GUT ===========================================
-# Coach stelt het start-protocol op voor de klant (status concept, niet actief).
-@app.post("/api/coach/klant/{klant_id}/gut-concept")
-async def maak_gut_concept(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
+# GUT-COACH-V2 — de coach stelt een protocol voor, de sporter keurt goed.
+# Niets wordt overschreven zonder zijn akkoord. Het voorstel draagt ook de
+# eerste test (t1_voorstel): dosis, intensiteit, duur en een opmerking. Bij
+# goedkeuring wordt het protocol actief en staat T1 meteen klaar in Testing.
+
+def _gut_coach_voorstel(data: dict) -> dict:
+    """Startdosis, doel en de reeks stappen ertussen, zoals het protocol ze zou
+    zetten. Alleen voor het coachscherm: de sporter krijgt geen prognose."""
     sport = data.get("sport") or "Fietsen"
     niveau = data.get("niveau") or "Recreant"
     ervaring = data.get("ervaring") or "Beginner"
     dosis = bereken_startdosis(niveau, ervaring, sport, data.get("max_kh_per_uur"))
-    supabase.table("carboo_gut_protocol").delete().eq("user_id", klant_id).eq("status", "concept").execute()
-    supabase.table("carboo_gut_protocol").insert({
+    doel = _gut_doel(data.get("wedstrijd_duur_uur"), niveau, sport)
+    nodig = doel.get("nodig", True)
+    start = int(dosis["startdosis"])
+    grens = int(doel.get("grens") or dosis["max_dosis"])
+    reeks = [start]
+    d = start
+    while nodig and d < grens and len(reeks) < 20:
+        n = _gut_stap_omhoog(d, grens)
+        if n <= d:
+            break
+        reeks.append(n)
+        d = n
+    return {"startdosis": start, "max_dosis": dosis["max_dosis"], "nodig": nodig,
+            "doel": grens if nodig else None, "reeks": reeks}
+
+
+@app.post("/api/coach/klant/{klant_id}/gut-voorstel")
+async def coach_gut_voorstel(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Rekent het voorstel uit zonder iets op te slaan (stap 3 van het scherm)."""
+    await _coach_mag_gut(user, klant_id, supabase)
+    return _gut_coach_voorstel(data)
+
+
+@app.post("/api/coach/klant/{klant_id}/gut-concept")
+async def maak_gut_concept(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_gut(user, klant_id, supabase)
+    sport = data.get("sport") or "Fietsen"
+    niveau = data.get("niveau") or "Recreant"
+    ervaring = data.get("ervaring") or "Beginner"
+    voorstel = _gut_coach_voorstel(data)
+    t1 = data.get("t1") or {}
+    try:
+        t1_dosis = int(t1.get("dosis")) if t1.get("dosis") not in (None, "") else voorstel["startdosis"]
+    except (TypeError, ValueError):
+        t1_dosis = voorstel["startdosis"]
+    t1_dosis = max(15, min(int(voorstel["max_dosis"]), t1_dosis))
+    try:
+        t1_duur = int(t1.get("min_duur_min")) if t1.get("min_duur_min") not in (None, "") else None
+    except (TypeError, ValueError):
+        t1_duur = None
+    rij = {
         "user_id": klant_id,
         "sport": sport,
         "wedstrijd": data.get("wedstrijd") or "",
@@ -2310,20 +2361,43 @@ async def maak_gut_concept(klant_id: str, data: dict, user=Depends(get_current_u
         "ervaring": ervaring,
         "wedstrijd_datum": data.get("wedstrijd_datum") or None,
         "wedstrijd_duur_uur": data.get("wedstrijd_duur_uur"),
-        "protocol_aan": data.get("protocol_aan"),
+        "protocol_aan": True,
         "trainingen_per_week": data.get("trainingen_per_week") or 1,
-        "startdosis_g_uur": dosis["startdosis"],
-        "max_dosis_g_uur": dosis["max_dosis"],
+        "gebruikte_producten": data.get("gebruikte_producten") or [],
+        "max_kh_per_uur": data.get("max_kh_per_uur"),
+        "heeft_last": data.get("heeft_last"),
+        "last_met_welke": data.get("last_met_welke"),
+        "startdosis_g_uur": t1_dosis,
+        "max_dosis_g_uur": voorstel["max_dosis"],
         "week_huidig": 1,
         "actief": False,
         "status": "concept",
         "door_coach": coach_id,
         "bijgewerkt": "now()",
-    }).execute()
+    }
+    t1_voorstel = {"dosis": t1_dosis,
+                   "intensiteit": _gut_intensiteit(t1.get("intensiteit") or "laag"),
+                   "min_duur_min": t1_duur,
+                   "coach_notitie": str(t1.get("coach_notitie") or "").strip()[:500]}
+    supabase.table("carboo_gut_protocol").delete().eq("user_id", klant_id).eq("status", "concept").execute()
+    try:
+        supabase.table("carboo_gut_protocol").insert(dict(rij, t1_voorstel=t1_voorstel)).execute()
+    except Exception as e:
+        # kolom t1_voorstel nog niet aangemaakt (gut-coach-v2.sql): het voorstel
+        # gaat toch door, T1 krijgt dan de standaardinstellingen
+        print(f"[GUT-COACH-V2] t1_voorstel niet bewaard: {e}")
+        supabase.table("carboo_gut_protocol").insert(rij).execute()
     # PUSHKOPPEL-V1
-    stuur_push_async(klant_id, "Je gut-protocol staat klaar",
-                     "Je coach zette een Train the Gut-protocol klaar. Bekijk en keur goed.",
+    stuur_push_async(klant_id, "Je coach zette een protocol klaar",
+                     "Bekijk het voorstel in Train the Gut en keur het goed.",
                      url="/app/gut", tag="gutprotocol", soort="gutprotocol", supabase=supabase)
+    return {"ok": True}
+
+
+@app.post("/api/coach/klant/{klant_id}/gut-concept/intrekken")
+async def trek_gut_concept_in(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_gut(user, klant_id, supabase)
+    supabase.table("carboo_gut_protocol").delete().eq("user_id", klant_id).eq("status", "concept").execute()
     return {"ok": True}
 
 
@@ -2335,11 +2409,34 @@ async def get_gut_concept(user=Depends(get_current_user), supabase: Client = Dep
 
 @app.post("/api/gut/concept/goedkeuren")
 async def keur_gut_concept_goed(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    c = supabase.table("carboo_gut_protocol").select("id").eq("user_id", user.id).eq("status", "concept").execute()
+    c = supabase.table("carboo_gut_protocol").select("*").eq("user_id", user.id).eq("status", "concept").execute()
     if not c.data:
         raise HTTPException(404, "Geen concept gevonden")
+    concept = c.data[0]
     supabase.table("carboo_gut_protocol").delete().eq("user_id", user.id).eq("status", "actief").execute()
     supabase.table("carboo_gut_protocol").update({"status": "actief", "actief": True, "week_huidig": 1, "bijgewerkt": "now()"}).eq("user_id", user.id).eq("status", "concept").execute()
+    # GUT-COACH-V2 — T1 klaarzetten, zoals bij een profiel dat de sporter zelf
+    # opslaat. Een reeks die al getest is, loopt gewoon verder (geen herstart).
+    _gut_t1_verzeker(supabase, user.id, concept.get("startdosis_g_uur"), True, mag_herstarten=False)
+    t1 = concept.get("t1_voorstel") or {}
+    if t1:
+        try:
+            alle, reeks_nu, _ = _gut_momenten(supabase, user.id)
+            huidig = [m for m in alle if m["reeks"] == reeks_nu]
+            open_ = _gut_open_moment(huidig, _gut_geteste_ids(supabase, user.id))
+            # alleen een verse reeks: nog niets beoordeeld
+            if open_ and not any(m.get("advies_soort") for m in huidig):
+                velden = {"doel_kh_uur": int(t1.get("dosis") or open_.get("doel_kh_uur") or 0),
+                          "intensiteit": t1.get("intensiteit") or "laag",
+                          "door_coach": concept.get("door_coach"),
+                          "bijgewerkt": "now()"}
+                if t1.get("min_duur_min") not in (None, ""):
+                    velden["min_duur_min"] = int(t1["min_duur_min"])
+                if t1.get("coach_notitie"):
+                    velden["coach_notitie"] = t1["coach_notitie"]
+                supabase.table("carboo_gut_testmomenten").update(velden).eq("id", open_["id"]).eq("user_id", user.id).execute()
+        except Exception as e:
+            print(f"[GUT-COACH-V2] T1 van de coach niet toegepast: {e}")
     return {"ok": True}
 
 
