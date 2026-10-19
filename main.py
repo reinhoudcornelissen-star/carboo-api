@@ -5673,22 +5673,26 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     _drankdagen_k = d.get("drankdagen") or 0
     _vocht = d.get("vocht") or 0
     if _vocht and _drankdagen_k >= 4:
-        _n_vocht_min = _norm("vocht_dag", "norm_min", 2000)
-        _n_vocht_max = _norm("vocht_dag", "norm_max", 2500)
+        # VOCHT-DRANK-NORM-V1 — de app telt alleen dranken, dus de norm geldt
+        # voor drank (1,5 tot 2 liter); eten levert er zelf nog water bij.
+        _n_vocht_min = _norm("vocht_dag", "norm_min", 1500)
+        _n_vocht_max = _norm("vocht_dag", "norm_max", 2000)
         _lt = str(round(_vocht / 1000, 1)).replace(".", ",")
+        _bereik = _getal(_n_vocht_min / 1000) + " tot " + _getal(_n_vocht_max / 1000) + " liter drank"
         _op = "Op de " + str(_drankdagen_k) + " dagen dat je drinken invulde: "
+        _eten = " Het vocht uit je eten, zo'n halve liter, komt daar nog bij."
         if _vocht < _n_vocht_min:
             voeg(kwaliteit, "geel", "Je drinkt te weinig",
-                 (_op + _lt + " liter per dag, tegenover 2 tot 2,5 liter als richtlijn. "
+                 (_op + _lt + " liter per dag, tegenover " + _bereik + " als richtlijn. "
                   "Een extra glas bij elke maaltijd sluit dat gat meestal al. Reken "
                   "daarbovenop wat je tijdens een training verliest."))
         elif _vocht > _n_vocht_max * 1.6:
             voeg(kwaliteit, "groen", "Je drinkt ruim",
-                 (_op + _lt + " liter per dag, boven de richtlijn van 2 tot 2,5 liter. "
+                 (_op + _lt + " liter per dag, boven de richtlijn van " + _bereik + ". "
                   "Dat mag, zolang je plas licht van kleur blijft."))
         else:
             voeg(kwaliteit, "groen", "Je vochtinname zit goed",
-                 (_op + _lt + " liter per dag, binnen de richtlijn van 2 tot 2,5 liter."))
+                 (_op + _lt + " liter per dag, binnen de richtlijn van " + _bereik + "." + _eten))
 
     # Omega 3 en vezels na vocht: binnen dezelfde ernst gaat vocht voor, zodat
     # het niet wegvalt achter de grens van vijf vaststellingen.
