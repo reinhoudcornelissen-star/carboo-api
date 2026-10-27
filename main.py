@@ -20,7 +20,9 @@ mollie_client.set_api_key(os.getenv("MOLLIE_API_KEY", ""))
 APP_URL = os.getenv("APP_URL", "https://carboo.app")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://carboo-api.onrender.com/api/mollie/webhook")
 
-app = FastAPI(title="Carboo API", version="2.0.0")
+# VEILIG-V2 — geen openbare /docs, /redoc en /openapi.json: die toonden
+# iedereen de volledige lijst met routes (admin, coach, cron).
+app = FastAPI(title="Carboo API", version="2.0.0", docs_url=None, redoc_url=None, openapi_url=None)
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,8 +31,7 @@ app.add_middleware(
         "https://carboo-next.vercel.app",
         "https://carboo.app",
         "https://www.carboo.app",
-        os.getenv("FRONTEND_URL", ""),
-    ],
+    ] + ([os.getenv("FRONTEND_URL")] if os.getenv("FRONTEND_URL") else []),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -153,7 +154,8 @@ async def genereer_rapport(req: CoachRapportRequest, user=Depends(get_current_us
         html = genereer_html(req.coach_data.dict(), req.gebruiker_naam)
         return {"html": html}
     except Exception as e:
-        raise HTTPException(500, f"Rapport generatie mislukt: {e}")
+        print("[FOUT-500]", f"Rapport generatie mislukt: {e}")
+        raise HTTPException(500, "Rapport generatie mislukt. Probeer het later opnieuw.")
 
 @app.post("/api/coach/genereer-pdf")
 async def genereer_pdf(req: CoachRapportRequest, user=Depends(get_current_user)):
@@ -169,7 +171,8 @@ async def genereer_pdf(req: CoachRapportRequest, user=Depends(get_current_user))
             headers={"Content-Disposition": f'attachment; filename="{filename}"'}
         )
     except Exception as e:
-        raise HTTPException(500, f"PDF generatie mislukt: {e}")
+        print("[FOUT-500]", f"PDF generatie mislukt: {e}")
+        raise HTTPException(500, "PDF generatie mislukt. Probeer het later opnieuw.")
 
 @app.post("/api/coach/sla-plan-op")
 async def sla_plan_op(req: CoachRapportRequest, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -451,7 +454,10 @@ async def is_admin(user, supabase: Client) -> bool:
 
 
 @app.get("/api/debug/db-latency")
-async def db_latency(supabase: Client = Depends(get_supabase)):
+async def db_latency(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    # VEILIG-V2 — stond open voor iedereen
+    if not await is_admin(user, supabase):
+        raise HTTPException(403, "Geen toegang")
     # Tijdelijk: meet hoe lang 3 simpele queries duren (netwerk naar de DB).
     import time
     tijden = []
@@ -865,7 +871,8 @@ async def genereer_invite(data: dict, user=Depends(get_current_user), supabase: 
     try:
         klant_id = _zoek_auth_id(supabase, klant_email)
     except Exception as e:
-        raise HTTPException(500, f"Fout bij zoeken gebruiker: {e}")
+        print("[FOUT-500]", f"Fout bij zoeken gebruiker: {e}")
+        raise HTTPException(500, "Fout bij zoeken gebruiker. Probeer het later opnieuw.")
     if not klant_id:
         raise HTTPException(404, f"Geen Carboo-gebruiker gevonden met email {klant_email}. De klant moet eerst een account aanmaken in de app.")
 
@@ -924,7 +931,8 @@ async def klant_direct_toevoegen(data: dict, user=Depends(get_current_user), sup
     try:
         klant_id = _zoek_auth_id(supabase, klant_email)
     except Exception as e:
-        raise HTTPException(500, f"Fout bij zoeken gebruiker: {e}")
+        print("[FOUT-500]", f"Fout bij zoeken gebruiker: {e}")
+        raise HTTPException(500, "Fout bij zoeken gebruiker. Probeer het later opnieuw.")
 
     # Niet gevonden -> aanmaken indien wachtwoord opgegeven
     if not klant_id:
@@ -944,7 +952,8 @@ async def klant_direct_toevoegen(data: dict, user=Depends(get_current_user), sup
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(500, f"Fout bij aanmaken account: {e}")
+            print("[FOUT-500]", f"Fout bij aanmaken account: {e}")
+            raise HTTPException(500, "Fout bij aanmaken account. Probeer het later opnieuw.")
 
     if klant_id == user.id:
         raise HTTPException(400, "Je kan jezelf niet als klant toevoegen")
@@ -1334,9 +1343,12 @@ async def plaats_opmerking(item: CoachOpmerking, user=Depends(get_current_user),
     if not coach.data:
         raise HTTPException(403, "Geen coach account")
     coach_id = coach.data[0]["id"]
-    relatie = supabase.table("carboo_coach_klanten").select("id").eq("id", item.relatie_id).eq("coach_id", coach_id).eq("status", "actief").execute()
+    relatie = supabase.table("carboo_coach_klanten").select("id,klant_id").eq("id", item.relatie_id).eq("coach_id", coach_id).eq("status", "actief").execute()
     if not relatie.data:
         raise HTTPException(403, "Geen actieve relatie met deze klant")
+    # VEILIG-V2 — de klant komt uit de relatie, niet uit het verzoek: anders kon
+    # een coach opmerkingen en pushberichten naar om het even wie sturen
+    item.klant_id = relatie.data[0]["klant_id"]
     r = supabase.table("carboo_coach_opmerkingen").insert({
         "relatie_id": item.relatie_id, "coach_id": coach_id,
         "klant_id": item.klant_id, "tekst": item.tekst,
@@ -1701,7 +1713,8 @@ async def _coach_mag_gut(user, klant_id, supabase):
     # GUT-COACH-V2 — geeft de coach-id terug: de routes die door_coach invullen
     # kregen tot nu None, waardoor nooit bewaard werd welke coach bijstuurde.
     coach_id = await _verifieer_coach_klant(user, klant_id, supabase)
-    rel = supabase.table("carboo_coach_klanten").select("id, carboo_coach_privacy(train_gut)").eq("klant_id", klant_id).eq("status", "actief").execute()
+    # VEILIG-V2 — alleen de relatie van deze coach telt, niet die van een andere coach
+    rel = supabase.table("carboo_coach_klanten").select("id, carboo_coach_privacy(train_gut)").eq("klant_id", klant_id).eq("coach_id", coach_id).eq("status", "actief").execute()
     toegestaan = False
     for r in (rel.data or []):
         priv = r.get("carboo_coach_privacy") or {}
@@ -2319,7 +2332,8 @@ async def sla_trainingssessie_op(item: TrainingSessie, user=Depends(get_current_
         }
     except Exception as e:
         # De unieke index vangt een dubbele evaluatie op; dat is geen fout.
-        return {"ok": False, "fout": str(e)[:200]}
+        print("[FOUT]", str(e)[:200])
+        return {"ok": False, "fout": "Opslaan mislukt. Probeer het later opnieuw."}
 
 
 @app.delete("/api/gut/sessies/{sessie_id}")
@@ -3382,7 +3396,7 @@ VOEDINGSTIP_MELDINGEN = [   # maandag tot vrijdag
 async def cron_voedingstip(request: Request, test: Optional[str] = None,
                            supabase: Client = Depends(get_supabase)):
     sleutel = os.getenv("CRON_SLEUTEL")
-    if not sleutel or request.headers.get("x-cron-sleutel") != sleutel:
+    if not sleutel or not secrets.compare_digest(request.headers.get("x-cron-sleutel") or "", sleutel):
         raise HTTPException(403, "Geen toegang")
     nu = _nu_be()
     dag = nu.weekday()
@@ -3985,7 +3999,7 @@ def _cam_verwerk_na_upload(user_id: str):
 async def cron_camera(request: Request, supabase: Client = Depends(get_supabase)):
     """Om de 5 minuten via een Render Cron Job (header x-cron-sleutel)."""
     sleutel = os.getenv("CRON_SLEUTEL")
-    if not sleutel or request.headers.get("x-cron-sleutel") != sleutel:
+    if not sleutel or not secrets.compare_digest(request.headers.get("x-cron-sleutel") or "", sleutel):
         raise HTTPException(403, "Geen toegang")
     rij = supabase.table("carboo_camera_fotos").select("user_id").eq("status", "nieuw") \
         .is_("verwijderd_op", "null").execute().data or []
@@ -6594,11 +6608,14 @@ async def zet_profielfoto(data: dict,
                           user=Depends(get_current_user),
                           supabase: Client = Depends(get_supabase)):
     url = (data.get("foto_url") or "").strip() or None
+    if url and not url.startswith("https://"):   # VEILIG-V2
+        raise HTTPException(400, "Ongeldig foto-adres")
     try:
         supabase.table("carboo_gebruikers").update({"foto_url": url}) \
             .eq("id", user.id).execute()
     except Exception as e:
-        raise HTTPException(500, f"Kon de foto niet bewaren: {e}")
+        print("[FOUT-500]", f"Kon de foto niet bewaren: {e}")
+        raise HTTPException(500, "Kon de foto niet bewaren. Probeer het later opnieuw.")
     return {"ok": True, "foto_url": url}
 
 # ─── GUT-BESLISBOOM-V1 ─────────────────────────────────────────────────
@@ -9087,7 +9104,8 @@ async def genereer_gut_schema(body: dict, user=Depends(get_current_user)):
         schema = genereer_schema(body.get("data", {}), body.get("logs", {}), body.get("actieve_fase", ""))
         return {"schema": schema}
     except Exception as e:
-        raise HTTPException(500, f"Schema generatie mislukt: {e}")
+        print("[FOUT-500]", f"Schema generatie mislukt: {e}")
+        raise HTTPException(500, "Schema generatie mislukt. Probeer het later opnieuw.")
 
 
 # â•â•â• CREDITS â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -9244,6 +9262,26 @@ def _winkelbuddy_oordeel(p: dict, supabase: Client) -> list:
     return uit
 
 
+# VEILIG-V2 — een rem op de routes die Anthropic aanspreken. Ruim boven wat
+# een sporter normaal doet, maar een script met een gratis account kan zo de
+# rekening niet meer opdrijven, en gelijktijdige verzoeken glippen niet langs
+# de daglimieten. Telt in het geheugen van de server; na een deploy begint
+# de telling opnieuw, wat voor een rem volstaat.
+_AI_TELLER: dict = {}
+_AI_REM = {"etiket": (6, 60), "koelkast": (3, 10), "mascotte": (4, 40), "voorzet": (3, 20)}
+_MAX_BEELD = 8_000_000   # tekens base64, ruim 6 MB foto
+
+
+def _ai_rem(user_id: str, soort: str):
+    per_min, per_dag = _AI_REM[soort]
+    nu = _time.time()
+    lijst = [x for x in _AI_TELLER.get((user_id, soort), []) if nu - x < 86400]
+    if len(lijst) >= per_dag or sum(1 for x in lijst if nu - x < 60) >= per_min:
+        raise HTTPException(429, "Even rustig: probeer het over een minuutje opnieuw.")
+    lijst.append(nu)
+    _AI_TELLER[(user_id, soort)] = lijst
+
+
 @app.post("/api/fuelc/scan-etiket")
 async def scan_etiket(request: Request, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
     import json, re
@@ -9258,6 +9296,9 @@ async def scan_etiket(request: Request, user=Depends(get_current_user), supabase
 
     if not image_data:
         raise HTTPException(400, "Geen afbeelding ontvangen")
+    if len(image_data) > _MAX_BEELD:
+        raise HTTPException(413, "De foto is te groot.")
+    _ai_rem(user.id, "etiket")
 
     if media_type not in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
         media_type = "image/jpeg"
@@ -9335,7 +9376,8 @@ async def scan_etiket(request: Request, user=Depends(get_current_user), supabase
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Claude fout: {type(e).__name__}: {str(e)[:200]}")
+        print("[FOUT-500]", f"Claude fout: {type(e).__name__}: {str(e)[:200]}")
+        raise HTTPException(500, "Claude fout. Probeer het later opnieuw.")
 
 # ─── COACH ZONE SOCIAAL ───────────────────────────────────────────────────────
 
@@ -9464,7 +9506,7 @@ async def maak_post(item: PrikbordPost, user=Depends(get_current_user), supabase
             "titel": item.titel,
             "tekst": item.tekst,
             "type": item.type or "post",
-            "foto_url": item.foto_url,
+            "foto_url": (item.foto_url if (item.foto_url or "").startswith("https://") else None),
         }).execute()
     else:
         if not coach.data:
@@ -9475,7 +9517,7 @@ async def maak_post(item: PrikbordPost, user=Depends(get_current_user), supabase
             "titel": item.titel,
             "tekst": item.tekst,
             "type": item.type or "post",
-            "foto_url": item.foto_url,
+            "foto_url": (item.foto_url if (item.foto_url or "").startswith("https://") else None),
         }).execute()
     return {"ok": True, "id": r.data[0]["id"] if r.data else None}
 
@@ -9540,7 +9582,7 @@ async def maak_forum_post(item: ForumPost, user=Depends(get_current_user), supab
         "auteur_naam": auteur_naam,
         "titel": item.titel,
         "tekst": item.tekst,
-        "foto_url": item.foto_url,
+        "foto_url": (item.foto_url if (item.foto_url or "").startswith("https://") else None),
         "categorie": item.categorie or "algemeen",
     }).execute()
     return {"ok": True, "id": r.data[0]["id"] if r.data else None}
@@ -10199,7 +10241,8 @@ async def turnstile_verify(data: TurnstileVerify):
             raise HTTPException(400, "Turnstile validatie mislukt")
         return {"success": True}
     except httpx.HTTPError as e:
-        raise HTTPException(500, f"Kon Turnstile niet bereiken: {e}")
+        print("[FOUT-500]", f"Kon Turnstile niet bereiken: {e}")
+        raise HTTPException(500, "Kon Turnstile niet bereiken. Probeer het later opnieuw.")
 
 @app.post("/api/auth/trial-starten")
 async def start_trial(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
@@ -10494,6 +10537,7 @@ async def mascotte_vraag(item: MascotteVraag, user=Depends(get_current_user),
     vraag = (item.vraag or "").strip()
     if not vraag:
         raise HTTPException(400, "Typ eerst je vraag.")
+    _ai_rem(user.id, "mascotte")
     if len(vraag) > MASCOTTE_MAX_TEKENS:
         raise HTTPException(400, f"Je vraag is te lang; hoogstens {MASCOTTE_MAX_TEKENS} tekens.")
 
@@ -10723,6 +10767,7 @@ async def race_voorzet_status(user=Depends(get_current_user), supabase: Client =
 @app.post("/api/race/voorzet")
 async def race_voorzet(item: RaceVoorzetVraag, user=Depends(get_current_user),
                        supabase: Client = Depends(get_supabase)):
+    _ai_rem(user.id, "voorzet")
     if not _heeft_alles_in_een(user.id, supabase):
         raise HTTPException(403, "De voorzet van de mascotte hoort bij het alles-in-één pakket.")
     if not item.eigen:
@@ -10862,7 +10907,8 @@ async def strava_callback(item: StravaCallback, user=Depends(get_current_user), 
     try:
         supabase.table("carboo_strava_koppelingen").upsert(record, on_conflict="user_id").execute()
     except Exception as e:
-        raise HTTPException(500, f"Opslaan fout: {str(e)}")
+        print("[FOUT-500]", f"Opslaan fout: {str(e)}")
+        raise HTTPException(500, "Opslaan fout. Probeer het later opnieuw.")
     return {"ok": True, "atleet_naam": record["atleet_naam"]}
 
 @app.get("/api/strava/status")
@@ -10929,7 +10975,8 @@ async def strava_sync(historie: bool = False, dagen: int = 7, user=Depends(get_c
     except Exception as _e:
         print(f"[strava] SYNC FOUT: {type(_e).__name__}: {_e}")
         print(_tb.format_exc())
-        raise HTTPException(500, f"Strava sync fout: {type(_e).__name__}: {str(_e)[:200]}")
+        print("[FOUT-500]", f"Strava sync fout: {type(_e).__name__}: {str(_e)[:200]}")
+        raise HTTPException(500, "Strava sync fout. Probeer het later opnieuw.")
 
 async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
     from datetime import datetime, timezone, timedelta
@@ -11173,7 +11220,8 @@ async def strava_conflict_oplos(item: StravaConflictResolve, user=Depends(get_cu
         }).execute()
         return {"ok": True, "actie": "Strava geïmporteerd"}
     except Exception as e:
-        raise HTTPException(500, f"Import fout: {str(e)}")
+        print("[FOUT-500]", f"Import fout: {str(e)}")
+        raise HTTPException(500, "Import fout. Probeer het later opnieuw.")
 
 
 # ─── GARMIN INTEGRATIE ─────────────────────────────────────────────────────────
@@ -11384,7 +11432,8 @@ async def _get_of_maak_mollie_klant(user_id: str, email: str, naam: str) -> str:
         )
         data = resp.json()
         if resp.status_code != 201:
-            raise HTTPException(500, f"Mollie customer fout: {data.get('detail')}")
+            print("[FOUT-500]", f"Mollie customer fout: {data.get('detail')}")
+            raise HTTPException(500, "Mollie customer fout. Probeer het later opnieuw.")
         customer_id = data["id"]
         supabase_admin.table("carboo_mollie_klanten").insert({
             "user_id": user_id, "mollie_customer_id": customer_id
@@ -11420,7 +11469,8 @@ async def maak_betaling(item: BetalingRequest, user=Depends(get_current_user)):
             data = resp.json()
             if resp.status_code == 201:
                 return {"checkout_url": data["_links"]["checkout"]["href"], "payment_id": data["id"]}
-            raise HTTPException(500, f"Mollie fout: {data.get('detail', 'Onbekende fout')}")
+            print("[FOUT-500]", f"Mollie fout: {data.get('detail', 'Onbekende fout')}")
+            raise HTTPException(500, "Mollie fout. Probeer het later opnieuw.")
 
     pakket = PAKKETTEN[item.pakket_id]
     prijs = get_prijs(item.pakket_id)
@@ -11449,7 +11499,8 @@ async def maak_betaling(item: BetalingRequest, user=Depends(get_current_user)):
         data = resp.json()
         if resp.status_code == 201:
             return {"checkout_url": data["_links"]["checkout"]["href"], "payment_id": data["id"]}
-        raise HTTPException(500, f"Mollie fout: {data.get('detail', 'Onbekende fout')}")
+        print("[FOUT-500]", f"Mollie fout: {data.get('detail', 'Onbekende fout')}")
+        raise HTTPException(500, "Mollie fout. Probeer het later opnieuw.")
 
 
 @app.post("/api/mollie/webhook")
@@ -11642,7 +11693,8 @@ async def abonnement_toewijzen(item: dict, user=Depends(get_current_user)):
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(500, f"Fout: {e}")
+            print("[FOUT-500]", f"Fout: {e}")
+            raise HTTPException(500, "Fout. Probeer het later opnieuw.")
 
     if not user_id:
         raise HTTPException(400, "Geef email op")
@@ -11723,6 +11775,9 @@ async def scan_koelkast(request: Request, user=Depends(get_current_user), supaba
     media_type = body.get("media_type", "image/jpeg")
     if not image_data:
         raise HTTPException(400, "Geen afbeelding ontvangen")
+    if len(image_data) > _MAX_BEELD:
+        raise HTTPException(413, "De foto is te groot.")
+    _ai_rem(user.id, "koelkast")
     if media_type not in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
         media_type = "image/jpeg"
 
@@ -11769,4 +11824,5 @@ async def scan_koelkast(request: Request, user=Depends(get_current_user), supaba
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Koelkastscan fout: {type(e).__name__}: {str(e)[:200]}")
+        print("[FOUT-500]", f"Koelkastscan fout: {type(e).__name__}: {str(e)[:200]}")
+        raise HTTPException(500, "Koelkastscan fout. Probeer het later opnieuw.")
