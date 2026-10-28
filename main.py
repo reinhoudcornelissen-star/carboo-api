@@ -12074,3 +12074,337 @@ def _garmin_wis_data(user_id: str):
     supabase_admin.table("carboo_garmin_activiteiten").delete().eq("user_id", user_id).execute()
     supabase_admin.table("carboo_garmin_gezondheid").delete().eq("user_id", user_id).execute()
     supabase_admin.table("fuelc_trainingen").delete().eq("user_id", user_id).eq("bron", "garmin").execute()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GARMIN PUSH (GARMIN-PUSH-V1) — Garmin duwt activiteiten en dagwaarden
+# ═══════════════════════════════════════════════════════════════════════════
+# In het Garmin-portaal staat per gegevenssoort één adres:
+#   https://api.carboo.app/api/garmin/push/<GARMIN_PUSH_SECRET>
+# Garmin ondertekent niets; het geheim in het pad is de enige controle.
+# We antwoorden meteen 200 en verwerken op de achtergrond, zoals bij Strava.
+# Vorm van een bericht: {"activities": [ {...}, ... ]}, {"dailies": [...]}, …
+# Elk item draagt userId (Garmin's id), waarmee we de koppeling vinden.
+
+GARMIN_PUSH_SECRET = os.getenv("GARMIN_PUSH_SECRET", "")
+_GARMIN_MAX_FIT = 25 * 1024 * 1024
+
+# Garmin activityType -> Carboo-sportnaam (zelfde namen als bij Strava).
+# Wat er niet in staat, valt terug op een woordregel; wat daar ook niet
+# past (yoga, golf, …) wordt genegeerd, zoals bij Strava.
+GARMIN_TYPE_NL = {
+    "RUNNING": "Lopen", "STREET_RUNNING": "Lopen", "TRACK_RUNNING": "Lopen",
+    "TRAIL_RUNNING": "Trail", "TREADMILL_RUNNING": "Indoor lopen",
+    "INDOOR_RUNNING": "Indoor lopen", "VIRTUAL_RUN": "Indoor lopen",
+    "CYCLING": "Fietsen", "ROAD_BIKING": "Fietsen", "CYCLOCROSS": "Fietsen",
+    "INDOOR_CYCLING": "Indoor fietsen", "VIRTUAL_RIDE": "Indoor fietsen",
+    "MOUNTAIN_BIKING": "Mountainbiken", "GRAVEL_CYCLING": "Gravel",
+    "E_BIKE_FITNESS": "E-bike", "E_BIKE_MOUNTAIN": "E-bike",
+    "SWIMMING": "Zwemmen", "LAP_SWIMMING": "Zwemmen", "OPEN_WATER_SWIMMING": "Zwemmen",
+    "MULTI_SPORT": "Triatlon", "TRIATHLON": "Triatlon",
+    "STRENGTH_TRAINING": "Krachttraining", "HIIT": "Crossfit",
+    "CARDIO": "Workout", "INDOOR_CARDIO": "Workout", "FITNESS_EQUIPMENT": "Workout",
+    "ELLIPTICAL": "Crosstrainer", "ROWING": "Roeien", "INDOOR_ROWING": "Roeien",
+    "STAIR_CLIMBING": "Stairs", "HIKING": "Wandeling", "WALKING": "Wandeling",
+}
+_GARMIN_WOORDEN = [("RUNNING", "Lopen"), ("RUN", "Lopen"), ("CYCLING", "Fietsen"), ("BIKING", "Fietsen"),
+                   ("BIKE", "Fietsen"), ("SWIM", "Zwemmen"), ("ROWING", "Roeien"), ("HIKING", "Wandeling"),
+                   ("WALKING", "Wandeling"), ("STRENGTH", "Krachttraining")]
+
+
+def _garmin_sport_nl(activity_type) -> str | None:
+    t = str(activity_type or "").strip().upper()
+    if not t:
+        return None
+    if t in GARMIN_TYPE_NL:
+        return GARMIN_TYPE_NL[t]
+    for woord, nl in _GARMIN_WOORDEN:
+        if woord in t:
+            return nl
+    return None
+
+
+def _garmin_lokaal(item: dict, veld: str = "startTimeInSeconds", offset_veld: str = "startTimeOffsetInSeconds"):
+    """Lokale datum en uur uit Garmin's UTC-seconden plus offset.
+    Geeft (datum 'YYYY-MM-DD', uur 'HH:MM') of (None, None)."""
+    from datetime import datetime, timezone, timedelta
+    s = item.get(veld)
+    if s is None:
+        return None, None
+    try:
+        lokaal = datetime.fromtimestamp(int(s), tz=timezone.utc) + timedelta(seconds=int(item.get(offset_veld) or 0))
+    except (TypeError, ValueError, OverflowError):
+        return None, None
+    return lokaal.strftime("%Y-%m-%d"), lokaal.strftime("%H:%M")
+
+
+def _garmin_datum(item: dict) -> str | None:
+    """calendarDate, anders uit start- of meettijd."""
+    cd = item.get("calendarDate")
+    if cd:
+        return str(cd)[:10]
+    d, _ = _garmin_lokaal(item)
+    if d:
+        return d
+    d, _ = _garmin_lokaal(item, "measurementTimeInSeconds", "measurementTimeOffsetInSeconds")
+    return d
+
+
+def _garmin_training_payload(user_id: str, a: dict) -> dict | None:
+    """Zet een Garmin-samenvatting om naar een rij voor fuelc_trainingen.
+    None als de sport niet past of de tijd ontbreekt."""
+    sport_nl = _garmin_sport_nl(a.get("activityType"))
+    datum, starttijd = _garmin_lokaal(a)
+    gid = a.get("activityId") or a.get("summaryId")
+    if not sport_nl or not datum or gid is None:
+        return None
+    duur_min = round((a.get("durationInSeconds") or 0) / 60)
+    kcal = a.get("activeKilocalories")
+    kcal = round(kcal) if kcal else round(duur_min * 8)
+    rij = {
+        "user_id": user_id, "datum": datum,
+        "sport": sport_nl, "duur_min": duur_min,
+        "kcal_verbranding": kcal, "bron": "garmin",
+        "garmin_activity_id": str(gid),
+        "naam": a.get("activityName") or sport_nl, "starttijd": starttijd or "07:00",
+    }
+    afstand = a.get("distanceInMeters")
+    if afstand:
+        rij["afstand_km"] = round(float(afstand) / 1000, 2)
+    return rij
+
+
+def _garmin_zelfde_training(rij: dict, bestaande: list) -> dict | None:
+    """Dezelfde sessie die al via Strava of met de hand in Carboo staat:
+    zelfde dag, start binnen 5 minuten, duur binnen 15%. Dan niet dubbel."""
+    def _min(t):
+        try:
+            u, m = str(t or "07:00").split(":")[:2]
+            return int(u) * 60 + int(m)
+        except ValueError:
+            return None
+    s = _min(rij.get("starttijd"))
+    for b in bestaande:
+        if b.get("bron") == "garmin":
+            continue
+        bs = _min(b.get("starttijd"))
+        if s is None or bs is None or abs(s - bs) > 5:
+            continue
+        d1, d2 = rij.get("duur_min") or 0, b.get("duur_min") or 0
+        if max(d1, d2) == 0 or abs(d1 - d2) <= 0.15 * max(d1, d2):
+            return b
+    return None
+
+
+def _garmin_koppeling_bij(garmin_user_id) -> dict | None:
+    if not garmin_user_id:
+        return None
+    r = supabase_admin.table("carboo_garmin_koppelingen").select("*").eq("garmin_user_id", str(garmin_user_id)).execute()
+    return r.data[0] if r.data else None
+
+
+async def _garmin_haal_callback(url: str, user_id: str):
+    """Sommige berichten zijn een 'ping' met alleen een callbackURL; dan
+    halen we de inhoud zelf op. Alleen bij Garmin zelf, over https."""
+    from urllib.parse import urlparse
+    u = urlparse(url or "")
+    if u.scheme != "https" or u.netloc != "apis.garmin.com":
+        print(f"[garmin-push] callbackURL geweigerd: {u.netloc}")
+        return None
+    _, token = await _garmin_toegang(user_id)
+    if not token:
+        return None
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.get(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+    if r.status_code != 200:
+        print(f"[garmin-push] callbackURL gaf {r.status_code}")
+        return None
+    return r.json()
+
+
+_GARMIN_DAILIES_VELDEN = ["restingHeartRateInBeatsPerMinute", "averageStressLevel", "maxStressLevel",
+                          "bodyBatteryChargedValue", "bodyBatteryDrainedValue", "bodyBatteryHighestValue",
+                          "bodyBatteryLowestValue", "steps", "activeKilocalories", "bmrKilocalories",
+                          "distanceInMeters", "activeTimeInSeconds", "moderateIntensityDurationInSeconds",
+                          "vigorousIntensityDurationInSeconds", "minHeartRateInBeatsPerMinute",
+                          "maxHeartRateInBeatsPerMinute", "averageHeartRateInBeatsPerMinute"]
+_GARMIN_SLEEPS_VELDEN = ["durationInSeconds", "deepSleepDurationInSeconds", "lightSleepDurationInSeconds",
+                         "remSleepInSeconds", "awakeDurationInSeconds", "startTimeInSeconds",
+                         "startTimeOffsetInSeconds", "validation", "overallSleepScore"]
+_GARMIN_HRV_VELDEN = ["lastNightAvg", "lastNight5MinHigh", "startTimeInSeconds"]
+_GARMIN_METRICS_VELDEN = ["vo2Max", "vo2MaxCycling", "fitnessAge"]
+_GARMIN_BODY_VELDEN = ["weightInGrams", "bodyFatInPercent", "bodyMassIndex", "muscleMassInGrams"]
+_GARMIN_GEZONDHEID = {"dailies": _GARMIN_DAILIES_VELDEN, "sleeps": _GARMIN_SLEEPS_VELDEN, "hrv": _GARMIN_HRV_VELDEN,
+                      "userMetrics": _GARMIN_METRICS_VELDEN, "bodyComps": _GARMIN_BODY_VELDEN}
+
+
+def _garmin_gezondheid_waarden(soort: str, item: dict) -> dict:
+    uit = {}
+    for v in _GARMIN_GEZONDHEID.get(soort, []):
+        w = item.get(v)
+        if isinstance(w, dict) and "value" in w:   # overallSleepScore komt als {"value": 78, ...}
+            w = w.get("value")
+        if w is not None and not isinstance(w, (dict, list)):
+            uit[v] = w
+    return uit
+
+
+async def _garmin_activiteit_verwerk(item: dict, koppeling: dict):
+    user_id = koppeling["user_id"]
+    a = item.get("summary") if isinstance(item.get("summary"), dict) else item
+    gid = a.get("activityId") or a.get("summaryId") or item.get("activityId") or item.get("summaryId")
+    if gid is None:
+        return
+    gid = str(gid)
+    datum, _ = _garmin_lokaal(a)
+    from datetime import datetime, timezone
+    start_op = None
+    if a.get("startTimeInSeconds") is not None:
+        start_op = datetime.fromtimestamp(int(a["startTimeInSeconds"]), tz=timezone.utc).isoformat()
+    detail = {
+        "user_id": user_id, "garmin_activity_id": gid,
+        "naam": a.get("activityName"), "soort": a.get("activityType"),
+        "start_op": start_op, "duur_s": a.get("durationInSeconds"),
+        "afstand_m": a.get("distanceInMeters"), "kcal": a.get("activeKilocalories"),
+        "gem_hartslag": a.get("averageHeartRateInBeatsPerMinute"),
+        "max_hartslag": a.get("maxHeartRateInBeatsPerMinute"),
+        "gem_vermogen_w": a.get("averagePowerInWatts") or a.get("averageBikePowerInWatts"),
+        "toestel": a.get("deviceName"), "handmatig": bool(a.get("manual", False)),
+    }
+    detail = {k: v for k, v in detail.items() if v is not None}
+    # Training in Carboo (zelfde logica als Strava, plus dubbelcontrole)
+    rij = _garmin_training_payload(user_id, a)
+    if rij:
+        bestaand = supabase_admin.table("fuelc_trainingen").select("id").eq("user_id", user_id).eq("garmin_activity_id", gid).execute()
+        if bestaand.data:
+            supabase_admin.table("fuelc_trainingen").update(rij).eq("id", bestaand.data[0]["id"]).execute()
+            detail["training_id"] = bestaand.data[0]["id"]
+        else:
+            zelfde_dag = supabase_admin.table("fuelc_trainingen").select("id,bron,starttijd,duur_min").eq("user_id", user_id).eq("datum", rij["datum"]).execute()
+            dubbel = _garmin_zelfde_training(rij, zelfde_dag.data or [])
+            if dubbel:
+                detail["training_id"] = dubbel["id"]
+                print(f"[garmin-push] activiteit {gid} is al bekend via {dubbel.get('bron')}; niet dubbel")
+            else:
+                ins = supabase_admin.table("fuelc_trainingen").insert(rij).execute()
+                if ins.data:
+                    detail["training_id"] = ins.data[0]["id"]
+                print(f"[garmin-push] activiteit {gid} geimporteerd ({rij['sport']}, {rij['duur_min']} min)")
+    else:
+        print(f"[garmin-push] activiteit {gid} geen training ({a.get('activityType')})")
+    supabase_admin.table("carboo_garmin_activiteiten").upsert(detail, on_conflict="user_id,garmin_activity_id").execute()
+
+
+async def _garmin_bestand_verwerk(item: dict, koppeling: dict):
+    """activityFiles: het .fit-bestand ophalen en in de bucket zetten."""
+    if str(item.get("fileType") or "").upper() != "FIT":
+        return
+    user_id = koppeling["user_id"]
+    gid = item.get("activityId") or item.get("summaryId")
+    url = item.get("callbackURL")
+    if gid is None or not url:
+        return
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    if u.scheme != "https" or u.netloc != "apis.garmin.com":
+        print(f"[garmin-push] bestand-URL geweigerd: {u.netloc}")
+        return
+    _, token = await _garmin_toegang(user_id)
+    if not token:
+        return
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+    if r.status_code != 200 or not r.content:
+        print(f"[garmin-push] bestand {gid} ophalen gaf {r.status_code}")
+        return
+    if len(r.content) > _GARMIN_MAX_FIT:
+        print(f"[garmin-push] bestand {gid} te groot ({len(r.content)} bytes)")
+        return
+    pad = f"{user_id}/{gid}.fit"
+    supabase_admin.storage.from_("garmin-activiteiten").upload(
+        pad, r.content, {"content-type": "application/octet-stream", "upsert": "true"})
+    supabase_admin.table("carboo_garmin_activiteiten").upsert({
+        "user_id": user_id, "garmin_activity_id": str(gid),
+        "bestand_pad": pad, "bestand_bytes": len(r.content),
+    }, on_conflict="user_id,garmin_activity_id").execute()
+    print(f"[garmin-push] bestand {gid} bewaard ({len(r.content)} bytes)")
+
+
+def _garmin_gezondheid_verwerk(soort: str, item: dict, koppeling: dict):
+    datum = _garmin_datum(item)
+    if not datum:
+        return
+    waarden = _garmin_gezondheid_waarden(soort, item)
+    if not waarden:
+        return
+    supabase_admin.table("carboo_garmin_gezondheid").upsert({
+        "user_id": koppeling["user_id"], "soort": soort, "datum": datum,
+        "waarden": waarden, "ontvangen_op": _garmin_nu().isoformat(),
+    }, on_conflict="user_id,soort,datum").execute()
+
+
+async def _garmin_push_verwerk(bericht: dict):
+    """Eén bericht van Garmin, op de achtergrond. Fouten per item worden
+    gelogd; de rest gaat door."""
+    for soort, items in (bericht or {}).items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                koppeling = _garmin_koppeling_bij(item.get("userId"))
+                if not koppeling:
+                    print(f"[garmin-push] {soort}: geen koppeling voor userId")
+                    continue
+                supabase_admin.table("carboo_garmin_koppelingen").update(
+                    {"laatste_push_op": _garmin_nu().isoformat()}).eq("user_id", koppeling["user_id"]).execute()
+                if soort == "deregistrations":
+                    # De sporter trok Carboo in bij Garmin: sleutels en Garmin-data weg
+                    supabase_admin.table("carboo_garmin_koppelingen").delete().eq("user_id", koppeling["user_id"]).execute()
+                    _garmin_wis_data(koppeling["user_id"])
+                    print(f"[garmin-push] deregistratie verwerkt voor user {koppeling['user_id']}")
+                    continue
+                if soort == "userPermissionsChange":
+                    rechten = item.get("permissions") or []
+                    supabase_admin.table("carboo_garmin_koppelingen").update(
+                        {"rechten": [str(x) for x in rechten]}).eq("user_id", koppeling["user_id"]).execute()
+                    continue
+                if soort == "activityFiles":
+                    await _garmin_bestand_verwerk(item, koppeling)
+                    continue
+                # Ping zonder inhoud: eerst ophalen
+                inhoud = [item]
+                heeft_inhoud = item.get("startTimeInSeconds") is not None or item.get("calendarDate") or item.get("summary")
+                if item.get("callbackURL") and not heeft_inhoud:
+                    opgehaald = await _garmin_haal_callback(item["callbackURL"], koppeling["user_id"])
+                    inhoud = opgehaald if isinstance(opgehaald, list) else (opgehaald or {}).get(soort) or []
+                for x in inhoud:
+                    if not isinstance(x, dict):
+                        continue
+                    if soort in ("activities", "manuallyUpdatedActivities", "activityDetails"):
+                        await _garmin_activiteit_verwerk(x, koppeling)
+                    elif soort in _GARMIN_GEZONDHEID:
+                        _garmin_gezondheid_verwerk(soort, x, koppeling)
+                    else:
+                        print(f"[garmin-push] {soort} genegeerd")
+            except Exception as e:
+                import traceback as _tb
+                print(f"[garmin-push] FOUT bij {soort}: {type(e).__name__}: {str(e)[:200]}")
+                print(_tb.format_exc()[-800:])
+
+
+@app.post("/api/garmin/push/{geheim}")
+async def garmin_push(geheim: str, request: Request, background_tasks: BackgroundTasks):
+    """Ontvangt de berichten van Garmin. Verkeerd geheim: 404, alsof het pad
+    niet bestaat. Antwoordt meteen 200 en verwerkt op de achtergrond."""
+    if not GARMIN_PUSH_SECRET or not secrets.compare_digest(geheim, GARMIN_PUSH_SECRET):
+        raise HTTPException(404, "Not Found")
+    try:
+        bericht = await request.json()
+    except Exception:
+        raise HTTPException(400, "Geen geldige JSON")
+    if not isinstance(bericht, dict):
+        raise HTTPException(400, "Geen geldige JSON")
+    background_tasks.add_task(_garmin_push_verwerk, bericht)
+    return {"ok": True}
