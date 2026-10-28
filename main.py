@@ -231,6 +231,7 @@ class TrainingData(BaseModel):
     zone_verdeling: Optional[str] = None
     notitie: Optional[str] = None
     starttijd: Optional[str] = "07:00"
+    naam: Optional[str] = None   # BOUWER-V1 — eigen naam, zoals "5 x 4 min drempel"
 
 class DagboekItem(BaseModel):
     # DAGBOEK-TRAINING-ID-V1 — koppelt het item aan de training waaronder het gelogd is
@@ -361,13 +362,21 @@ async def verwijder_training(training_id: str, user=Depends(get_current_user), s
 # TRAINING-VERPLAATSEN-V1
 @app.patch("/api/fuelc/trainingen/{training_id}")
 async def verplaats_training(training_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    """Verplaats een training naar een andere datum. Alleen de datum wijzigt;
-    sport, segmenten en kcal blijven staan zoals ze gepland zijn.
-    Filtert op user_id, dus een klant kan alleen zijn eigen trainingen verzetten."""
-    datum = (data.get("datum") or "").strip()
-    if not datum:
-        raise HTTPException(400, "Datum is verplicht")
-    r = supabase.table("fuelc_trainingen").update({"datum": datum}).eq("id", training_id).eq("user_id", user.id).execute()
+    """Training wijzigen. Oorspronkelijk alleen de datum (verslepen); sinds
+    BOUWER-V1 ook naam, sport, duur, afstand, kcal, opbouw, notitie en startuur,
+    zodat je een geplande training in de bouwer kan aanpassen. Alleen die
+    velden; de rest (bron, Strava/Garmin-id, user_id) blijft onaantastbaar.
+    Filtert op user_id, dus een klant kan alleen zijn eigen trainingen wijzigen."""
+    toegestaan = {"datum", "naam", "sport", "duur_min", "afstand_km", "kcal_verbranding",
+                  "zone_verdeling", "notitie", "starttijd"}
+    update = {k: v for k, v in (data or {}).items() if k in toegestaan}
+    if "datum" in update:
+        update["datum"] = (update.get("datum") or "").strip()
+        if not update["datum"]:
+            raise HTTPException(400, "Datum is verplicht")
+    if not update:
+        raise HTTPException(400, "Niets om te wijzigen")
+    r = supabase.table("fuelc_trainingen").update(update).eq("id", training_id).eq("user_id", user.id).execute()
     if not r.data:
         raise HTTPException(404, "Training niet gevonden")
     return {"status": "verplaatst", "datum": datum}
