@@ -10866,7 +10866,7 @@ async def strava_auth_url(user=Depends(get_current_user)):
     """Geef de Strava OAuth URL terug om naartoe te redirecten."""
     if not STRAVA_CLIENT_ID:
         raise HTTPException(500, "Strava niet geconfigureerd")
-    redirect_uri = f"{APP_URL}/app/fueling"
+    redirect_uri = f"{APP_URL}/app/training"   # TRAINING-MODULE-V1: Strava zit nu op de Training-pagina
     scope = "read,activity:read_all"
     state = str(user.id)  # zodat we user kunnen identificeren in callback
     url = (
@@ -11826,3 +11826,251 @@ async def scan_koelkast(request: Request, user=Depends(get_current_user), supaba
     except Exception as e:
         print("[FOUT-500]", f"Koelkastscan fout: {type(e).__name__}: {str(e)[:200]}")
         raise HTTPException(500, "Koelkastscan fout. Probeer het later opnieuw.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GARMIN CONNECT (GARMIN-OAUTH-V1) — koppelen via OAuth2 PKCE
+# ═══════════════════════════════════════════════════════════════════════════
+# De sporter koppelt zelf: toestemmingsscherm in de app -> /api/garmin/start
+# maakt een state en een PKCE-verifier -> Garmin -> /api/garmin/callback
+# wisselt de code om en stuurt de sporter terug naar /app/training.
+# Toegangssleutels staan versleuteld (AES-256-GCM) in carboo_garmin_koppelingen;
+# de sleutel daarvoor staat alleen in de omgeving (GARMIN_TOKEN_KEY, 32 bytes
+# base64). Zonder GARMIN_CLIENT_ID/SECRET/TOKEN_KEY doet dit blok niets en
+# blijft de rest van de app gewoon werken. Opzet volgt test2perform.
+
+import base64 as _b64
+
+GARMIN_CLIENT_ID = os.getenv("GARMIN_CLIENT_ID", "")
+GARMIN_CLIENT_SECRET = os.getenv("GARMIN_CLIENT_SECRET", "")
+GARMIN_TOKEN_KEY = os.getenv("GARMIN_TOKEN_KEY", "")
+GARMIN_REDIRECT_URI = os.getenv("GARMIN_REDIRECT_URI", "https://api.carboo.app/api/garmin/callback")
+GARMIN_AUTH_URL = "https://connect.garmin.com/oauth2Confirm"
+GARMIN_TOKEN_URL = "https://diauth.garmin.com/di-oauth2-service/oauth/token"
+GARMIN_API = "https://apis.garmin.com/wellness-api/rest"
+_GARMIN_VERNIEUW_MARGE_S = 600       # token vernieuwen als hij binnen 10 min verloopt
+_GARMIN_POGING_GELDIG_S = 900        # een koppelpoging is 15 min geldig
+
+
+def _garmin_aan() -> bool:
+    return bool(GARMIN_CLIENT_ID and GARMIN_CLIENT_SECRET and GARMIN_TOKEN_KEY)
+
+
+def _garmin_sleutel() -> bytes:
+    try:
+        k = _b64.b64decode(GARMIN_TOKEN_KEY)
+    except Exception:
+        k = b""
+    if len(k) != 32:
+        raise HTTPException(500, "Garmin niet geconfigureerd")
+    return k
+
+
+def _garmin_versleutel(tekst: str) -> str:
+    """'v1:' + base64(nonce12 + ciphertext+tag)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    nonce = os.urandom(12)
+    ct = AESGCM(_garmin_sleutel()).encrypt(nonce, tekst.encode("utf-8"), None)
+    return "v1:" + _b64.b64encode(nonce + ct).decode("ascii")
+
+
+def _garmin_ontsleutel(blob: str) -> str:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    if not blob or not blob.startswith("v1:"):
+        raise HTTPException(500, "Garmin-sleutel onleesbaar")
+    raw = _b64.b64decode(blob[3:])
+    return AESGCM(_garmin_sleutel()).decrypt(raw[:12], raw[12:], None).decode("utf-8")
+
+
+def _garmin_nu():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
+def _garmin_pkce():
+    """verifier + S256-challenge, zoals OAuth2PKCE van Garmin voorschrijft."""
+    verifier = secrets.token_urlsafe(64)[:96]
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = _b64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return verifier, challenge
+
+
+async def _garmin_token_post(data: dict) -> dict:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(GARMIN_TOKEN_URL, data={
+            "client_id": GARMIN_CLIENT_ID,
+            "client_secret": GARMIN_CLIENT_SECRET,
+            **data,
+        }, headers={"Accept": "application/json"})
+    if r.status_code != 200:
+        print(f"[garmin] token fout {r.status_code}: {r.text[:200]}")
+        raise HTTPException(502, "Garmin gaf geen toegang. Probeer het later opnieuw.")
+    return r.json()
+
+
+def _garmin_tokens_opslaan(user_id: str, tokens: dict, extra: dict | None = None) -> dict:
+    """Zet de tokens versleuteld in de koppeling (insert of update)."""
+    from datetime import timedelta
+    nu = _garmin_nu()
+    rij = {
+        "user_id": user_id,
+        "access_token": _garmin_versleutel(tokens["access_token"]),
+        "refresh_token": _garmin_versleutel(tokens["refresh_token"]),
+        "access_verloopt_op": (nu + timedelta(seconds=int(tokens.get("expires_in") or 86400))).isoformat(),
+        "refresh_verloopt_op": (nu + timedelta(seconds=int(tokens["refresh_token_expires_in"]))).isoformat()
+            if tokens.get("refresh_token_expires_in") else None,
+        "bijgewerkt_op": nu.isoformat(),
+    }
+    if extra:
+        rij.update(extra)
+    supabase_admin.table("carboo_garmin_koppelingen").upsert(rij, on_conflict="user_id").execute()
+    return rij
+
+
+async def _garmin_toegang(user_id: str) -> tuple:
+    """Geeft (koppeling, geldige access token). Vernieuwt de token als hij
+    (bijna) verlopen is. None, None als er geen koppeling is."""
+    from datetime import datetime
+    r = supabase_admin.table("carboo_garmin_koppelingen").select("*").eq("user_id", user_id).execute()
+    if not r.data:
+        return None, None
+    k = r.data[0]
+    verloopt = datetime.fromisoformat(k["access_verloopt_op"].replace("Z", "+00:00"))
+    if (verloopt - _garmin_nu()).total_seconds() > _GARMIN_VERNIEUW_MARGE_S:
+        return k, _garmin_ontsleutel(k["access_token"])
+    tokens = await _garmin_token_post({
+        "grant_type": "refresh_token",
+        "refresh_token": _garmin_ontsleutel(k["refresh_token"]),
+    })
+    _garmin_tokens_opslaan(user_id, tokens)
+    return k, tokens["access_token"]
+
+
+@app.get("/api/garmin/status")
+async def garmin_status(user=Depends(get_current_user)):
+    if not _garmin_aan():
+        return {"beschikbaar": False, "gekoppeld": False}
+    r = supabase_admin.table("carboo_garmin_koppelingen").select(
+        "gekoppeld_op,toestemming_op,laatste_push_op,rechten").eq("user_id", user.id).execute()
+    if not r.data:
+        return {"beschikbaar": True, "gekoppeld": False}
+    k = r.data[0]
+    return {"beschikbaar": True, "gekoppeld": True, "gekoppeld_op": k.get("gekoppeld_op"),
+            "laatste_push_op": k.get("laatste_push_op"), "rechten": k.get("rechten") or []}
+
+
+class GarminStart(BaseModel):
+    toestemming: bool = False
+
+
+@app.post("/api/garmin/start")
+async def garmin_start(item: GarminStart, user=Depends(get_current_user)):
+    """Na het toestemmingsscherm: maak state + verifier en geef de Garmin-URL."""
+    if not _garmin_aan():
+        raise HTTPException(503, "Garmin-koppeling is nog niet beschikbaar")
+    if not item.toestemming:
+        raise HTTPException(400, "Toestemming is nodig om te koppelen")
+    verifier, challenge = _garmin_pkce()
+    state = secrets.token_urlsafe(32)
+    supabase_admin.table("carboo_garmin_koppelpogingen").insert({
+        "state": state,
+        "user_id": user.id,
+        "code_verifier": _garmin_versleutel(verifier),
+    }).execute()
+    from urllib.parse import urlencode
+    url = GARMIN_AUTH_URL + "?" + urlencode({
+        "response_type": "code",
+        "client_id": GARMIN_CLIENT_ID,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "redirect_uri": GARMIN_REDIRECT_URI,
+        "state": state,
+    })
+    return {"auth_url": url}
+
+
+@app.get("/api/garmin/callback")
+async def garmin_callback(code: str = "", state: str = "", error: str = ""):
+    """Garmin stuurt de sporter hierheen. Geen login: de state (eenmalig,
+    15 min geldig) bewijst wie het is. Daarna terug naar de app."""
+    from fastapi.responses import RedirectResponse
+    from datetime import datetime
+    terug = f"{APP_URL}/app/training?garmin="
+    if error or not code or not state:
+        return RedirectResponse(terug + "geweigerd", status_code=302)
+    p = supabase_admin.table("carboo_garmin_koppelpogingen").select("*").eq("state", state).execute()
+    if not p.data or p.data[0].get("gebruikt_op"):
+        return RedirectResponse(terug + "fout", status_code=302)
+    poging = p.data[0]
+    gestart = datetime.fromisoformat(poging["aangemaakt_op"].replace("Z", "+00:00"))
+    if (_garmin_nu() - gestart).total_seconds() > _GARMIN_POGING_GELDIG_S:
+        return RedirectResponse(terug + "verlopen", status_code=302)
+    # eenmalig: eerst afstempelen, dan pas inwisselen
+    supabase_admin.table("carboo_garmin_koppelpogingen").update({
+        "gebruikt_op": _garmin_nu().isoformat(), "code_verifier": "gebruikt",
+    }).eq("state", state).execute()
+    try:
+        tokens = await _garmin_token_post({
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": _garmin_ontsleutel(poging["code_verifier"]),
+            "redirect_uri": GARMIN_REDIRECT_URI,
+        })
+        kop = {"Authorization": f"Bearer {tokens['access_token']}", "Accept": "application/json"}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            u = await client.get(f"{GARMIN_API}/user/id", headers=kop)
+            garmin_user_id = str((u.json() or {}).get("userId") or "") if u.status_code == 200 else ""
+            pr = await client.get(f"{GARMIN_API}/user/permissions", headers=kop)
+            rechten = []
+            if pr.status_code == 200:
+                body = pr.json()
+                rechten = body if isinstance(body, list) else (body or {}).get("permissions") or []
+        if not garmin_user_id:
+            raise HTTPException(502, "Garmin gaf geen gebruikers-id")
+        _garmin_tokens_opslaan(poging["user_id"], tokens, {
+            "garmin_user_id": garmin_user_id,
+            "rechten": [str(x) for x in rechten],
+            "toestemming_op": poging["aangemaakt_op"],
+            "gekoppeld_op": _garmin_nu().isoformat(),
+        })
+    except Exception as e:
+        print(f"[garmin] callback fout: {type(e).__name__}: {str(e)[:200]}")
+        return RedirectResponse(terug + "fout", status_code=302)
+    return RedirectResponse(terug + "ok", status_code=302)
+
+
+@app.delete("/api/garmin/koppel")
+async def garmin_ontkoppel(wis_data: bool = False, user=Depends(get_current_user)):
+    """Koppeling verbreken: afmelden bij Garmin en de sleutels wissen. De
+    trainingen en gezondheidsgegevens blijven staan, tenzij wis_data=true
+    (dan verdwijnen ook de Garmin-activiteiten, dagwaarden en .fit-bestanden)."""
+    k, token = await _garmin_toegang(user.id)
+    if k and token:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.delete(f"{GARMIN_API}/user/registration",
+                                        headers={"Authorization": f"Bearer {token}"})
+            if r.status_code not in (200, 204, 404):
+                print(f"[garmin] afmelden gaf {r.status_code}")
+        except Exception as e:
+            print(f"[garmin] afmelden mislukt: {type(e).__name__}")
+    supabase_admin.table("carboo_garmin_koppelingen").delete().eq("user_id", user.id).execute()
+    supabase_admin.table("carboo_garmin_koppelpogingen").delete().eq("user_id", user.id).execute()
+    if wis_data:
+        _garmin_wis_data(user.id)
+    return {"ok": True}
+
+
+def _garmin_wis_data(user_id: str):
+    """Alles wat via Garmin binnenkwam weg: bestanden, activiteiten, dagwaarden,
+    en de trainingen met bron garmin."""
+    try:
+        a = supabase_admin.table("carboo_garmin_activiteiten").select("bestand_pad").eq("user_id", user_id).execute()
+        paden = [x["bestand_pad"] for x in (a.data or []) if x.get("bestand_pad")]
+        if paden:
+            supabase_admin.storage.from_("garmin-activiteiten").remove(paden)
+    except Exception as e:
+        print(f"[garmin] bestanden wissen mislukt: {type(e).__name__}")
+    supabase_admin.table("carboo_garmin_activiteiten").delete().eq("user_id", user_id).execute()
+    supabase_admin.table("carboo_garmin_gezondheid").delete().eq("user_id", user_id).execute()
+    supabase_admin.table("fuelc_trainingen").delete().eq("user_id", user_id).eq("bron", "garmin").execute()
