@@ -55,3 +55,10 @@ for slecht in ({"sport": "Zwemmen", "zone_verdeling": json.dumps(segs)}, {"sport
     except ValueError as e:
         print("geweigerd:", str(e)[:60])
 print("ALLES OK")
+
+# SCHEDULE-ANTWOORD-V1 — Garmin geeft bij het inplannen een kaal nummer terug
+assert main._garmin_id_uit(123456, "scheduleId") == 123456
+assert main._garmin_id_uit("123456", "scheduleId") == 123456
+assert main._garmin_id_uit({"workoutId": 77, "sport": "RUNNING"}, "workoutId") == 77
+assert main._garmin_id_uit({}, "workoutId") is None and main._garmin_id_uit(None, "x") is None
+print("id-antwoord ok")

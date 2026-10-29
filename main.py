@@ -12789,6 +12789,16 @@ async def _garmin_api(methode: str, url: str, token: str, body=None):
         return {}
 
 
+def _garmin_id_uit(uit, sleutel):
+    """Garmin geeft bij het aanmaken soms een JSON-object terug, soms een kaal
+    nummer (de schedule-route doet dat). Beide moeten werken."""
+    if isinstance(uit, dict):
+        return uit.get(sleutel)
+    if isinstance(uit, (int, str)) and str(uit).strip().isdigit():
+        return int(uit)
+    return None
+
+
 @app.post("/api/garmin/workout/{training_id}")
 async def garmin_workout_sturen(training_id: str, user=Depends(get_current_user)):
     """Zet de geplande training als workout op de Garmin-kalender van de sporter
@@ -12815,16 +12825,19 @@ async def garmin_workout_sturen(training_id: str, user=Depends(get_current_user)
         await _garmin_api("PUT", f"{GARMIN_WORKOUT}/{wid}", token, body)
     else:
         uit = await _garmin_api("POST", GARMIN_WORKOUT_MAAK, token, body)
-        wid = uit.get("workoutId")
+        wid = _garmin_id_uit(uit, "workoutId")
         if not wid:
             raise HTTPException(502, "Garmin gaf geen workout-id terug")
+        # meteen bewaren: loopt het inplannen hierna fout, dan maakt een nieuwe
+        # poging geen tweede workout bij Garmin aan
+        supabase_admin.table("fuelc_trainingen").update({"garmin_workout_id": wid}).eq("id", training_id).eq("user_id", user.id).execute()
     datum = str(tr.get("datum") or "")[:10]
     sid = tr.get("garmin_schedule_id")
     if sid:
         await _garmin_api("PUT", f"{GARMIN_SCHEDULE}/{sid}", token, {"scheduleId": sid, "workoutId": wid, "date": datum})
     else:
         uit = await _garmin_api("POST", f"{GARMIN_SCHEDULE}/", token, {"workoutId": wid, "date": datum})
-        sid = uit.get("scheduleId")
+        sid = _garmin_id_uit(uit, "scheduleId")
     supabase_admin.table("fuelc_trainingen").update({
         "garmin_workout_id": wid, "garmin_schedule_id": sid, "garmin_verstuurd_op": _garmin_nu().isoformat(),
     }).eq("id", training_id).eq("user_id", user.id).execute()
