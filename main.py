@@ -12442,3 +12442,80 @@ async def garmin_gezondheid(dagen: int = 90, user=Depends(get_current_user)):
     r = supabase_admin.table("carboo_garmin_gezondheid").select("soort,datum,waarden") \
         .eq("user_id", user.id).gte("datum", vanaf).order("datum", desc=False).execute()
     return {"rijen": r.data or [], "vanaf": vanaf}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WEDSTRIJDEN-V1 — de wedstrijdkalender van de sporter
+# ═══════════════════════════════════════════════════════════════════════════
+
+class WedstrijdData(BaseModel):
+    datum: str
+    naam: str
+    prioriteit: Optional[str] = "B"
+    sport: Optional[str] = None
+    afstand_km: Optional[float] = None
+    doel: Optional[str] = None
+    notitie: Optional[str] = None
+    rapport_id: Optional[str] = None
+
+
+def _wedstrijd_schoon(d: dict) -> dict:
+    uit = {}
+    for k in ("datum", "naam", "prioriteit", "sport", "afstand_km", "doel", "notitie", "rapport_id"):
+        if k in d:
+            uit[k] = d[k]
+    if "prioriteit" in uit and uit["prioriteit"] not in ("A", "B", "C"):
+        uit["prioriteit"] = "B"
+    if "naam" in uit:
+        uit["naam"] = str(uit["naam"] or "").strip()[:120]
+    for k in ("doel", "notitie"):
+        if k in uit and uit[k] is not None:
+            uit[k] = str(uit[k])[:500]
+    if "rapport_id" in uit and not uit["rapport_id"]:
+        uit["rapport_id"] = None
+    return uit
+
+
+@app.get("/api/wedstrijden")
+async def wedstrijden_lijst(user=Depends(get_current_user)):
+    r = supabase_admin.table("carboo_wedstrijden").select("*").eq("user_id", user.id).order("datum", desc=False).execute()
+    return {"wedstrijden": r.data or []}
+
+
+@app.post("/api/wedstrijden")
+async def wedstrijd_maak(item: WedstrijdData, user=Depends(get_current_user)):
+    data = _wedstrijd_schoon(item.dict())
+    if not data.get("naam") or not data.get("datum"):
+        raise HTTPException(400, "Naam en datum zijn verplicht")
+    data["user_id"] = user.id
+    r = supabase_admin.table("carboo_wedstrijden").insert(data).execute()
+    return {"wedstrijd": (r.data or [None])[0]}
+
+
+@app.put("/api/wedstrijden/{wedstrijd_id}")
+async def wedstrijd_wijzig(wedstrijd_id: str, data: dict, user=Depends(get_current_user)):
+    update = _wedstrijd_schoon(data or {})
+    if not update:
+        raise HTTPException(400, "Niets om te wijzigen")
+    update["bijgewerkt_op"] = _garmin_nu().isoformat()
+    r = supabase_admin.table("carboo_wedstrijden").update(update).eq("id", wedstrijd_id).eq("user_id", user.id).execute()
+    if not r.data:
+        raise HTTPException(404, "Wedstrijd niet gevonden")
+    return {"wedstrijd": r.data[0]}
+
+
+@app.delete("/api/wedstrijden/{wedstrijd_id}")
+async def wedstrijd_verwijder(wedstrijd_id: str, user=Depends(get_current_user)):
+    supabase_admin.table("carboo_wedstrijden").delete().eq("id", wedstrijd_id).eq("user_id", user.id).execute()
+    return {"ok": True}
+
+
+@app.get("/api/wedstrijden/raceplannen")
+async def wedstrijden_raceplannen(user=Depends(get_current_user)):
+    """De raceplannen van de sporter (Race-module), om een wedstrijd aan te koppelen."""
+    r = supabase_admin.table("carboo_rapporten").select("id,naam,datum,meta").eq("user_id", user.id).eq("type", "race_html").order("datum", desc=True).limit(50).execute()
+    uit = []
+    for x in r.data or []:
+        meta = x.get("meta") or {}
+        uit.append({"id": x["id"], "naam": x.get("naam") or "Raceplan", "datum": meta.get("datum") or (x.get("datum") or "")[:10], "sport": meta.get("sport")})
+    return {"raceplannen": uit}
