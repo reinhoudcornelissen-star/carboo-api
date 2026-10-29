@@ -12582,3 +12582,227 @@ async def wedstrijden_raceplannen(user=Depends(get_current_user)):
         meta = x.get("meta") or {}
         uit.append({"id": x["id"], "naam": x.get("naam") or "Raceplan", "datum": meta.get("datum") or (x.get("datum") or "")[:10], "sport": meta.get("sport")})
     return {"raceplannen": uit}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GARMIN-WORKOUT-V1 — een geplande training naar het horloge (Training API v2)
+# ═══════════════════════════════════════════════════════════════════════════
+# Bron: Garmin "Training API V2 2.0" (oktober 2026). Aanmaken: POST
+# https://apis.garmin.com/workoutportal/workout/v2; wijzigen/verwijderen:
+# PUT/DELETE https://apis.garmin.com/training-api/workout/v2/{id}; inplannen:
+# POST https://apis.garmin.com/training-api/schedule/ {workoutId, date}.
+# Eén sport per workout (RUNNING of CYCLING; zwemmen en kracht later).
+# Stappen: tijd in seconden of afstand in meter; doel = hartslagbereik,
+# vermogensbereik of tempo (m/s) uit de eigen zones; zonder zones OPEN.
+# Limiet Starter: 200 oproepen per sporter per dag; wij doen er 2 per training.
+
+GARMIN_WORKOUT_MAAK = "https://apis.garmin.com/workoutportal/workout/v2"
+GARMIN_WORKOUT = "https://apis.garmin.com/training-api/workout/v2"
+GARMIN_SCHEDULE = "https://apis.garmin.com/training-api/schedule"
+
+_GW_SPORT = {
+    "Fietsen": "CYCLING", "Indoor fietsen": "CYCLING", "Gravel": "CYCLING", "Mountainbiken": "CYCLING", "E-bike": "CYCLING",
+    "Lopen": "RUNNING", "Trail": "RUNNING", "Indoor lopen": "RUNNING",
+}
+_GW_ZONE_INTENSITEIT = {"Opwarming": "WARMUP", "Cooldown": "COOLDOWN", "Recovery": "RECOVERY", "Rust": "REST"}
+
+
+def _gw_tempo_min(v) -> float:
+    """'5.40' of '5,40' betekent 5 min 40 s per km (of per 100 m)."""
+    try:
+        g = float(str(v or "").replace(",", "."))
+    except ValueError:
+        return 0.0
+    if g <= 0:
+        return 0.0
+    hele = int(g)
+    return hele + (g - hele) * 100 / 60
+
+
+def _gw_zone_nr(zone) -> int:
+    import re as _re
+    n = int((_re.sub(r"[^0-9]", "", str(zone or "Z1")) or "1"))
+    return max(1, min(7, n))
+
+
+def _gw_doel(sport_nl: str, zones: dict, zone) -> dict:
+    """Doel voor een stap uit de eigen zones: vermogen (fietsen), tempo
+    (lopen) of hartslag; anders OPEN. Garmin wil tempo als snelheid in m/s,
+    low = traagste, high = snelste."""
+    n = _gw_zone_nr(zone)
+    leeg = {"targetType": "OPEN", "targetValue": None, "targetValueLow": None, "targetValueHigh": None, "targetValueType": None}
+    if not zones:
+        return leeg
+    van, tot = zones.get(f"z{n}_tempo_van"), zones.get(f"z{n}_tempo_tot")
+    if _GW_SPORT.get(sport_nl) == "CYCLING" and van and tot:
+        try:
+            lo, hi = sorted([float(str(van).replace(",", ".")), float(str(tot).replace(",", "."))])
+            if lo > 0:
+                return {"targetType": "POWER", "targetValue": None, "targetValueLow": round(lo), "targetValueHigh": round(hi), "targetValueType": None}
+        except ValueError:
+            pass
+    if _GW_SPORT.get(sport_nl) == "RUNNING" and van and tot:
+        a, b = _gw_tempo_min(van), _gw_tempo_min(tot)
+        if a > 0 and b > 0:
+            traag, snel = max(a, b), min(a, b)
+            return {"targetType": "PACE", "targetValue": None,
+                    "targetValueLow": round(1000 / (traag * 60), 4), "targetValueHigh": round(1000 / (snel * 60), 4), "targetValueType": None}
+    hv, ht = zones.get(f"z{n}_hs_van"), zones.get(f"z{n}_hs_tot")
+    try:
+        if hv and ht:
+            lo, hi = sorted([int(float(hv)), int(float(ht))])
+            return {"targetType": "HEART_RATE", "targetValue": None, "targetValueLow": lo, "targetValueHigh": hi, "targetValueType": None}
+    except ValueError:
+        pass
+    return leeg
+
+
+def _gw_stap(seg: dict, sport_nl: str, zones: dict, volgnr: list, intensiteit: str | None = None) -> dict:
+    naam = str(seg.get("naam") or "")
+    intens = intensiteit or _GW_ZONE_INTENSITEIT.get(naam, "ACTIVE")
+    volgnr[0] += 1
+    stap = {
+        "type": "WorkoutStep", "stepOrder": volgnr[0], "intensity": intens,
+        "description": (naam + (f" · {seg['notitie']}" if seg.get("notitie") else ""))[:512] or None,
+    }
+    afstand = seg.get("afstand_tekst")
+    meters = None
+    if afstand:
+        try:
+            getal = float(str(afstand).split(" ")[0].replace(",", "."))
+            meters = getal * 1000 if str(afstand).strip().endswith("km") else getal
+        except ValueError:
+            meters = None
+    if meters and meters > 0:
+        stap.update({"durationType": "DISTANCE", "durationValue": round(meters), "durationValueType": "METER"})
+    else:
+        stap.update({"durationType": "TIME", "durationValue": int(round(float(seg.get("duur_min") or 0) * 60)), "durationValueType": None})
+    stap.update(_gw_doel(sport_nl, zones, seg.get("zone")))
+    stap.update({"secondaryTargetType": None, "secondaryTargetValue": None, "secondaryTargetValueLow": None,
+                 "secondaryTargetValueHigh": None, "secondaryTargetValueType": None, "strokeType": None, "drillType": None,
+                 "equipmentType": None, "exerciseCategory": None, "exerciseName": None, "weightValue": None, "weightDisplayUnit": None})
+    return stap
+
+
+def _garmin_workout_json(training: dict, zones: dict | None) -> dict:
+    """Bouwt de workout-JSON voor de Training API uit een Carboo-training.
+    ValueError als de sport niet kan of er geen opbouw is."""
+    sport = _GW_SPORT.get(str(training.get("sport") or ""))
+    if not sport:
+        raise ValueError(f"Sport '{training.get('sport')}' kan nog niet naar Garmin (alleen fietsen en lopen)")
+    try:
+        segs = json.loads(training.get("zone_verdeling") or "[]")
+    except (TypeError, ValueError):
+        segs = []
+    segs = [s for s in segs if isinstance(s, dict) and not s.get("kracht")]
+    if not segs:
+        raise ValueError("Deze training heeft geen opbouw; bouw ze met blokken om ze naar Garmin te sturen")
+    volgnr = [0]
+    stappen = []
+    for seg in segs:
+        h = seg.get("herhaling")
+        if h:
+            bl = h.get("blokken") if isinstance(h.get("blokken"), list) and h.get("blokken") else [h.get("work"), h.get("recovery")]
+            bl = [b for b in bl if isinstance(b, dict)]
+            volgnr[0] += 1
+            herh = {"type": "WorkoutRepeatStep", "stepOrder": volgnr[0], "repeatType": "REPEAT_UNTIL_STEPS_CMPLT",
+                    "repeatValue": max(1, int(h.get("reps") or 1)), "skipLastRestStep": False, "steps": []}
+            for b in bl:
+                herh["steps"].append(_gw_stap(b, training.get("sport"), zones or {}, volgnr,
+                                              "RECOVERY" if str(b.get("naam")) == "Recovery" else "INTERVAL"))
+            stappen.append(herh)
+        else:
+            stappen.append(_gw_stap(seg, training.get("sport"), zones or {}, volgnr))
+    if len(stappen) > 100:
+        raise ValueError("Meer dan 100 stappen kan Garmin niet aan")
+    naam = (training.get("naam") or training.get("sport") or "Carboo")[:80]
+    return {
+        "workoutName": naam,
+        "description": (training.get("notitie") or f"Gepland in Carboo voor {training.get('datum')}")[:1024],
+        "sport": sport,
+        "poolLength": None, "poolLengthUnit": None,
+        "workoutProvider": "Carboo", "workoutSourceId": "Carboo",
+        "isSessionTransitionEnabled": False,
+        "segments": [{"segmentOrder": 1, "sport": sport, "poolLength": None, "poolLengthUnit": None,
+                      "estimatedDurationInSecs": None, "estimatedDistanceInMeters": None, "steps": stappen}],
+    }
+
+
+async def _garmin_api(methode: str, url: str, token: str, body=None):
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.request(methode, url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, json=body)
+    if r.status_code == 429:
+        raise HTTPException(429, "Garmin vraagt even te wachten (te veel oproepen)")
+    if r.status_code == 412:
+        raise HTTPException(412, "Je gaf Carboo bij Garmin geen toestemming om workouts te plaatsen. Ontkoppel en koppel opnieuw.")
+    if r.status_code not in (200, 201, 204):
+        print(f"[garmin-workout] {methode} {url} -> {r.status_code}: {r.text[:200]}")
+        raise HTTPException(502, "Garmin aanvaardde de workout niet")
+    try:
+        return r.json() if r.content else {}
+    except ValueError:
+        return {}
+
+
+@app.post("/api/garmin/workout/{training_id}")
+async def garmin_workout_sturen(training_id: str, user=Depends(get_current_user)):
+    """Zet de geplande training als workout op de Garmin-kalender van de sporter
+    (op de datum van de training). Bestaat ze al bij Garmin, dan wordt ze
+    bijgewerkt en opnieuw ingepland."""
+    k, token = await _garmin_toegang(user.id)
+    if not token:
+        raise HTTPException(400, "Koppel eerst Garmin onder Connecties")
+    if "WORKOUT_IMPORT" not in (k.get("rechten") or []):
+        raise HTTPException(412, "Je gaf Carboo bij Garmin geen toestemming om workouts te plaatsen. Ontkoppel en koppel opnieuw.")
+    t = supabase_admin.table("fuelc_trainingen").select("*").eq("id", training_id).eq("user_id", user.id).execute()
+    if not t.data:
+        raise HTTPException(404, "Training niet gevonden")
+    tr = t.data[0]
+    z = supabase_admin.table("fuelc_zones").select("*").eq("user_id", user.id).eq("sport", "Fietsen" if _GW_SPORT.get(str(tr.get("sport"))) == "CYCLING" else "Lopen").execute()
+    try:
+        body = _garmin_workout_json(tr, z.data[0] if z.data else {})
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    wid = tr.get("garmin_workout_id")
+    if wid:
+        body["workoutId"] = wid
+        body["ownerId"] = int(k["garmin_user_id"]) if str(k.get("garmin_user_id") or "").isdigit() else None
+        await _garmin_api("PUT", f"{GARMIN_WORKOUT}/{wid}", token, body)
+    else:
+        uit = await _garmin_api("POST", GARMIN_WORKOUT_MAAK, token, body)
+        wid = uit.get("workoutId")
+        if not wid:
+            raise HTTPException(502, "Garmin gaf geen workout-id terug")
+    datum = str(tr.get("datum") or "")[:10]
+    sid = tr.get("garmin_schedule_id")
+    if sid:
+        await _garmin_api("PUT", f"{GARMIN_SCHEDULE}/{sid}", token, {"scheduleId": sid, "workoutId": wid, "date": datum})
+    else:
+        uit = await _garmin_api("POST", f"{GARMIN_SCHEDULE}/", token, {"workoutId": wid, "date": datum})
+        sid = uit.get("scheduleId")
+    supabase_admin.table("fuelc_trainingen").update({
+        "garmin_workout_id": wid, "garmin_schedule_id": sid, "garmin_verstuurd_op": _garmin_nu().isoformat(),
+    }).eq("id", training_id).eq("user_id", user.id).execute()
+    return {"ok": True, "workout_id": wid, "schedule_id": sid, "stappen": len(body["segments"][0]["steps"])}
+
+
+@app.delete("/api/garmin/workout/{training_id}")
+async def garmin_workout_weg(training_id: str, user=Depends(get_current_user)):
+    """Haalt de workout weer van de Garmin-kalender; de training in Carboo blijft."""
+    t = supabase_admin.table("fuelc_trainingen").select("id,garmin_workout_id,garmin_schedule_id").eq("id", training_id).eq("user_id", user.id).execute()
+    if not t.data:
+        raise HTTPException(404, "Training niet gevonden")
+    tr = t.data[0]
+    k, token = await _garmin_toegang(user.id)
+    if token:
+        for methode, url in ((("DELETE", f"{GARMIN_SCHEDULE}/{tr['garmin_schedule_id']}") if tr.get("garmin_schedule_id") else None),
+                             (("DELETE", f"{GARMIN_WORKOUT}/{tr['garmin_workout_id']}") if tr.get("garmin_workout_id") else None)):
+            if not url:
+                continue
+            try:
+                await _garmin_api(methode, url, token)
+            except HTTPException as e:
+                print(f"[garmin-workout] verwijderen {url}: {e.status_code}")
+    supabase_admin.table("fuelc_trainingen").update({"garmin_workout_id": None, "garmin_schedule_id": None, "garmin_verstuurd_op": None}) \
+        .eq("id", training_id).eq("user_id", user.id).execute()
+    return {"ok": True}
