@@ -387,7 +387,7 @@ async def verplaats_training(training_id: str, data: dict, user=Depends(get_curr
     r = supabase.table("fuelc_trainingen").update(update).eq("id", training_id).eq("user_id", user.id).execute()
     if not r.data:
         raise HTTPException(404, "Training niet gevonden")
-    return {"status": "verplaatst", "datum": datum}
+    return {"status": "bijgewerkt", "gewijzigd": sorted(update)}
 
 
 # ─── COACH ZONE ───────────────────────────────────────────────────────────────
@@ -12340,11 +12340,74 @@ async def _garmin_bestand_verwerk(item: dict, koppeling: dict):
     pad = f"{user_id}/{gid}.fit"
     supabase_admin.storage.from_("garmin-activiteiten").upload(
         pad, r.content, {"content-type": "application/octet-stream", "upsert": "true"})
-    supabase_admin.table("carboo_garmin_activiteiten").upsert({
+    rij: dict = {
         "user_id": user_id, "garmin_activity_id": str(gid),
         "bestand_pad": pad, "bestand_bytes": len(r.content),
-    }, on_conflict="user_id,garmin_activity_id").execute()
-    print(f"[garmin-push] bestand {gid} bewaard ({len(r.content)} bytes)")
+    }
+    # FIT-CIJFERS-V1 — meteen de kerncijfers (NP, som_hr2, mmp, …) erbij
+    rij.update(_garmin_kerncijfers_rij(r.content, gid))
+    supabase_admin.table("carboo_garmin_activiteiten").upsert(rij, on_conflict="user_id,garmin_activity_id").execute()
+    print(f"[garmin-push] bestand {gid} bewaard ({len(r.content)} bytes){' + kerncijfers' if rij.get('kerncijfers') else ''}")
+
+
+def _garmin_kerncijfers_rij(inhoud: bytes, gid) -> dict:
+    """Kerncijfers uit het .fit-bestand als kolommen voor carboo_garmin_activiteiten.
+    Mislukt het lezen, dan blijft de rij zonder cijfers; het bestand staat er wel."""
+    try:
+        from fit_cijfers import kerncijfers
+        k = kerncijfers(inhoud)
+    except Exception as e:
+        print(f"[garmin-push] kerncijfers {gid} mislukt: {type(e).__name__}: {str(e)[:120]}")
+        return {}
+    uit: dict = {"kerncijfers": k}
+    if k.get("gem_hartslag"):
+        uit["gem_hartslag"] = int(round(k["gem_hartslag"]))
+    if k.get("max_hartslag"):
+        uit["max_hartslag"] = int(k["max_hartslag"])
+    if k.get("gem_vermogen"):
+        uit["gem_vermogen_w"] = int(round(k["gem_vermogen"]))
+    if k.get("duur_s"):
+        uit["duur_s"] = int(k["duur_s"])
+    if k.get("afstand_m"):
+        uit["afstand_m"] = k["afstand_m"]
+    return uit
+
+
+@app.get("/api/garmin/activiteiten")
+async def garmin_activiteiten(dagen: int = 120, user=Depends(get_current_user)):
+    """De Garmin-details van de eigen activiteiten (voor het dashboard en de
+    kaarten): hartslag, vermogen en de kerncijfers waar TSS uit volgt."""
+    from datetime import datetime, timedelta, timezone
+    dagen = max(7, min(400, int(dagen or 120)))
+    vanaf = (datetime.now(timezone.utc) - timedelta(days=dagen)).isoformat()
+    r = supabase_admin.table("carboo_garmin_activiteiten").select(
+        "garmin_activity_id,training_id,naam,soort,start_op,duur_s,afstand_m,kcal,gem_hartslag,max_hartslag,gem_vermogen_w,kerncijfers"
+    ).eq("user_id", user.id).gte("start_op", vanaf).order("start_op", desc=True).limit(1000).execute()
+    uit = []
+    for x in r.data or []:
+        k = x.get("kerncijfers") or {}
+        uit.append({**{a: x.get(a) for a in ("garmin_activity_id", "training_id", "naam", "soort", "start_op", "duur_s", "afstand_m", "kcal", "gem_hartslag", "max_hartslag", "gem_vermogen_w")},
+                    "np": k.get("np"), "som_hr2": k.get("som_hr2"), "s_vermogen": k.get("s_vermogen"), "s_hartslag": k.get("s_hartslag"),
+                    "cijfers_duur_s": k.get("duur_s"), "mmp": k.get("mmp")})
+    return {"activiteiten": uit}
+
+
+@app.post("/api/garmin/kerncijfers")
+async def garmin_kerncijfers_opnieuw(user=Depends(get_current_user)):
+    """Kerncijfers berekenen voor eigen activiteiten die wel een bestand hebben
+    maar nog geen cijfers (bv. van vóór deze versie)."""
+    r = supabase_admin.table("carboo_garmin_activiteiten").select("garmin_activity_id,bestand_pad").eq("user_id", user.id).is_("kerncijfers", "null").not_.is_("bestand_pad", "null").limit(50).execute()
+    n = 0
+    for x in r.data or []:
+        try:
+            inhoud = supabase_admin.storage.from_("garmin-activiteiten").download(x["bestand_pad"])
+            rij = _garmin_kerncijfers_rij(inhoud, x["garmin_activity_id"])
+            if rij:
+                supabase_admin.table("carboo_garmin_activiteiten").update(rij).eq("user_id", user.id).eq("garmin_activity_id", x["garmin_activity_id"]).execute()
+                n += 1
+        except Exception as e:
+            print(f"[garmin] kerncijfers opnieuw {x.get('garmin_activity_id')}: {type(e).__name__}")
+    return {"berekend": n}
 
 
 def _garmin_gezondheid_verwerk(soort: str, item: dict, koppeling: dict):

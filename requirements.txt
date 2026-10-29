@@ -11,5 +11,6 @@ anthropic>=0.40.0
 mollie-api-python==3.7.4
 pyjwt>=2.8.0
 cryptography>=42.0.0
+garmin-fit-sdk>=21.0.0
 
 pywebpush
