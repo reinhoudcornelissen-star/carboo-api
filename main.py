@@ -4665,15 +4665,18 @@ def _kh_doel_dag(profiel: dict, kcal: float) -> float:
     return max(0.0, (kcal - eiwit * 4 - vet * 9) / 4)
 
 
-# Trainingskcal per dag zoals het dagschema ze telt: per sport wint Strava
-# (werkelijk) van gepland, zodat een rit niet dubbel meetelt.
+# Trainingskcal per dag zoals het dagschema ze telt: per sport wint werkelijk
+# (Garmin of Strava) van gepland, zodat een rit niet dubbel meetelt.
+WERKELIJKE_BRONNEN = ("strava", "garmin")
+
+
 def _trainingskcal_per_dag(trainingen: list) -> dict:
     per_dag: dict = {}
     for t in trainingen:
         d = str(t.get("datum"))[:10]
         sp = t.get("sport") or "Overig"
         vak = per_dag.setdefault(d, {}).setdefault(sp, {"gepland": 0.0, "strava": 0.0})
-        vak["strava" if t.get("bron") == "strava" else "gepland"] += t.get("kcal_verbranding") or 0
+        vak["strava" if t.get("bron") in WERKELIJKE_BRONNEN else "gepland"] += t.get("kcal_verbranding") or 0
     return {d: sum(s["strava"] if s["strava"] > 0 else s["gepland"] for s in sporten.values())
             for d, sporten in per_dag.items()}
 
@@ -11064,7 +11067,13 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
         if bestaand.data:
             continue
         # Check voor conflict op dezelfde datum
-        zelfde_dag = supabase.table("fuelc_trainingen").select("id,sport,duur_min,kcal_verbranding,bron").eq("user_id", user.id).eq("datum", datum).execute()
+        zelfde_dag = supabase.table("fuelc_trainingen").select("id,sport,duur_min,kcal_verbranding,bron,starttijd").eq("user_id", user.id).eq("datum", datum).execute()
+        # EEN-BRON-V1: zit deze sessie al via Garmin in Carboo, dan blijft Garmin de enige aanleveraar
+        via_garmin = _strava_zelfde_garmin({"starttijd": starttijd, "duur_min": duur_min}, zelfde_dag.data or [])
+        if via_garmin:
+            supabase.table("fuelc_trainingen").update({"strava_activity_id": strava_id}).eq("id", via_garmin["id"]).execute()
+            print(f"[strava] activiteit {strava_id} al bekend via Garmin (rij {via_garmin['id']}); niet dubbel")
+            continue
         if zelfde_dag.data and any(t.get("bron", "manueel") == "manueel" for t in zelfde_dag.data):
             # Conflict! Vraag aan user
             conflicten.append({
@@ -11141,7 +11150,9 @@ async def _strava_webhook_verwerk(event: dict):
 
         # ── Activiteit verwijderd ──
         if aspect_type == "delete":
-            supabase_admin.table("fuelc_trainingen").delete().eq("user_id", user_id).eq("strava_activity_id", object_id).execute()
+            # EEN-BRON-V1: een rij die Garmin aanlevert blijft staan; alleen de Strava-koppeling eraf
+            supabase_admin.table("fuelc_trainingen").update({"strava_activity_id": None}).eq("user_id", user_id).eq("strava_activity_id", object_id).not_.is_("garmin_activity_id", "null").execute()
+            supabase_admin.table("fuelc_trainingen").delete().eq("user_id", user_id).eq("strava_activity_id", object_id).is_("garmin_activity_id", "null").execute()
             print(f"[strava-webhook] activiteit {object_id} verwijderd voor user {user_id}")
             return
 
@@ -11171,7 +11182,7 @@ async def _strava_webhook_verwerk(event: dict):
         naam = a.get("name") or sport_nl
 
         # Idempotent: bestaat deze activiteit al?
-        bestaand = supabase_admin.table("fuelc_trainingen").select("id").eq("user_id", user_id).eq("strava_activity_id", object_id).execute()
+        bestaand = supabase_admin.table("fuelc_trainingen").select("id,garmin_activity_id").eq("user_id", user_id).eq("strava_activity_id", object_id).execute()
         payload = {
             "user_id": user_id, "datum": datum,
             "sport": sport_nl, "duur_min": duur_min,
@@ -11179,13 +11190,23 @@ async def _strava_webhook_verwerk(event: dict):
             "strava_activity_id": object_id,
             "naam": naam, "starttijd": starttijd,
         }
-        if bestaand.data:
+        if bestaand.data and bestaand.data[0].get("garmin_activity_id"):
+            # EEN-BRON-V1: Garmin levert deze sessie; Strava wijzigt er niets aan
+            print(f"[strava-webhook] activiteit {object_id} hoort bij Garmin; niets gewijzigd")
+        elif bestaand.data:
             # update (bv. naam/duur gewijzigd in Strava)
             supabase_admin.table("fuelc_trainingen").update(payload).eq("id", bestaand.data[0]["id"]).execute()
             print(f"[strava-webhook] activiteit {object_id} bijgewerkt voor user {user_id}")
         else:
-            supabase_admin.table("fuelc_trainingen").insert(payload).execute()
-            print(f"[strava-webhook] activiteit {object_id} geimporteerd voor user {user_id}")
+            zelfde_dag = supabase_admin.table("fuelc_trainingen").select("id,bron,starttijd,duur_min").eq("user_id", user_id).eq("datum", datum).execute()
+            via_garmin = _strava_zelfde_garmin(payload, zelfde_dag.data or [])
+            if via_garmin:
+                # EEN-BRON-V1: Garmin was eerst; alleen het Strava-id eraan hangen
+                supabase_admin.table("fuelc_trainingen").update({"strava_activity_id": object_id}).eq("id", via_garmin["id"]).execute()
+                print(f"[strava-webhook] activiteit {object_id} al bekend via Garmin (rij {via_garmin['id']}); niet dubbel")
+            else:
+                supabase_admin.table("fuelc_trainingen").insert(payload).execute()
+                print(f"[strava-webhook] activiteit {object_id} geimporteerd voor user {user_id}")
     except Exception as _e:
         import traceback as _tb
         print(f"[strava-webhook] FOUT: {type(_e).__name__}: {_e}")
@@ -12194,9 +12215,11 @@ def _garmin_training_payload(user_id: str, a: dict) -> dict | None:
     return rij
 
 
-def _garmin_zelfde_training(rij: dict, bestaande: list) -> dict | None:
-    """Dezelfde sessie die al via Strava of met de hand in Carboo staat:
-    zelfde dag, start binnen 5 minuten, duur binnen 15%. Dan niet dubbel."""
+def _zelfde_sessie(rij: dict, bestaande: list, bronnen=None) -> dict | None:
+    """EEN-BRON-V1 — dezelfde sessie die al in Carboo staat: zelfde dag, start
+    binnen 5 minuten, duur binnen 15% (Garmin stuurt totale tijd, Strava
+    bewegende tijd). bronnen = alleen rijen met die bron vergelijken;
+    None = alles behalve Garmin."""
     def _min(t):
         try:
             u, m = str(t or "07:00").split(":")[:2]
@@ -12205,7 +12228,10 @@ def _garmin_zelfde_training(rij: dict, bestaande: list) -> dict | None:
             return None
     s = _min(rij.get("starttijd"))
     for b in bestaande:
-        if b.get("bron") == "garmin":
+        bron = b.get("bron") or "manueel"
+        if bronnen is None and bron == "garmin":
+            continue
+        if bronnen is not None and bron not in bronnen:
             continue
         bs = _min(b.get("starttijd"))
         if s is None or bs is None or abs(s - bs) > 5:
@@ -12214,6 +12240,17 @@ def _garmin_zelfde_training(rij: dict, bestaande: list) -> dict | None:
         if max(d1, d2) == 0 or abs(d1 - d2) <= 0.15 * max(d1, d2):
             return b
     return None
+
+
+def _garmin_zelfde_training(rij: dict, bestaande: list) -> dict | None:
+    """Zelfde sessie die al via Strava of met de hand in Carboo staat."""
+    return _zelfde_sessie(rij, bestaande)
+
+
+def _strava_zelfde_garmin(rij: dict, bestaande: list) -> dict | None:
+    """Zelfde sessie die al via Garmin binnenkwam: Garmin is dan de enige
+    aanleveraar; Strava hangt er alleen zijn id aan (voor latere berichten)."""
+    return _zelfde_sessie(rij, bestaande, bronnen=("garmin",))
 
 
 def _garmin_koppeling_bij(garmin_user_id) -> dict | None:
@@ -12302,7 +12339,12 @@ async def _garmin_activiteit_verwerk(item: dict, koppeling: dict):
         else:
             zelfde_dag = supabase_admin.table("fuelc_trainingen").select("id,bron,starttijd,duur_min").eq("user_id", user_id).eq("datum", rij["datum"]).execute()
             dubbel = _garmin_zelfde_training(rij, zelfde_dag.data or [])
-            if dubbel:
+            if dubbel and dubbel.get("bron") == "strava":
+                # EEN-BRON-V1: Strava was eerst; de Garmin-waarden nemen de rij over
+                supabase_admin.table("fuelc_trainingen").update(rij).eq("id", dubbel["id"]).execute()
+                detail["training_id"] = dubbel["id"]
+                print(f"[garmin-push] activiteit {gid} vervangt de Strava-rij {dubbel['id']}")
+            elif dubbel:
                 detail["training_id"] = dubbel["id"]
                 print(f"[garmin-push] activiteit {gid} is al bekend via {dubbel.get('bron')}; niet dubbel")
             else:
