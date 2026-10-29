@@ -342,8 +342,16 @@ async def sla_fuelc_profiel(profiel: FuelcProfiel, user=Depends(get_current_user
     return {"status": "opgeslagen"}
 
 @app.get("/api/fuelc/trainingen")
-async def get_trainingen(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
-    r = supabase.table("fuelc_trainingen").select("*").eq("user_id", user.id).order("datum", desc=True).limit(60).execute()
+async def get_trainingen(dagen: Optional[int] = None, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    """Zonder `dagen`: de laatste 60 rijen (zoals altijd). Met `dagen`: alles
+    vanaf zoveel dagen terug, voor het dashboard (fitheid vraagt 42 dagen+)."""
+    q = supabase.table("fuelc_trainingen").select("*").eq("user_id", user.id).order("datum", desc=True)
+    if dagen:
+        from datetime import date, timedelta
+        vanaf = (date.today() - timedelta(days=max(7, min(400, int(dagen))))).isoformat()
+        r = q.gte("datum", vanaf).limit(2000).execute()
+    else:
+        r = q.limit(60).execute()
     return {"trainingen": r.data or []}
 
 @app.post("/api/fuelc/trainingen")
@@ -12417,3 +12425,20 @@ async def garmin_push(geheim: str, request: Request, background_tasks: Backgroun
         raise HTTPException(400, "Geen geldige JSON")
     background_tasks.add_task(_garmin_push_verwerk, bericht)
     return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DASHBOARD-V1 — gezondheidsgegevens van Garmin voor het dashboard
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/garmin/gezondheid")
+async def garmin_gezondheid(dagen: int = 90, user=Depends(get_current_user)):
+    """Dagwaarden (dailies, sleeps, hrv, userMetrics, bodyComps) van de laatste
+    `dagen` dagen, enkel van de sporter zelf. Rauw zoals Garmin ze stuurde;
+    de regels (basislijn, kleuren) zitten in de app."""
+    from datetime import date, timedelta
+    dagen = max(7, min(400, int(dagen or 90)))
+    vanaf = (date.today() - timedelta(days=dagen)).isoformat()
+    r = supabase_admin.table("carboo_garmin_gezondheid").select("soort,datum,waarden") \
+        .eq("user_id", user.id).gte("datum", vanaf).order("datum", desc=False).execute()
+    return {"rijen": r.data or [], "vanaf": vanaf}
