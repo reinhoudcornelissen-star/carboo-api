@@ -602,7 +602,7 @@ async def admin_maak_coach(item: CoachProfiel, user=Depends(get_current_user), s
     pakketten = item.pakketten or ["coach"]
     if isinstance(pakketten, str):
         pakketten = [pakketten]
-    pakketten = [p for p in pakketten if p in ("coach", "alles", "fueling", "race", "gut")]
+    pakketten = [p for p in pakketten if p in ("coach", "alles", "fueling", "race", "gut", "training", "fueling_training")]
     if not pakketten:
         pakketten = ["coach"]
 
@@ -1015,7 +1015,7 @@ async def klant_direct_toevoegen(data: dict, user=Depends(get_current_user), sup
     pakketten = data.get("pakketten") or ["alles"]
     if isinstance(pakketten, str):
         pakketten = [pakketten]
-    pakketten = [p for p in pakketten if p in ("alles", "fueling", "race", "gut")]
+    pakketten = [p for p in pakketten if p in ("alles", "fueling", "race", "gut", "training", "fueling_training")]
     if not pakketten:
         pakketten = ["alles"]
 
@@ -3432,7 +3432,7 @@ async def cron_voedingstip(request: Request, test: Optional[str] = None,
     abos = supabase.table("fuelc_push_abonnementen").select("user_id").eq("actief", True).execute().data or []
     toestel = {a["user_id"] for a in abos if a.get("user_id")}
     pk = supabase.table("carboo_abonnementen").select("user_id") \
-        .eq("status", "actief").in_("pakket", ["fueling", "alles", "coach"]).execute().data or []
+        .eq("status", "actief").in_("pakket", ["fueling", "fueling_training", "alles", "coach"]).execute().data or []
     fueling = {a["user_id"] for a in pk if a.get("user_id")}
 
     titel, tekst = VOEDINGSTIP_MELDINGEN[dag]
@@ -11419,6 +11419,9 @@ PAKKETTEN = {
     "fueling": {"label": "Fueling",            "module": "fueling"},
     "race":    {"label": "Race Nutrition Plan", "module": "race"},
     "gut":     {"label": "Train the Gut",       "module": "gut"},
+    # TRAINING-PAKKET-V1 — Training los, en de (tijdelijke) bundel Fueling + Training
+    "training":         {"label": "Training",           "module": "training"},
+    "fueling_training": {"label": "Fueling + Training", "module": "fueling_training"},
     "alles":   {"label": "Alles-in-één",        "module": "alles"},
     "coach":   {"label": "Coach Zone",          "module": "coach"},
 }
@@ -11428,7 +11431,7 @@ def get_prijs(pakket_id: str) -> float:
         r = supabase_admin.table("carboo_prijzen").select("prijs").eq("id", pakket_id).single().execute()
         return float(r.data["prijs"])
     except:
-        fallback = {"fueling": 5.99, "race": 4.99, "gut": 3.99, "alles": 9.99, "coach": 14.99}
+        fallback = {"fueling": 2.99, "race": 4.99, "gut": 3.99, "training": 1.99, "fueling_training": 3.99, "alles": 9.99, "coach": 14.99}
         return fallback.get(pakket_id, 9.99)
 
 
