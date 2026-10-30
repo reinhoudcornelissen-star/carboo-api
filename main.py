@@ -4694,17 +4694,40 @@ def _trainingskcal_per_dag(trainingen: list) -> dict:
     return per_dag
 
 
+# SPORTFAMILIE-V1 — een geplande training koppelt aan een binnenkomende
+# activiteit van dezelfde familie, niet van dezelfde letterlijke naam. Zo
+# wordt een geplande Krachttraining gedaan door een Strava "Workout" of een
+# Garmin STRENGTH_TRAINING, en een "Kracht · mobiliteit" door een Yoga-sessie.
+SPORT_FAMILIE = {
+    "fietsen": {"Fietsen", "Indoor fietsen", "E-bike", "Mountainbiken", "Gravel"},
+    "lopen": {"Lopen", "Indoor lopen", "Trail"},
+    "zwemmen": {"Zwemmen"},
+    "kracht": {"Krachttraining", "Kracht", "Workout", "Crossfit", "CrossFit", "Hyrox", "HIIT", "Mobiliteit"},
+    "wandelen": {"Wandelen", "Wandeling"},
+}
+_FAMILIE_VAN = {naam: fam for fam, namen in SPORT_FAMILIE.items() for naam in namen}
+
+
+def _sportfamilie(sport) -> str:
+    sp = str(sport or "").strip()
+    return _FAMILIE_VAN.get(sp, sp.lower())
+
+
+def _zelfde_sportfamilie(a, b) -> bool:
+    return bool(a) and bool(b) and _sportfamilie(a) == _sportfamilie(b)
+
+
 def _geplande_training_bij(rijen: list, sport: str, starttijd: str) -> dict | None:
-    """GEDAAN-V1 — de open geplande training van dezelfde sport op die dag, de
-    dichtste bij het startuur. Zo wordt het plan de gedane training in plaats
-    van een tweede rij ernaast."""
+    """GEDAAN-V1 — de open geplande training van dezelfde sportfamilie op die
+    dag, de dichtste bij het startuur. Zo wordt het plan de gedane training
+    in plaats van een tweede rij ernaast."""
     def _min(t):
         try:
             u, m = str(t or "07:00").split(":")[:2]
             return int(u) * 60 + int(m)
         except ValueError:
             return 7 * 60
-    kandidaten = [r for r in rijen if not _training_gedaan(r) and r.get("sport") == sport
+    kandidaten = [r for r in rijen if not _training_gedaan(r) and _zelfde_sportfamilie(r.get("sport"), sport)
                   and not r.get("garmin_activity_id") and not r.get("strava_activity_id")]
     if not kandidaten:
         return None
@@ -10911,6 +10934,7 @@ SPORT_ACTIVITY_TYPES = {
     "Run", "VirtualRun", "TrailRun",
     "Swim",
     "Workout", "WeightTraining", "Crossfit", "Elliptical", "Rowing", "StairStepper",
+    "HighIntensityIntervalTraining", "Yoga", "Pilates",   # SPORTFAMILIE-V1
     "Hike",
 }
 
@@ -10922,6 +10946,7 @@ SPORT_TYPE_NL = {
     "Workout": "Workout", "WeightTraining": "Krachttraining",
     "Crossfit": "Crossfit", "Elliptical": "Crosstrainer",
     "Rowing": "Roeien", "StairStepper": "Stairs",
+    "HighIntensityIntervalTraining": "HIIT", "Yoga": "Mobiliteit", "Pilates": "Mobiliteit",   # SPORTFAMILIE-V1
     "Hike": "Wandeling",
 }
 
@@ -12205,7 +12230,8 @@ GARMIN_TYPE_NL = {
     "E_BIKE_FITNESS": "E-bike", "E_BIKE_MOUNTAIN": "E-bike",
     "SWIMMING": "Zwemmen", "LAP_SWIMMING": "Zwemmen", "OPEN_WATER_SWIMMING": "Zwemmen",
     "MULTI_SPORT": "Triatlon", "TRIATHLON": "Triatlon",
-    "STRENGTH_TRAINING": "Krachttraining", "HIIT": "Crossfit",
+    "STRENGTH_TRAINING": "Krachttraining", "HIIT": "HIIT",
+    "YOGA": "Mobiliteit", "PILATES": "Mobiliteit", "FLEXIBILITY_TRAINING": "Mobiliteit",   # SPORTFAMILIE-V1
     "CARDIO": "Workout", "INDOOR_CARDIO": "Workout", "FITNESS_EQUIPMENT": "Workout",
     "ELLIPTICAL": "Crosstrainer", "ROWING": "Roeien", "INDOOR_ROWING": "Roeien",
     "STAIR_CLIMBING": "Stairs", "HIKING": "Wandeling", "WALKING": "Wandeling",

@@ -171,3 +171,56 @@ asyncio.run(main._strava_webhook_verwerk({"object_type": "activity", "aspect_typ
 assert len(db["fuelc_trainingen"]) == 3, db["fuelc_trainingen"]
 print("zonder plan nieuwe rij ok")
 print("GEDAAN OK")
+
+# ── SPORTFAMILIE-V1 ─────────────────────────────────────────────────
+assert main._zelfde_sportfamilie("Krachttraining", "Workout") and main._zelfde_sportfamilie("CrossFit", "Crossfit")
+assert main._zelfde_sportfamilie("Krachttraining", "Mobiliteit") and main._zelfde_sportfamilie("Fietsen", "Gravel")
+assert not main._zelfde_sportfamilie("Krachttraining", "Lopen") and not main._zelfde_sportfamilie("Fietsen", "Lopen")
+assert main._garmin_sport_nl("STRENGTH_TRAINING") == "Krachttraining" and main._garmin_sport_nl("YOGA") == "Mobiliteit" and main._garmin_sport_nl("HIIT") == "HIIT"
+for st in ("WeightTraining", "Workout", "Crossfit", "HighIntensityIntervalTraining", "Yoga", "Pilates"):
+    assert st in main.SPORT_ACTIVITY_TYPES and main._sportfamilie(main.SPORT_TYPE_NL[st]) == "kracht", st
+print("families ok")
+
+# a. Strava Workout wordt de geplande krachttraining (naam en focus blijven)
+db["fuelc_trainingen"] = [
+    {"id": "k1", "user_id": "u1", "datum": "2026-10-31", "starttijd": "17:30", "duur_min": 45, "kcal_verbranding": 225,
+     "sport": "Krachttraining", "bron": "manueel", "naam": "Kracht · Benen & core",
+     "zone_verdeling": '[{"naam":"Kracht","duur_min":45,"zone":"Z2","kracht_sessie":{"focus":["benen","core"],"intensiteit":"matig"}}]'},
+    {"id": "l1", "user_id": "u1", "datum": "2026-10-31", "starttijd": "07:00", "duur_min": 60, "kcal_verbranding": 600,
+     "sport": "Lopen", "bron": "manueel", "naam": "Duurloop"},
+]
+FakeHTTP.antwoord = {"id": 9101, "sport_type": "Workout", "start_date_local": "2026-10-31T17:40:00",
+                     "moving_time": 50 * 60, "calories": 260, "name": "Evening Workout"}
+asyncio.run(main._strava_webhook_verwerk({"object_type": "activity", "aspect_type": "create", "object_id": 9101, "owner_id": 77}))
+tr = db["fuelc_trainingen"]
+assert len(tr) == 2, tr
+k1 = next(t for t in tr if t["id"] == "k1")
+assert k1["bron"] == "strava" and str(k1["strava_activity_id"]) == "9101" and k1["kcal_verbranding"] == 260 and k1["duur_min"] == 50, k1
+assert k1["naam"] == "Kracht · Benen & core" and "kracht_sessie" in k1["zone_verdeling"], k1
+assert next(t for t in tr if t["id"] == "l1")["bron"] == "manueel", "de loop blijft gepland"
+print("strava workout -> krachtplan ok")
+
+# b. Garmin STRENGTH_TRAINING wordt de geplande krachttraining
+db["fuelc_trainingen"] = [{"id": "k2", "user_id": "u1", "datum": "2026-10-29", "starttijd": "18:00", "duur_min": 45,
+                           "kcal_verbranding": 225, "sport": "Krachttraining", "bron": "coach", "naam": "Full body"}]
+db["carboo_garmin_activiteiten"] = []
+utc2 = int(dt.datetime(2026, 10, 29, 17, 5, tzinfo=dt.timezone.utc).timestamp())
+asyncio.run(main._garmin_activiteit_verwerk({"activityId": 888, "activityType": "STRENGTH_TRAINING", "startTimeInSeconds": utc2,
+                                             "startTimeOffsetInSeconds": 3600, "durationInSeconds": 40 * 60, "activeKilocalories": 210}, {"user_id": "u1"}))
+tr = db["fuelc_trainingen"]
+assert len(tr) == 1 and tr[0]["bron"] == "garmin" and tr[0]["garmin_activity_id"] == "888" and tr[0]["naam"] == "Full body", tr
+print("garmin strength -> krachtplan ok")
+
+# c. Yoga koppelt aan kracht/mobiliteit; een Run koppelt niet aan kracht
+db["fuelc_trainingen"] = [{"id": "m1", "user_id": "u1", "datum": "2026-10-31", "starttijd": "08:00", "duur_min": 30,
+                           "kcal_verbranding": 80, "sport": "Krachttraining", "bron": "manueel", "naam": "Kracht · Mobiliteit"}]
+FakeHTTP.antwoord = {"id": 9102, "sport_type": "Yoga", "start_date_local": "2026-10-31T08:05:00", "moving_time": 30 * 60, "calories": 90, "name": "Yoga"}
+asyncio.run(main._strava_webhook_verwerk({"object_type": "activity", "aspect_type": "create", "object_id": 9102, "owner_id": 77}))
+assert len(db["fuelc_trainingen"]) == 1 and db["fuelc_trainingen"][0]["bron"] == "strava", db["fuelc_trainingen"]
+db["fuelc_trainingen"] = [{"id": "m2", "user_id": "u1", "datum": "2026-10-31", "starttijd": "08:00", "duur_min": 30,
+                           "kcal_verbranding": 80, "sport": "Krachttraining", "bron": "manueel", "naam": "Kracht"}]
+FakeHTTP.antwoord = {"id": 9103, "sport_type": "Run", "start_date_local": "2026-10-31T08:05:00", "moving_time": 30 * 60, "calories": 300, "name": "Run"}
+asyncio.run(main._strava_webhook_verwerk({"object_type": "activity", "aspect_type": "create", "object_id": 9103, "owner_id": 77}))
+assert len(db["fuelc_trainingen"]) == 2, db["fuelc_trainingen"]
+print("yoga en run ok")
+print("SPORTFAMILIE OK")
