@@ -232,6 +232,7 @@ class TrainingData(BaseModel):
     notitie: Optional[str] = None
     starttijd: Optional[str] = "07:00"
     naam: Optional[str] = None   # BOUWER-V1 — eigen naam, zoals "5 x 4 min drempel"
+    gedaan: Optional[bool] = None  # GEDAAN-V1 — achteraf ingegeven: telt meteen mee
 
 class DagboekItem(BaseModel):
     # DAGBOEK-TRAINING-ID-V1 — koppelt het item aan de training waaronder het gelogd is
@@ -359,6 +360,9 @@ async def voeg_training_toe(training: TrainingData, user=Depends(get_current_use
     data = training.dict()
     data["user_id"] = user.id
     data["bron"] = "manueel"
+    # GEDAAN-V1 — een training die achteraf wordt ingegeven is gedaan; een
+    # geplande blijft gepland tot Garmin/Strava ze levert of ze afgevinkt wordt
+    data["gedaan_op"] = _garmin_nu().isoformat() if data.pop("gedaan", None) else None
     supabase.table("fuelc_trainingen").insert(data).execute()
     return {"status": "opgeslagen"}
 
@@ -378,6 +382,9 @@ async def verplaats_training(training_id: str, data: dict, user=Depends(get_curr
     toegestaan = {"datum", "naam", "sport", "duur_min", "afstand_km", "kcal_verbranding",
                   "zone_verdeling", "notitie", "starttijd"}
     update = {k: v for k, v in (data or {}).items() if k in toegestaan}
+    if "gedaan" in (data or {}):
+        # GEDAAN-V1 — afvinken (of weer ongedaan maken) zonder horloge
+        update["gedaan_op"] = _garmin_nu().isoformat() if data.get("gedaan") else None
     if "datum" in update:
         update["datum"] = (update.get("datum") or "").strip()
         if not update["datum"]:
@@ -1328,8 +1335,8 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
             vq_dag2[d]["kh"] += item.get("kh_g", 0) or 0
             vq_dag2[d]["eiwit"] += item.get("eiwit_g", 0) or 0
             vq_dag2[d]["vezels"] += item.get("vezels_g", 0) or 0
-        trainingen = supabase.table("fuelc_trainingen").select("datum,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(14).execute()
-        tr_kcal = {t["datum"][:10]: (t.get("kcal_verbranding") or 0) for t in (trainingen.data or [])}
+        trainingen = supabase.table("fuelc_trainingen").select("datum,kcal_verbranding,bron,gedaan_op").eq("user_id", klant_id).order("datum", desc=True).limit(14).execute()
+        tr_kcal = {t["datum"][:10]: (t.get("kcal_verbranding") or 0) for t in (trainingen.data or []) if _training_gedaan(t)}
         dag_scores = []
         for d, vals in list(vq_dag2.items())[:14]:
             extra = tr_kcal.get(d, 0)
@@ -4665,20 +4672,53 @@ def _kh_doel_dag(profiel: dict, kcal: float) -> float:
     return max(0.0, (kcal - eiwit * 4 - vet * 9) / 4)
 
 
-# Trainingskcal per dag zoals het dagschema ze telt: per sport wint werkelijk
-# (Garmin of Strava) van gepland, zodat een rit niet dubbel meetelt.
+# GEDAAN-V1 — een training telt pas als ze gedaan is: aangeleverd door Garmin
+# of Strava, of zelf afgevinkt (gedaan_op). Een geplande training telt nergens
+# mee, ook niet als haar dag voorbij is: de sporter weet dat hij gaat trainen,
+# de aanpassing komt als de training binnen is.
 WERKELIJKE_BRONNEN = ("strava", "garmin")
 
 
+def _training_gedaan(t: dict) -> bool:
+    return (t.get("bron") in WERKELIJKE_BRONNEN) or bool(t.get("gedaan_op"))
+
+
+# Trainingskcal per dag zoals het dagschema ze telt: alleen gedane trainingen.
 def _trainingskcal_per_dag(trainingen: list) -> dict:
     per_dag: dict = {}
     for t in trainingen:
+        if not _training_gedaan(t):
+            continue
         d = str(t.get("datum"))[:10]
-        sp = t.get("sport") or "Overig"
-        vak = per_dag.setdefault(d, {}).setdefault(sp, {"gepland": 0.0, "strava": 0.0})
-        vak["strava" if t.get("bron") in WERKELIJKE_BRONNEN else "gepland"] += t.get("kcal_verbranding") or 0
-    return {d: sum(s["strava"] if s["strava"] > 0 else s["gepland"] for s in sporten.values())
-            for d, sporten in per_dag.items()}
+        per_dag[d] = per_dag.get(d, 0.0) + (t.get("kcal_verbranding") or 0)
+    return per_dag
+
+
+def _geplande_training_bij(rijen: list, sport: str, starttijd: str) -> dict | None:
+    """GEDAAN-V1 — de open geplande training van dezelfde sport op die dag, de
+    dichtste bij het startuur. Zo wordt het plan de gedane training in plaats
+    van een tweede rij ernaast."""
+    def _min(t):
+        try:
+            u, m = str(t or "07:00").split(":")[:2]
+            return int(u) * 60 + int(m)
+        except ValueError:
+            return 7 * 60
+    kandidaten = [r for r in rijen if not _training_gedaan(r) and r.get("sport") == sport
+                  and not r.get("garmin_activity_id") and not r.get("strava_activity_id")]
+    if not kandidaten:
+        return None
+    st = _min(starttijd)
+    return min(kandidaten, key=lambda r: abs(_min(r.get("starttijd")) - st))
+
+
+def _plan_overname(plan: dict, payload: dict) -> dict:
+    """De echte cijfers nemen de geplande rij over; de naam van het plan, de
+    opbouw, de notitie en de Garmin-workout blijven staan."""
+    uit = {k: v for k, v in payload.items() if k != "user_id"}
+    if plan.get("naam"):
+        uit["naam"] = plan["naam"]
+    return uit
 
 
 # ── VOEDINGSGROEP-SPIEGEL-V1 ──────────────────────────────────────────
@@ -5393,6 +5433,7 @@ def _bereken_bevoorrading(user_id: str, van: str, tot: str, supabase: Client, me
     tr = supabase.table("fuelc_trainingen").select("*") \
         .eq("user_id", user_id).gte("datum", van).lte("datum", tot) \
         .order("datum").execute().data or []
+    tr = [t for t in tr if _training_gedaan(t)]   # GEDAAN-V1
 
     recept_ids = list({str(r["recept_id"]) for r in dg if r.get("recept_id")})
     recepten = {}
@@ -9967,9 +10008,11 @@ async def get_notificaties(user=Depends(get_current_user), supabase: Client = De
             _eidoel = bereken_eiwit_doel(_prof)
             _ebasis = float(_prof.get("energie_doel") or 2000)
             _vpct = float(_prof.get("vet_doel_pct") or 25)
-            _tr = supabase.table("fuelc_trainingen").select("datum,kcal_verbranding").eq("user_id", user.id).gte("datum", _van).execute()
+            _tr = supabase.table("fuelc_trainingen").select("datum,kcal_verbranding,bron,gedaan_op").eq("user_id", user.id).gte("datum", _van).execute()
             _train = {}
             for _t in (_tr.data or []):
+                if not _training_gedaan(_t):   # GEDAAN-V1
+                    continue
                 _d = str(_t.get("datum") or "")[:10]
                 _train[_d] = _train.get(_d, 0.0) + float(_t.get("kcal_verbranding") or 0)
 
@@ -10464,12 +10507,13 @@ def _mascotte_context(user_id: str, supabase: Client) -> str:
 
     # Trainingen van de voorbije 7 tot de komende 7 dagen
     tr = supabase.table("fuelc_trainingen") \
-        .select("datum,starttijd,sport,duur_min,kcal_verbranding,bron") \
+        .select("datum,starttijd,sport,duur_min,kcal_verbranding,bron,gedaan_op") \
         .eq("user_id", user_id) \
         .gte("datum", (vandaag - _dt.timedelta(days=7)).isoformat()) \
         .lte("datum", (vandaag + _dt.timedelta(days=7)).isoformat()) \
         .order("datum").execute().data or []
-    ctx["trainingen"] = [{k: t.get(k) for k in ("datum", "starttijd", "sport", "duur_min", "kcal_verbranding")}
+    ctx["trainingen"] = [{**{k: t.get(k) for k in ("datum", "starttijd", "sport", "duur_min", "kcal_verbranding")},
+                          "gedaan": _training_gedaan(t)}   # GEDAAN-V1
                          for t in tr]
 
     # Dagdoelen zoals het dagschema ze berekent (KH-DOEL-DAGSCHEMA-V1)
@@ -11067,20 +11111,29 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
         if bestaand.data:
             continue
         # Check voor conflict op dezelfde datum
-        zelfde_dag = supabase.table("fuelc_trainingen").select("id,sport,duur_min,kcal_verbranding,bron,starttijd").eq("user_id", user.id).eq("datum", datum).execute()
+        zelfde_dag = supabase.table("fuelc_trainingen").select("id,bron,starttijd,duur_min,sport,naam,gedaan_op,garmin_activity_id,strava_activity_id,kcal_verbranding").eq("user_id", user.id).eq("datum", datum).execute()
         # EEN-BRON-V1: zit deze sessie al via Garmin in Carboo, dan blijft Garmin de enige aanleveraar
         via_garmin = _strava_zelfde_garmin({"starttijd": starttijd, "duur_min": duur_min}, zelfde_dag.data or [])
         if via_garmin:
             supabase.table("fuelc_trainingen").update({"strava_activity_id": strava_id}).eq("id", via_garmin["id"]).execute()
             print(f"[strava] activiteit {strava_id} al bekend via Garmin (rij {via_garmin['id']}); niet dubbel")
             continue
-        if zelfde_dag.data and any(t.get("bron", "manueel") == "manueel" for t in zelfde_dag.data):
+        # GEDAAN-V1: een geplande training van dezelfde sport wordt de gedane training
+        plan = _geplande_training_bij(zelfde_dag.data or [], sport_nl, starttijd)
+        if plan:
+            supabase.table("fuelc_trainingen").update(_plan_overname(plan, {
+                "datum": datum, "sport": sport_nl, "duur_min": duur_min, "kcal_verbranding": kcal,
+                "bron": "strava", "strava_activity_id": strava_id, "naam": naam, "starttijd": starttijd,
+            })).eq("id", plan["id"]).execute()
+            nieuwe_imports.append({"datum": datum, "naam": plan.get("naam") or naam, "duur_min": duur_min, "kcal": kcal})
+            continue
+        if zelfde_dag.data and any(t.get("bron", "manueel") == "manueel" and _training_gedaan(t) for t in zelfde_dag.data):
             # Conflict! Vraag aan user
             conflicten.append({
                 "strava_activity_id": strava_id,
                 "datum": datum,
                 "strava": {"naam": naam, "sport": sport_nl, "duur_min": duur_min, "kcal": kcal},
-                "bestaand": [{"id": t["id"], "sport": t.get("sport"), "duur_min": t.get("duur_min"), "kcal_verbranding": t.get("kcal_verbranding")} for t in zelfde_dag.data if t.get("bron", "manueel") == "manueel"],
+                "bestaand": [{"id": t["id"], "sport": t.get("sport"), "duur_min": t.get("duur_min"), "kcal_verbranding": t.get("kcal_verbranding")} for t in zelfde_dag.data if t.get("bron", "manueel") == "manueel" and _training_gedaan(t)],
             })
         else:
             # Geen conflict, gewoon importeren
@@ -11198,12 +11251,17 @@ async def _strava_webhook_verwerk(event: dict):
             supabase_admin.table("fuelc_trainingen").update(payload).eq("id", bestaand.data[0]["id"]).execute()
             print(f"[strava-webhook] activiteit {object_id} bijgewerkt voor user {user_id}")
         else:
-            zelfde_dag = supabase_admin.table("fuelc_trainingen").select("id,bron,starttijd,duur_min").eq("user_id", user_id).eq("datum", datum).execute()
+            zelfde_dag = supabase_admin.table("fuelc_trainingen").select("id,bron,starttijd,duur_min,sport,naam,gedaan_op,garmin_activity_id,strava_activity_id").eq("user_id", user_id).eq("datum", datum).execute()
             via_garmin = _strava_zelfde_garmin(payload, zelfde_dag.data or [])
+            plan = None if via_garmin else _geplande_training_bij(zelfde_dag.data or [], sport_nl, starttijd)
             if via_garmin:
                 # EEN-BRON-V1: Garmin was eerst; alleen het Strava-id eraan hangen
                 supabase_admin.table("fuelc_trainingen").update({"strava_activity_id": object_id}).eq("id", via_garmin["id"]).execute()
                 print(f"[strava-webhook] activiteit {object_id} al bekend via Garmin (rij {via_garmin['id']}); niet dubbel")
+            elif plan:
+                # GEDAAN-V1: de geplande training is gedaan; de Strava-cijfers nemen ze over
+                supabase_admin.table("fuelc_trainingen").update(_plan_overname(plan, payload)).eq("id", plan["id"]).execute()
+                print(f"[strava-webhook] activiteit {object_id} is de geplande training {plan['id']}")
             else:
                 supabase_admin.table("fuelc_trainingen").insert(payload).execute()
                 print(f"[strava-webhook] activiteit {object_id} geimporteerd voor user {user_id}")
@@ -12341,11 +12399,17 @@ async def _garmin_activiteit_verwerk(item: dict, koppeling: dict):
             supabase_admin.table("fuelc_trainingen").update(rij).eq("id", bestaand.data[0]["id"]).execute()
             detail["training_id"] = bestaand.data[0]["id"]
         else:
-            zelfde_dag = supabase_admin.table("fuelc_trainingen").select("id,bron,starttijd,duur_min").eq("user_id", user_id).eq("datum", rij["datum"]).execute()
-            dubbel = _garmin_zelfde_training(rij, zelfde_dag.data or [])
-            if dubbel and dubbel.get("bron") == "strava":
+            zelfde_dag = supabase_admin.table("fuelc_trainingen").select("id,bron,starttijd,duur_min,sport,naam,gedaan_op,garmin_activity_id,strava_activity_id").eq("user_id", user_id).eq("datum", rij["datum"]).execute()
+            plan = _geplande_training_bij(zelfde_dag.data or [], rij["sport"], rij["starttijd"])
+            dubbel = None if plan else _garmin_zelfde_training(rij, zelfde_dag.data or [])
+            if plan:
+                # GEDAAN-V1: de geplande training is gedaan; de Garmin-cijfers nemen ze over
+                supabase_admin.table("fuelc_trainingen").update(_plan_overname(plan, rij)).eq("id", plan["id"]).execute()
+                detail["training_id"] = plan["id"]
+                print(f"[garmin-push] activiteit {gid} is de geplande training {plan['id']}")
+            elif dubbel and dubbel.get("bron") == "strava":
                 # EEN-BRON-V1: Strava was eerst; de Garmin-waarden nemen de rij over
-                supabase_admin.table("fuelc_trainingen").update(rij).eq("id", dubbel["id"]).execute()
+                supabase_admin.table("fuelc_trainingen").update(_plan_overname(dubbel, rij)).eq("id", dubbel["id"]).execute()
                 detail["training_id"] = dubbel["id"]
                 print(f"[garmin-push] activiteit {gid} vervangt de Strava-rij {dubbel['id']}")
             elif dubbel:

@@ -125,3 +125,49 @@ assert len(tr) == 1 and tr[0]["bron"] == "garmin" and tr[0]["kcal_verbranding"] 
 assert tr[0]["garmin_activity_id"] == "555" and tr[0]["strava_activity_id"] == "9001", tr
 print("strava eerst ok")
 print("ALLES OK")
+
+# ── GEDAAN-V1 ───────────────────────────────────────────────────────
+# a. gepland telt niet, afgevinkt wel
+per_dag = main._trainingskcal_per_dag([
+    {"datum": "2026-10-30", "sport": "Lopen", "bron": "manueel", "kcal_verbranding": 854},
+    {"datum": "2026-10-31", "sport": "Lopen", "bron": "manueel", "kcal_verbranding": 854, "gedaan_op": "2026-10-31T09:00:00+00:00"},
+    {"datum": "2026-10-31", "sport": "Fietsen", "bron": "coach", "kcal_verbranding": 300},
+])
+assert "2026-10-30" not in per_dag and per_dag["2026-10-31"] == 854, per_dag
+print("gepland telt niet ok")
+
+# b. Garmin levert de geplande training: één rij, naam en opbouw van het plan blijven
+fiets = main._garmin_sport_nl("CYCLING")
+db["fuelc_trainingen"] = [
+    {"id": "p1", "user_id": "u1", "datum": "2026-10-29", "starttijd": "07:00", "duur_min": 60, "kcal_verbranding": 600,
+     "sport": fiets, "bron": "manueel", "naam": "3 x 10 min drempel", "zone_verdeling": "[...]", "garmin_workout_id": 42},
+    {"id": "p2", "user_id": "u1", "datum": "2026-10-29", "starttijd": "18:00", "duur_min": 45, "kcal_verbranding": 300,
+     "sport": "Lopen", "bron": "coach", "naam": "Looptraining"},
+]
+db["carboo_garmin_activiteiten"] = []
+asyncio.run(main._garmin_activiteit_verwerk({**act, "activityId": 777, "activityName": "Turnhout Wegwielrennen"}, {"user_id": "u1"}))
+tr = db["fuelc_trainingen"]
+assert len(tr) == 2, tr
+p1 = next(t for t in tr if t["id"] == "p1")
+assert p1["bron"] == "garmin" and p1["garmin_activity_id"] == "777" and p1["kcal_verbranding"] == 428 and p1["duur_min"] == 75, p1
+assert p1["naam"] == "3 x 10 min drempel" and p1["zone_verdeling"] == "[...]" and p1["garmin_workout_id"] == 42, p1
+assert main._training_gedaan(p1) and not main._training_gedaan(next(t for t in tr if t["id"] == "p2"))
+print("garmin neemt plan over ok")
+
+# c. Strava-webhook levert de geplande looptraining
+FakeHTTP.antwoord = {"id": 9003, "sport_type": "Run", "start_date_local": "2026-10-29T18:05:00",
+                     "moving_time": 48 * 60, "calories": 410, "name": "Avondloop"}
+asyncio.run(main._strava_webhook_verwerk({"object_type": "activity", "aspect_type": "create", "object_id": 9003, "owner_id": 77}))
+tr = db["fuelc_trainingen"]
+assert len(tr) == 2, tr
+p2 = next(t for t in tr if t["id"] == "p2")
+assert p2["bron"] == "strava" and str(p2["strava_activity_id"]) == "9003" and p2["kcal_verbranding"] == 410 and p2["naam"] == "Looptraining", p2
+print("strava neemt plan over ok")
+
+# d. geen open plan van die sport: gewoon een nieuwe rij
+FakeHTTP.antwoord = {"id": 9004, "sport_type": "Swim", "start_date_local": "2026-10-29T12:00:00",
+                     "moving_time": 30 * 60, "calories": 200, "name": "Baantjes"}
+asyncio.run(main._strava_webhook_verwerk({"object_type": "activity", "aspect_type": "create", "object_id": 9004, "owner_id": 77}))
+assert len(db["fuelc_trainingen"]) == 3, db["fuelc_trainingen"]
+print("zonder plan nieuwe rij ok")
+print("GEDAAN OK")
