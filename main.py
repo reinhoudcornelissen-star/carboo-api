@@ -11964,7 +11964,11 @@ def _garmin_tokens_opslaan(user_id: str, tokens: dict, extra: dict | None = None
     }
     if extra:
         rij.update(extra)
-    supabase_admin.table("carboo_garmin_koppelingen").upsert(rij, on_conflict="user_id").execute()
+        supabase_admin.table("carboo_garmin_koppelingen").upsert(rij, on_conflict="user_id").execute()
+    else:
+        # TOKEN-VERNIEUW-V1: bij een vernieuwing bestaat de rij al; een upsert met
+        # alleen de tokenvelden botst op de verplichte kolommen (toestemming_op)
+        supabase_admin.table("carboo_garmin_koppelingen").update(rij).eq("user_id", user_id).execute()
     return rij
 
 
