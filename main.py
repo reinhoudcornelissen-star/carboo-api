@@ -11185,7 +11185,8 @@ async def _strava_sync_impl(historie: bool, dagen: int, user, supabase):
         # Check voor conflict op dezelfde datum
         zelfde_dag = supabase.table("fuelc_trainingen").select("id,bron,starttijd,duur_min,sport,naam,gedaan_op,garmin_activity_id,strava_activity_id,kcal_verbranding").eq("user_id", user.id).eq("datum", datum).execute()
         # EEN-BRON-V1: zit deze sessie al via Garmin in Carboo, dan blijft Garmin de enige aanleveraar
-        via_garmin = _strava_zelfde_garmin({"starttijd": starttijd, "duur_min": duur_min}, zelfde_dag.data or [])
+        via_garmin = _strava_zelfde_garmin({"starttijd": starttijd, "duur_min": duur_min,
+                                            "duur_totaal_min": round((a.get("elapsed_time") or 0) / 60)}, zelfde_dag.data or [])
         if via_garmin:
             supabase.table("fuelc_trainingen").update({"strava_activity_id": strava_id}).eq("id", via_garmin["id"]).execute()
             print(f"[strava] activiteit {strava_id} al bekend via Garmin (rij {via_garmin['id']}); niet dubbel")
@@ -11324,7 +11325,7 @@ async def _strava_webhook_verwerk(event: dict):
             print(f"[strava-webhook] activiteit {object_id} bijgewerkt voor user {user_id}")
         else:
             zelfde_dag = supabase_admin.table("fuelc_trainingen").select("id,bron,starttijd,duur_min,sport,naam,gedaan_op,garmin_activity_id,strava_activity_id").eq("user_id", user_id).eq("datum", datum).execute()
-            via_garmin = _strava_zelfde_garmin(payload, zelfde_dag.data or [])
+            via_garmin = _strava_zelfde_garmin({**payload, "duur_totaal_min": round((a.get("elapsed_time") or 0) / 60)}, zelfde_dag.data or [])
             plan = None if via_garmin else _geplande_training_bij(zelfde_dag.data or [], sport_nl, starttijd)
             if via_garmin:
                 # EEN-BRON-V1: Garmin was eerst; alleen het Strava-id eraan hangen
@@ -12352,9 +12353,13 @@ def _garmin_training_payload(user_id: str, a: dict) -> dict | None:
 
 def _zelfde_sessie(rij: dict, bestaande: list, bronnen=None) -> dict | None:
     """EEN-BRON-V1 — dezelfde sessie die al in Carboo staat: zelfde dag, start
-    binnen 5 minuten, duur binnen 15% (Garmin stuurt totale tijd, Strava
-    bewegende tijd). bronnen = alleen rijen met die bron vergelijken;
-    None = alles behalve Garmin."""
+    binnen 5 minuten, duur binnen 15%. Garmin stuurt de totale tijd, Strava
+    de bewegende tijd; bij zwemmen valt de rust aan de kant weg en scheelt
+    dat snel 20%. Daarom (ZELFDE-SESSIE-V2):
+    - rij["duur_totaal_min"] (Strava's elapsed_time) telt ook mee als duur;
+    - vangnet: start binnen 2 minuten en de kortste duur minstens 70% van
+      de langste is ook dezelfde sessie.
+    bronnen = alleen rijen met die bron vergelijken; None = alles behalve Garmin."""
     def _min(t):
         try:
             u, m = str(t or "07:00").split(":")[:2]
@@ -12371,9 +12376,15 @@ def _zelfde_sessie(rij: dict, bestaande: list, bronnen=None) -> dict | None:
         bs = _min(b.get("starttijd"))
         if s is None or bs is None or abs(s - bs) > 5:
             continue
-        d1, d2 = rij.get("duur_min") or 0, b.get("duur_min") or 0
-        if max(d1, d2) == 0 or abs(d1 - d2) <= 0.15 * max(d1, d2):
-            return b
+        d2 = b.get("duur_min") or 0
+        duren = [rij.get("duur_min") or 0]
+        if rij.get("duur_totaal_min"):
+            duren.append(rij["duur_totaal_min"])
+        for d1 in duren:
+            if max(d1, d2) == 0 or abs(d1 - d2) <= 0.15 * max(d1, d2):
+                return b
+            if abs(s - bs) <= 2 and min(d1, d2) >= 0.7 * max(d1, d2):
+                return b
     return None
 
 

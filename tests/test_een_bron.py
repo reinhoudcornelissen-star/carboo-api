@@ -18,6 +18,13 @@ assert main._strava_zelfde_garmin(strava_rij, [garmin_rij])["id"] == "g1"
 assert main._strava_zelfde_garmin(strava_rij, [{**garmin_rij, "bron": "manueel"}]) is None, "alleen Garmin-rijen tellen"
 assert main._strava_zelfde_garmin({**strava_rij, "starttijd": "10:20"}, [garmin_rij]) is None
 assert main._garmin_zelfde_training({"starttijd": "10:12", "duur_min": 75}, [{"id": "s1", "bron": "strava", "starttijd": "10:12", "duur_min": 69}])["id"] == "s1"
+# ZELFDE-SESSIE-V2 — zwemmen 31/10: Garmin 53 min totaal, Strava 43 min bewegend (19% verschil)
+zwem_garmin = {"id": "g2", "bron": "garmin", "starttijd": "08:03", "duur_min": 53}
+assert main._strava_zelfde_garmin({"starttijd": "08:03", "duur_min": 43}, [zwem_garmin])["id"] == "g2", "zelfde start, 70%-vangnet"
+assert main._strava_zelfde_garmin({"starttijd": "08:06", "duur_min": 43, "duur_totaal_min": 53}, [zwem_garmin])["id"] == "g2", "Strava's totale tijd telt mee"
+assert main._strava_zelfde_garmin({"starttijd": "08:06", "duur_min": 43}, [zwem_garmin]) is None, "4 min later én 19% korter: geen vangnet"
+assert main._strava_zelfde_garmin({"starttijd": "08:03", "duur_min": 30}, [zwem_garmin]) is None, "57% is een andere sessie"
+assert main._garmin_zelfde_training({"starttijd": "08:03", "duur_min": 53}, [{"id": "s2", "bron": "strava", "starttijd": "08:03", "duur_min": 43}])["id"] == "s2", "omgekeerde volgorde"
 print("vergelijking ok")
 
 # ── dagtelling: Garmin telt als werkelijk ────────────────────────────
