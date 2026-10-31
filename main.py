@@ -12770,6 +12770,69 @@ async def wedstrijd_verwijder(wedstrijd_id: str, user=Depends(get_current_user))
     return {"ok": True}
 
 
+# ─── TRAININGSPLAN-V1 — het schema (macro/meso/micro) uit test2perform ──
+# De rekenkern draait in de frontend (lib/trainingsplan, letterlijk uit T2P);
+# hier wordt het plan alleen bewaard als JSON en teruggegeven. Eén actief
+# plan per sporter is de regel in de app; de tabel laat er meer toe.
+class TrainingsplanData(BaseModel):
+    titel: str
+    startdatum: str
+    invoer: dict
+    plan: dict
+    niveaus: Optional[list] = None
+    eenheid: Optional[str] = None
+
+
+def _trainingsplan_controle(plan, startdatum: str | None = None):
+    if not isinstance(plan, dict) or not isinstance(plan.get("weken"), list) or not plan["weken"]:
+        raise HTTPException(400, "Het plan heeft geen weken")
+    if startdatum is not None:
+        try:
+            _dt.datetime.strptime(startdatum, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(400, "Startdatum moet JJJJ-MM-DD zijn")
+
+
+@app.get("/api/trainingsplannen")
+async def trainingsplannen_lijst(user=Depends(get_current_user)):
+    r = supabase_admin.table("carboo_trainingsplannen").select("*").eq("user_id", user.id).order("created_at", desc=True).execute()
+    return {"plannen": r.data or []}
+
+
+@app.post("/api/trainingsplannen")
+async def trainingsplan_maak(item: TrainingsplanData, user=Depends(get_current_user)):
+    _trainingsplan_controle(item.plan, item.startdatum)
+    titel = (item.titel or "").strip()[:200] or "Trainingsplan"
+    data = {"user_id": user.id, "titel": titel, "startdatum": item.startdatum, "invoer": item.invoer,
+            "plan": item.plan, "niveaus": item.niveaus, "eenheid": item.eenheid}
+    r = supabase_admin.table("carboo_trainingsplannen").insert(data).execute()
+    return {"plan": (r.data or [None])[0]}
+
+
+@app.put("/api/trainingsplannen/{plan_id}")
+async def trainingsplan_wijzig(plan_id: str, data: dict, user=Depends(get_current_user)):
+    update = {k: v for k, v in (data or {}).items() if k in ("titel", "startdatum", "invoer", "plan", "niveaus", "eenheid")}
+    if not update:
+        raise HTTPException(400, "Niets om te wijzigen")
+    if "plan" in update:
+        _trainingsplan_controle(update["plan"])
+    if "startdatum" in update:
+        _trainingsplan_controle({"weken": [1]}, update["startdatum"])
+    if "titel" in update:
+        update["titel"] = (str(update["titel"]) or "").strip()[:200] or "Trainingsplan"
+    update["updated_at"] = _garmin_nu().isoformat()
+    r = supabase_admin.table("carboo_trainingsplannen").update(update).eq("id", plan_id).eq("user_id", user.id).execute()
+    if not r.data:
+        raise HTTPException(404, "Plan niet gevonden")
+    return {"plan": r.data[0]}
+
+
+@app.delete("/api/trainingsplannen/{plan_id}")
+async def trainingsplan_verwijder(plan_id: str, user=Depends(get_current_user)):
+    supabase_admin.table("carboo_trainingsplannen").delete().eq("id", plan_id).eq("user_id", user.id).execute()
+    return {"ok": True}
+
+
 @app.get("/api/wedstrijden/raceplannen")
 async def wedstrijden_raceplannen(user=Depends(get_current_user)):
     """De raceplannen van de sporter (Race-module), om een wedstrijd aan te koppelen."""
