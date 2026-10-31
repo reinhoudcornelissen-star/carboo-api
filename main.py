@@ -9076,43 +9076,90 @@ async def voeg_oefening_toe(payload: dict,
     return {"ok": True, "oefening": (r.data or [None])[0]}
 
 
+def _kracht_oefeningen_van(training: dict) -> list:
+    """OEFENINGEN-V2 — de oefeningen van een krachttraining.
+
+    Ze zitten als segmenten in zone_verdeling (JSON-tekst of al een lijst),
+    elk met een veld kracht: {oefening_id, naam, sets, reps of seconden,
+    gewicht_kg, rust_s, per_kant}. Geeft die kracht-dicts terug, in volgorde."""
+    zv = training.get("zone_verdeling")
+    if isinstance(zv, str):
+        try:
+            zv = json.loads(zv or "[]")
+        except (TypeError, ValueError):
+            zv = []
+    if not isinstance(zv, list):
+        return []
+    uit = []
+    for sg in zv:
+        if isinstance(sg, dict) and isinstance(sg.get("kracht"), dict):
+            uit.append(sg["kracht"])
+    return uit
+
+
+def _kracht_waarden(k: dict, datum) -> dict:
+    """Eén regel historiek: wat iemand toen deed met die oefening."""
+    def num(x):
+        try:
+            return float(x) if x not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+    sets = num(k.get("sets")); reps = num(k.get("reps")); sec = num(k.get("seconden"))
+    gewicht = num(k.get("gewicht_kg") if k.get("gewicht_kg") not in (None, "") else k.get("gewicht"))
+    return {
+        "datum": datum,
+        "sets": int(sets) if sets is not None else None,
+        "reps": int(reps) if reps is not None else None,
+        "seconden": int(sec) if sec is not None else None,
+        "gewicht_kg": gewicht,
+        "rust_s": int(num(k.get("rust_s")) or 0) or None,
+        "per_kant": bool(k.get("per_kant")),
+        "volume": round((sets or 0) * (reps or 0) * (gewicht or 0)),
+    }
+
+
+def _gedane_krachttrainingen(supabase, user_id: str, limiet: int = 60) -> list:
+    """De recentste krachttrainingen die ook gedaan zijn (GEDAAN-V1):
+    een gepland schema dat nog niet is uitgevoerd telt niet als 'vorige keer'."""
+    try:
+        tr = supabase.table("fuelc_trainingen")             .select("datum,zone_verdeling,bron,gedaan_op")             .eq("user_id", user_id)             .order("datum", desc=True).limit(limiet).execute().data or []
+    except Exception as e:
+        print(f"[OEFENINGEN-V2] krachttrainingen ophalen mislukt: {e}")
+        return []
+    return [t for t in tr if _training_gedaan(t)]
+
+
+@app.get("/api/fuelc/oefeningen/laatste")
+async def oefeningen_laatste(user=Depends(get_current_user),
+                             supabase: Client = Depends(get_supabase)):
+    """OEFENINGEN-V2 — per oefening de waarden van de laatste keer dat deze
+    klant ze deed. Eén oproep voor het hele oefeningenscherm, zodat elke
+    kaart 'vorige keer 4 × 8 · 60 kg' kan tonen en die waarden vooraf
+    ingevuld worden."""
+    laatste: dict = {}
+    for t in _gedane_krachttrainingen(supabase, user.id):
+        for k in _kracht_oefeningen_van(t):
+            oid = str(k.get("oefening_id") or "")
+            if not oid or oid in laatste:
+                continue
+            laatste[oid] = _kracht_waarden(k, t.get("datum"))
+    return {"laatste": laatste}
+
+
 @app.get("/api/fuelc/oefeningen/{oefening_id}/historiek")
 async def oefening_historiek(oefening_id: str,
                              user=Depends(get_current_user),
                              supabase: Client = Depends(get_supabase)):
-    """De laatste keren dat deze klant deze oefening deed.
+    """De laatste keren dat deze klant deze oefening deed (max 8).
 
-    Zo kan de bouwer tonen waar iemand vorige week stond. De oefeningen
-    zitten in het veld segmenten van een training, dus we halen de recente
-    krachttrainingen op en zoeken er de oefening in."""
-    try:
-        tr = supabase.table("fuelc_trainingen") \
-            .select("datum,segmenten") \
-            .eq("user_id", user.id) \
-            .order("datum", desc=True).limit(60).execute().data or []
-    except Exception as e:
-        print(f"[OEFENINGEN-V1] historiek ophalen mislukt: {e}")
-        return {"historiek": []}
-
+    De oefeningen zitten als segmenten in zone_verdeling van een
+    krachttraining; alleen gedane trainingen tellen."""
     uit = []
-    for t in tr:
-        for sg in (t.get("segmenten") or []):
-            if not isinstance(sg, dict):
-                continue
-            k = sg.get("kracht")
-            if not isinstance(k, dict):
-                continue
+    for t in _gedane_krachttrainingen(supabase, user.id):
+        for k in _kracht_oefeningen_van(t):
             if str(k.get("oefening_id") or "") != str(oefening_id):
                 continue
-            uit.append({
-                "datum": t.get("datum"),
-                "sets": k.get("sets"),
-                "reps": k.get("reps"),
-                "gewicht": k.get("gewicht"),
-                "volume": round((float(k.get("sets") or 0)
-                                 * float(k.get("reps") or 0)
-                                 * float(k.get("gewicht") or 0))),
-            })
+            uit.append(_kracht_waarden(k, t.get("datum")))
             break
         if len(uit) >= 8:
             break
