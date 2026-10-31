@@ -12833,6 +12833,98 @@ async def trainingsplan_verwijder(plan_id: str, user=Depends(get_current_user)):
     return {"ok": True}
 
 
+# ── PLAN-KALENDER-V1 (TRAININGSPLAN-V3 stap 3): een week van het plan in de kalender ──
+class PlanWeekData(BaseModel):
+    van: str
+    tot: str
+    trainingen: list
+    vervang_ids: Optional[list] = None
+
+
+def _plan_van_sporter(plan_id: str, user_id: str) -> dict:
+    r = supabase_admin.table("carboo_trainingsplannen").select("id").eq("id", plan_id).eq("user_id", user_id).execute()
+    if not r.data:
+        raise HTTPException(404, "Plan niet gevonden")
+    return r.data[0]
+
+
+def _plan_datum(tekst) -> str:
+    try:
+        return _dt.datetime.strptime(str(tekst or "").strip(), "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        raise HTTPException(400, "Datum moet JJJJ-MM-DD zijn")
+
+
+def _vandaag_brussel() -> str:
+    from zoneinfo import ZoneInfo
+    return _dt.datetime.now(ZoneInfo("Europe/Brussels")).date().isoformat()
+
+
+@app.get("/api/trainingsplannen/{plan_id}/kalender")
+async def trainingsplan_kalender_week(plan_id: str, van: str, tot: str, user=Depends(get_current_user)):
+    """Wat er al in de kalender staat tussen van en tot (alle trainingen van
+    de sporter), met of ze gedaan zijn en of ze van dit plan komen. Zo kiest
+    de sporter wat blijft en wat vervangen wordt."""
+    _plan_van_sporter(plan_id, user.id)
+    van, tot = _plan_datum(van), _plan_datum(tot)
+    r = (supabase_admin.table("fuelc_trainingen").select("id,datum,naam,sport,duur_min,starttijd,bron,gedaan_op,plan_id")
+         .eq("user_id", user.id).gte("datum", van).lte("datum", tot).order("datum").execute())
+    uit = [{**t, "gedaan": _training_gedaan(t), "van_plan": str(t.get("plan_id")) == str(plan_id)} for t in (r.data or [])]
+    return {"trainingen": uit, "vandaag": _vandaag_brussel()}
+
+
+@app.post("/api/trainingsplannen/{plan_id}/kalender")
+async def trainingsplan_naar_kalender(plan_id: str, item: PlanWeekData, user=Depends(get_current_user)):
+    """Eén week van het plan in de kalender zetten. Geplande trainingen van
+    dit plan in die week worden vervangen; gedane blijven staan en hun dag
+    krijgt geen nieuwe plansessie. Andere trainingen blijven, tenzij de
+    sporter ze in vervang_ids zet (alleen eigen, niet gedane). Dagen vóór
+    vandaag worden overgeslagen. De rijen komen binnen zoals de bouwer ze
+    maakt (sport, duur_min, zone_verdeling met segmenten, kcal, notitie,
+    starttijd, naam) en krijgen bron manueel, gedaan_op leeg en plan_id."""
+    _plan_van_sporter(plan_id, user.id)
+    van, tot = _plan_datum(item.van), _plan_datum(item.tot)
+    if tot < van or (_dt.date.fromisoformat(tot) - _dt.date.fromisoformat(van)).days > 7:
+        raise HTTPException(400, "Van en tot moeten één week omspannen")
+    if len(item.trainingen or []) > 40:
+        raise HTTPException(400, "Te veel trainingen voor één week")
+    bestaand = (supabase_admin.table("fuelc_trainingen").select("*").eq("user_id", user.id)
+                .gte("datum", van).lte("datum", tot).execute().data or [])
+    weg = [t["id"] for t in bestaand if str(t.get("plan_id")) == str(plan_id) and not _training_gedaan(t)]
+    vervang = {str(x) for x in (item.vervang_ids or [])}
+    weg += [t["id"] for t in bestaand if str(t["id"]) in vervang and t["id"] not in weg and not _training_gedaan(t)]
+    gedaan_dagen = {t["datum"] for t in bestaand if str(t.get("plan_id")) == str(plan_id) and _training_gedaan(t)}
+    vandaag = _vandaag_brussel()
+    if weg:
+        supabase_admin.table("fuelc_trainingen").delete().in_("id", weg).eq("user_id", user.id).execute()
+    rijen, overgeslagen = [], 0
+    for t in item.trainingen or []:
+        if not isinstance(t, dict):
+            continue
+        datum = _plan_datum(t.get("datum"))
+        if datum < van or datum > tot or datum < vandaag or datum in gedaan_dagen:
+            overgeslagen += 1
+            continue
+        zv = t.get("zone_verdeling")
+        if zv is not None and not isinstance(zv, str):
+            zv = json.dumps(zv)
+        def _getal(v, grens):
+            try:
+                return max(0, min(grens, int(float(v or 0))))
+            except (TypeError, ValueError):
+                return 0
+        rijen.append({
+            "user_id": user.id, "plan_id": plan_id, "bron": "manueel", "gedaan_op": None, "datum": datum,
+            "sport": str(t.get("sport") or "Training")[:60], "duur_min": _getal(t.get("duur_min"), 1440),
+            "afstand_km": 0, "kcal_verbranding": _getal(t.get("kcal_verbranding"), 20000), "zone_verdeling": zv,
+            "notitie": (str(t.get("notitie") or "")[:2000] or None), "starttijd": str(t.get("starttijd") or "07:00")[:5],
+            "naam": (str(t.get("naam") or "")[:120] or None),
+        })
+    if rijen:
+        supabase_admin.table("fuelc_trainingen").insert(rijen).execute()
+    return {"ok": True, "gezet": len(rijen), "verwijderd": len(weg), "overgeslagen": overgeslagen}
+
+
 @app.get("/api/wedstrijden/raceplannen")
 async def wedstrijden_raceplannen(user=Depends(get_current_user)):
     """De raceplannen van de sporter (Race-module), om een wedstrijd aan te koppelen."""
