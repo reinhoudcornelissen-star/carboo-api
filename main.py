@@ -12717,13 +12717,26 @@ class WedstrijdData(BaseModel):
     doel: Optional[str] = None
     notitie: Optional[str] = None
     rapport_id: Optional[str] = None
+    # WEDSTRIJD-ONDERDELEN-V1: afstand per onderdeel bij triatlon/duatlon, bv. {"Zwemmen": 1.9, "Fietsen": 90, "Lopen": 21.1}
+    onderdelen: Optional[dict] = None
 
 
 def _wedstrijd_schoon(d: dict) -> dict:
     uit = {}
-    for k in ("datum", "naam", "prioriteit", "sport", "afstand_km", "doel", "notitie", "rapport_id"):
+    for k in ("datum", "naam", "prioriteit", "sport", "afstand_km", "doel", "notitie", "rapport_id", "onderdelen"):
         if k in d:
             uit[k] = d[k]
+    if "onderdelen" in uit:
+        schoon = {}
+        if isinstance(uit["onderdelen"], dict):
+            for k, w in list(uit["onderdelen"].items())[:6]:
+                try:
+                    getal = float(str(w).replace(",", "."))
+                except (TypeError, ValueError):
+                    continue
+                if 0 < getal < 1000:
+                    schoon[str(k)[:30]] = getal
+        uit["onderdelen"] = schoon or None
     if "prioriteit" in uit and uit["prioriteit"] not in ("A", "B", "C"):
         uit["prioriteit"] = "B"
     if "naam" in uit:

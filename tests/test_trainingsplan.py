@@ -128,4 +128,9 @@ assert any(p["id"] == "ander" for p in db["carboo_trainingsplannen"]), "plan van
 assert c.delete(f"/api/trainingsplannen/{p1['id']}").json() == {"ok": True}
 assert c.get("/api/trainingsplannen").json()["plannen"] == []
 print("verwijderen ok")
+# WEDSTRIJD-ONDERDELEN-V1: afstand per onderdeel wordt geschoond
+assert main._wedstrijd_schoon({"onderdelen": {"Zwemmen": "1,9", "Fietsen": 90, "Lopen": "x", "Raar": -5}})["onderdelen"] == {"Zwemmen": 1.9, "Fietsen": 90.0}
+assert main._wedstrijd_schoon({"onderdelen": "onzin"})["onderdelen"] is None
+assert "onderdelen" not in main._wedstrijd_schoon({"naam": "x"})
+print("wedstrijd onderdelen ok")
 print("ALLES OK")
