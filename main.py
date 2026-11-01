@@ -12928,10 +12928,15 @@ async def trainingsplan_naar_kalender(plan_id: str, item: PlanWeekData, user=Dep
                 return max(0, min(grens, int(float(v or 0))))
             except (TypeError, ValueError):
                 return 0
+        # LOOP-KM-V1: lopen in km geeft de training haar afstand mee
+        try:
+            km = round(max(0.0, min(500.0, float(t.get("afstand_km") or 0))), 2)
+        except (TypeError, ValueError):
+            km = 0
         rijen.append({
             "user_id": user.id, "plan_id": plan_id, "bron": "manueel", "gedaan_op": None, "datum": datum,
             "sport": str(t.get("sport") or "Training")[:60], "duur_min": _getal(t.get("duur_min"), 1440),
-            "afstand_km": 0, "kcal_verbranding": _getal(t.get("kcal_verbranding"), 20000), "zone_verdeling": zv,
+            "afstand_km": km, "kcal_verbranding": _getal(t.get("kcal_verbranding"), 20000), "zone_verdeling": zv,
             "notitie": (str(t.get("notitie") or "")[:2000] or None), "starttijd": str(t.get("starttijd") or "07:00")[:5],
             "naam": (str(t.get("naam") or "")[:120] or None),
         })
