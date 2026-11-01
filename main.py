@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from pywebpush import webpush, WebPushException
-from typing import Optional, List
+from typing import Optional, List, Union
 import os
 import json
 import asyncio
@@ -12779,7 +12779,9 @@ class TrainingsplanData(BaseModel):
     startdatum: str
     invoer: dict
     plan: dict
-    niveaus: Optional[list] = None
+    # Een lijst (één hoofdsport) of een object per sport (triatlon, duatlon: MULTISPORT-V1).
+    # Als lijst alleen gaf 422 en "Het schema kon niet bewaard worden" (1 november 2026).
+    niveaus: Optional[Union[list, dict]] = None
     eenheid: Optional[str] = None
 
 

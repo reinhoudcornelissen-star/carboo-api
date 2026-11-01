@@ -60,6 +60,12 @@ p1 = r.json()["plan"]; assert p1["titel"] == "Mijn plan" and p1["user_id"] == "u
 # zonder weken: 400
 assert c.post("/api/trainingsplannen", json={"titel": "x", "startdatum": "2026-11-02", "invoer": {}, "plan": {"weken": []}}).status_code == 400
 assert c.post("/api/trainingsplannen", json={"titel": "x", "startdatum": "2 nov", "invoer": {}, "plan": plan}).status_code == 400
+# MULTISPORT: niveaus als object per sport moet ook kunnen (1 november 2026)
+r = c.post("/api/trainingsplannen", json={"titel": "Tri", "startdatum": "2026-11-02", "invoer": plan["invoer"], "plan": plan,
+                                          "niveaus": {"Fietsen": [{"niveau": 1}], "Lopen": [{"niveau": 1}]}, "eenheid": "multi"})
+assert r.status_code == 200, r.text
+assert r.json()["plan"]["niveaus"]["Lopen"] == [{"niveau": 1}]
+c.delete(f"/api/trainingsplannen/{r.json()['plan']['id']}")
 print("aanmaken ok")
 
 # lijst, alleen van deze sporter
