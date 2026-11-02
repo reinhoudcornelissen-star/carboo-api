@@ -443,6 +443,9 @@ class PrivacyInstellingen(BaseModel):
     # MASCOTTE-CHAT-V1 — mag deze coach de vragen aan de mascotte zien?
     # None = niet meegestuurd (een oudere app): dan blijft de kolom ongemoeid.
     chat: Optional[bool] = None
+    # COACH-TRAINING-V1 (2 november 2026) — mag deze coach in de module Training
+    # van de sporter (kalender, schema, wedstrijden)? None = oudere app.
+    training: Optional[bool] = None
     # DOSSIERVLAG-WEG-V1 — dossier is hier weg. De frontend stuurt het veld
     # mogelijk nog mee; pydantic negeert onbekende velden (extra='ignore'),
     # dus dat breekt niets in het venster tussen beide deploys.
@@ -1134,6 +1137,8 @@ async def update_privacy(relatie_id: str, item: PrivacyInstellingen, user=Depend
     }
     if item.chat is not None:
         velden["chat"] = item.chat
+    if item.training is not None:   # COACH-TRAINING-V1
+        velden["training"] = item.training
     supabase.table("carboo_coach_privacy").update(velden) \
         .eq("relatie_id", relatie_id).eq("klant_id", user.id).execute()
     return {"ok": True}
@@ -12943,6 +12948,214 @@ async def trainingsplan_naar_kalender(plan_id: str, item: PlanWeekData, user=Dep
     if rijen:
         supabase_admin.table("fuelc_trainingen").insert(rijen).execute()
     return {"ok": True, "gezet": len(rijen), "verwijderd": len(weg), "overgeslagen": overgeslagen}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COACH-TRAINING-V1 (2 november 2026) — de coach in de module Training van zijn klant
+# ═══════════════════════════════════════════════════════════════════════════
+# De sporterschermen Kalender, Plan en Wedstrijden draaien in de coachzone op
+# het account van de klant (/app/training?klant=...). Elke route hier
+# controleert de relatie en het privacyvinkje `training` (coach-training.sql)
+# en roept dan de sporterroute aan met de klant als eigenaar, zodat er maar
+# één stuk logica bestaat. Wat de coach zet, krijgt bron 'coach' en zijn
+# coach_id; een schema krijgt coach_id. Gedane trainingen (Garmin, Strava,
+# afgevinkt) wijzigt of verwijdert de coach niet. Elke wijziging laat een
+# spoor na in het rode bolletje (coach_signaal, hoogstens één per dag) en de
+# nieuwe dingen (training, schema, week in de kalender) ook als push.
+
+class _Klant:
+    """Staat in voor de sporter bij het aanroepen van een sporterroute."""
+    def __init__(self, klant_id: str):
+        self.id = klant_id
+
+
+async def _coach_mag_training(user, klant_id: str, supabase) -> str:
+    coach = supabase.table("carboo_coaches").select("id").eq("user_id", user.id).execute()
+    if not coach.data:
+        raise HTTPException(403, "Geen coach account")
+    coach_id = coach.data[0]["id"]
+    rel = (supabase.table("carboo_coach_klanten").select("id, carboo_coach_privacy(training)")
+           .eq("coach_id", coach_id).eq("klant_id", klant_id).eq("status", "actief").execute())
+    if not rel.data:
+        raise HTTPException(403, "Geen actieve relatie met deze klant")
+    priv = rel.data[0].get("carboo_coach_privacy") or {}
+    if isinstance(priv, list):
+        priv = priv[0] if priv else {}
+    if not priv.get("training"):
+        raise HTTPException(403, "De sporter deelt zijn training niet met jou")
+    return coach_id
+
+
+def _training_signaal(supabase, klant_id: str, coach_id: str, titel: str, tekst: str = "",
+                      link: str = "/app/training", push: bool = False):
+    coach_signaal(supabase, klant_id, "training", titel, tekst, link=link, coach_id=coach_id)
+    if push:
+        stuur_push_async(klant_id, titel, tekst, url=link, tag="training", soort="training", supabase=supabase)
+
+
+def _training_niet_gedaan(supabase, klant_id: str, training_id: str) -> dict:
+    r = supabase.table("fuelc_trainingen").select("*").eq("id", training_id).eq("user_id", klant_id).execute()
+    if not r.data:
+        raise HTTPException(404, "Training niet gevonden")
+    if _training_gedaan(r.data[0]):
+        raise HTTPException(403, "Een gedane training wijzigt de coach niet")
+    return r.data[0]
+
+
+_CT = "/api/coach/klant/{klant_id}/training"
+
+
+@app.get(_CT + "/profiel")
+async def coach_training_profiel(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_training(user, klant_id, supabase)
+    return await get_fuelc_profiel(user=_Klant(klant_id), supabase=supabase)
+
+
+@app.get(_CT + "/oefeningen")
+async def coach_training_oefeningen(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_training(user, klant_id, supabase)
+    return await get_oefeningen(user=_Klant(klant_id), supabase=supabase)
+
+
+@app.get(_CT + "/zones/{sport}")
+async def coach_training_zones(klant_id: str, sport: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_training(user, klant_id, supabase)
+    return await get_zones(sport, user=_Klant(klant_id), supabase=supabase)
+
+
+@app.post(_CT + "/zones")
+async def coach_training_zones_bewaar(klant_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    uit = await sla_zones_op(data, user=_Klant(klant_id), supabase=supabase)
+    _training_signaal(supabase, klant_id, coach_id, "Je coach paste je zones aan", str(data.get("sport") or ""), link="/app/training?tab=zones")
+    return uit
+
+
+@app.get(_CT + "/trainingen")
+async def coach_training_lijst(klant_id: str, dagen: Optional[int] = None, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_training(user, klant_id, supabase)
+    return await get_trainingen(dagen=dagen, user=_Klant(klant_id), supabase=supabase)
+
+
+@app.post(_CT + "/trainingen")
+async def coach_training_zet(klant_id: str, training: TrainingData, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    data = training.dict()
+    data["user_id"] = klant_id
+    data["bron"] = "coach"
+    data["coach_id"] = coach_id
+    data.pop("gedaan", None)   # afvinken doet de sporter zelf
+    data["gedaan_op"] = None
+    supabase.table("fuelc_trainingen").insert(data).execute()
+    _training_signaal(supabase, klant_id, coach_id, "Nieuwe training van je coach",
+                      f"{data.get('naam') or data.get('sport') or 'Training'} op {data.get('datum') or ''}", push=True)
+    return {"status": "opgeslagen"}
+
+
+@app.patch(_CT + "/trainingen/{training_id}")
+async def coach_training_wijzig(klant_id: str, training_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    _training_niet_gedaan(supabase, klant_id, training_id)
+    data = dict(data or {})
+    data.pop("gedaan", None)   # afvinken doet de sporter zelf
+    uit = await verplaats_training(training_id, data, user=_Klant(klant_id), supabase=supabase)
+    _training_signaal(supabase, klant_id, coach_id, "Je coach paste een training aan", str(data.get("naam") or data.get("datum") or ""))
+    return uit
+
+
+@app.delete(_CT + "/trainingen/{training_id}")
+async def coach_training_weg(klant_id: str, training_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    oud = _training_niet_gedaan(supabase, klant_id, training_id)
+    uit = await verwijder_training(training_id, user=_Klant(klant_id), supabase=supabase)
+    _training_signaal(supabase, klant_id, coach_id, "Je coach haalde een training weg", f"{oud.get('naam') or oud.get('sport') or ''} op {oud.get('datum') or ''}")
+    return uit
+
+
+@app.get(_CT + "/plannen")
+async def coach_plannen_lijst(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_training(user, klant_id, supabase)
+    return await trainingsplannen_lijst(user=_Klant(klant_id))
+
+
+@app.post(_CT + "/plannen")
+async def coach_plan_maak(klant_id: str, item: TrainingsplanData, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    uit = await trainingsplan_maak(item, user=_Klant(klant_id))
+    plan = uit.get("plan") or {}
+    if plan.get("id"):
+        r = supabase_admin.table("carboo_trainingsplannen").update({"coach_id": coach_id}).eq("id", plan["id"]).eq("user_id", klant_id).execute()
+        if r.data:
+            uit["plan"] = r.data[0]
+    _training_signaal(supabase, klant_id, coach_id, "Je coach maakte een trainingsschema", plan.get("titel") or "", link="/app/training?tab=plan", push=True)
+    return uit
+
+
+@app.put(_CT + "/plannen/{plan_id}")
+async def coach_plan_wijzig(klant_id: str, plan_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    uit = await trainingsplan_wijzig(plan_id, data, user=_Klant(klant_id))
+    _training_signaal(supabase, klant_id, coach_id, "Je coach paste je trainingsschema aan", link="/app/training?tab=plan")
+    return uit
+
+
+@app.delete(_CT + "/plannen/{plan_id}")
+async def coach_plan_weg(klant_id: str, plan_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    uit = await trainingsplan_verwijder(plan_id, user=_Klant(klant_id))
+    _training_signaal(supabase, klant_id, coach_id, "Je coach haalde je trainingsschema weg", link="/app/training?tab=plan")
+    return uit
+
+
+@app.get(_CT + "/plannen/{plan_id}/kalender")
+async def coach_plan_kalender_week(klant_id: str, plan_id: str, van: str, tot: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_training(user, klant_id, supabase)
+    return await trainingsplan_kalender_week(plan_id, van, tot, user=_Klant(klant_id))
+
+
+@app.post(_CT + "/plannen/{plan_id}/kalender")
+async def coach_plan_naar_kalender(klant_id: str, plan_id: str, item: PlanWeekData, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    uit = await trainingsplan_naar_kalender(plan_id, item, user=_Klant(klant_id))
+    # wat net gezet is, is van de coach: de nieuwe rijen van dit plan in deze week die nog niet gedaan zijn
+    van, tot = _plan_datum(item.van), _plan_datum(item.tot)
+    rijen = (supabase_admin.table("fuelc_trainingen").select("id,bron,gedaan_op").eq("user_id", klant_id).eq("plan_id", plan_id)
+             .gte("datum", van).lte("datum", tot).execute().data or [])
+    ids = [r["id"] for r in rijen if r.get("bron") == "manueel" and not r.get("gedaan_op")]
+    if ids:
+        supabase_admin.table("fuelc_trainingen").update({"bron": "coach", "coach_id": coach_id}).in_("id", ids).execute()
+    _training_signaal(supabase, klant_id, coach_id, "Je coach zette een week in je kalender",
+                      f"{uit.get('gezet', 0)} trainingen vanaf {van}", push=True)
+    return uit
+
+
+@app.get(_CT + "/wedstrijden")
+async def coach_wedstrijden_lijst(klant_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    await _coach_mag_training(user, klant_id, supabase)
+    return await wedstrijden_lijst(user=_Klant(klant_id))
+
+
+@app.post(_CT + "/wedstrijden")
+async def coach_wedstrijd_maak(klant_id: str, item: WedstrijdData, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    uit = await wedstrijd_maak(item, user=_Klant(klant_id))
+    _training_signaal(supabase, klant_id, coach_id, "Je coach zette een wedstrijd in je lijst", item.naam or "", link="/app/training?tab=wedstrijden")
+    return uit
+
+
+@app.put(_CT + "/wedstrijden/{wedstrijd_id}")
+async def coach_wedstrijd_wijzig(klant_id: str, wedstrijd_id: str, data: dict, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    uit = await wedstrijd_wijzig(wedstrijd_id, data, user=_Klant(klant_id))
+    _training_signaal(supabase, klant_id, coach_id, "Je coach paste een wedstrijd aan", str((data or {}).get("naam") or ""), link="/app/training?tab=wedstrijden")
+    return uit
+
+
+@app.delete(_CT + "/wedstrijden/{wedstrijd_id}")
+async def coach_wedstrijd_weg(klant_id: str, wedstrijd_id: str, user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    coach_id = await _coach_mag_training(user, klant_id, supabase)
+    uit = await wedstrijd_verwijder(wedstrijd_id, user=_Klant(klant_id))
+    _training_signaal(supabase, klant_id, coach_id, "Je coach haalde een wedstrijd weg", link="/app/training?tab=wedstrijden")
+    return uit
 
 
 @app.get("/api/wedstrijden/raceplannen")
