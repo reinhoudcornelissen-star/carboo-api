@@ -4057,7 +4057,13 @@ async def cron_camera(request: Request, supabase: Client = Depends(get_supabase)
     verwerkt = 0
     for uid in {r["user_id"] for r in rij}:
         verwerkt += len(_cam_verwerk(supabase, uid))
-    return {"verwerkt": verwerkt}
+    # KOPPEL-OPRUIM-V1: de koppelingen van niet-betalers meenemen in dezelfde beurt
+    opgeruimd = 0
+    try:
+        opgeruimd = len((await _koppelingen_opruimen(supabase))["losgemaakt"])
+    except Exception as e:
+        print(f"[KOPPEL-OPRUIM-V1] in camera-cron: {type(e).__name__}: {e}")
+    return {"verwerkt": verwerkt, "koppelingen_losgemaakt": opgeruimd}
 
 
 # ============================================================
@@ -4071,8 +4077,10 @@ async def cron_camera(request: Request, supabase: Client = Depends(get_supabase)
 # De status in carboo_abonnementen wordt pas bijgewerkt als de gebruiker inlogt
 # (auto-verloop in mijn-abonnement), dus hier telt de vervaldatum, niet de status.
 # Trainingen en gegevens blijven staan; wie later betaalt, koppelt opnieuw.
-# Elke nacht via een Render Cron Job (header x-cron-sleutel); ?droog=true toont
-# alleen wie aan de beurt is.
+# Draait mee in de camera-cron (/api/cron/camera, om de 5 minuten): geen aparte
+# Render Cron Job en niets te wijzigen in Render. Onschuldig om vaak te draaien:
+# alleen wie aan de beurt is wordt losgemaakt, dus nooit dubbele meldingen.
+# De eigen route /api/cron/koppelingen-opruimen?droog=true toont wie aan de beurt is.
 # ============================================================
 _TRAINING_PAKKETTEN = {"training", "fueling_training", "alles", "coach"}
 _PROEF_IDS = ("trial_auto_7d", "admin_trial")
@@ -4118,12 +4126,9 @@ async def _koppelingen_losmaken(user_id: str, supabase: Client) -> dict:
     return uit
 
 
-@app.post("/api/cron/koppelingen-opruimen")
-async def cron_koppelingen_opruimen(request: Request, droog: bool = False, supabase: Client = Depends(get_supabase)):
-    """Elke nacht via een Render Cron Job (header x-cron-sleutel). ?droog=true: alleen kijken."""
-    sleutel = os.getenv("CRON_SLEUTEL")
-    if not sleutel or not secrets.compare_digest(request.headers.get("x-cron-sleutel") or "", sleutel):
-        raise HTTPException(403, "Geen toegang")
+async def _koppelingen_opruimen(supabase: Client, droog: bool = False) -> dict:
+    """De opruiming zelf; aangeroepen door de camera-cron (om de 5 minuten) en
+    door de eigen route (om met ?droog=true te kijken wie aan de beurt is)."""
     vandaag = _vandaag_brussel()
     garmin = supabase.table("carboo_garmin_koppelingen").select("user_id").execute().data or []
     strava = supabase.table("carboo_strava_koppelingen").select("user_id").execute().data or []
@@ -4154,8 +4159,19 @@ async def cron_koppelingen_opruimen(request: Request, droog: bool = False, supab
             except Exception as e:
                 print(f"[KOPPEL-OPRUIM-V1] push {uid}: {type(e).__name__}")
         los.append(rij)
-    print(f"[KOPPEL-OPRUIM-V1] {len(uids)} gecontroleerd, {len(los)} {'aan de beurt' if droog else 'losgemaakt'}")
+    # Draait mee met de camera-cron (om de 5 minuten): alleen loggen als er iets gebeurt
+    if los or droog:
+        print(f"[KOPPEL-OPRUIM-V1] {len(uids)} gecontroleerd, {len(los)} {'aan de beurt' if droog else 'losgemaakt'}")
     return {"gecontroleerd": len(uids), "losgemaakt": los, "droog": droog}
+
+
+@app.post("/api/cron/koppelingen-opruimen")
+async def cron_koppelingen_opruimen(request: Request, droog: bool = False, supabase: Client = Depends(get_supabase)):
+    """Los aan te roepen (header x-cron-sleutel), vooral met ?droog=true om te kijken."""
+    sleutel = os.getenv("CRON_SLEUTEL")
+    if not sleutel or not secrets.compare_digest(request.headers.get("x-cron-sleutel") or "", sleutel):
+        raise HTTPException(403, "Geen toegang")
+    return await _koppelingen_opruimen(supabase, droog)
 
 
 @app.get("/api/camera/voorstellen")

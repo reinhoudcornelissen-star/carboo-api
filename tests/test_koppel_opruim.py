@@ -133,6 +133,16 @@ assert strava_af == ["https://www.strava.com/oauth/deauthorize"], strava_af
 assert sorted(p[0] for p in pushes) == ["u1", "u4", "u5"], pushes
 assert "Garmin" in dict(pushes)["u1"] and "Strava" in dict(pushes)["u4"]
 
+# ── de camera-cron neemt de opruiming mee (geen aparte Render Cron Job) ───────
+db["carboo_strava_koppelingen"].append({"user_id": "u6", "access_token": "x"})
+db["carboo_abonnementen"].append(abo("u6", "alles", d(-2), PROEF))
+r = c.post("/api/cron/camera", headers=H)
+assert r.status_code == 200, r.text
+assert r.json() == {"verwerkt": 0, "koppelingen_losgemaakt": 1}, r.json()
+assert sorted(r["user_id"] for r in db["carboo_strava_koppelingen"]) == ["u2", "u3"]
+r = c.post("/api/cron/camera", headers=H)
+assert r.json()["koppelingen_losgemaakt"] == 0, "tweede beurt: niets meer te doen"
+
 # ── de gewone Strava-ontkoppelknop meldt nu ook af bij Strava ────────────────
 class U: id = "u2"
 main.app.dependency_overrides[main.get_current_user] = lambda: U()
