@@ -827,10 +827,32 @@ async def get_coach_dashboard(user=Depends(get_current_user), supabase: Client =
             for re_ in (o.get("carboo_coach_reacties") or []):
                 if re_.get("auteur_type") == "klant" and re_.get("id"):
                     klant_reactie_ids.append(re_["id"])
+        gezien = set()
         if klant_reactie_ids:
             gel = supabase.table("carboo_coach_reactie_gelezen").select("reactie_id").eq("coach_id", coach_id).in_("reactie_id", klant_reactie_ids).execute().data or []
             gezien = set(g["reactie_id"] for g in gel)
             ongelezen_coach = sum(1 for rid in klant_reactie_ids if rid not in gezien)
+        # COACHZONE-V2 (2 november 2026) — per klant: de ongelezen reacties en de
+        # volgende wedstrijd, voor het rode bolletje en het vlagje in de klantenlijst.
+        # Faalt stil: zonder deze velden toont de lijst gewoon geen bolletje.
+        try:
+            per_klant: dict = {}
+            for o in opm_coach_rows:
+                for re_ in (o.get("carboo_coach_reacties") or []):
+                    if re_.get("auteur_type") == "klant" and re_.get("id") and re_["id"] not in gezien:
+                        per_klant[str(o.get("klant_id"))] = per_klant.get(str(o.get("klant_id")), 0) + 1
+            _ids = [k.get("klant_id") for k in mijn_klanten if k.get("klant_id")]
+            volgende: dict = {}
+            if _ids:
+                _w = (supabase.table("carboo_wedstrijden").select("user_id,naam,datum,prioriteit")
+                      .in_("user_id", _ids).gte("datum", _vandaag_brussel()).order("datum").limit(500).execute().data or [])
+                for w in _w:
+                    volgende.setdefault(str(w.get("user_id")), {"naam": w.get("naam"), "datum": w.get("datum"), "prioriteit": w.get("prioriteit")})
+            for _k in mijn_klanten:
+                _k["ongelezen"] = per_klant.get(str(_k.get("klant_id")), 0)
+                _k["volgende_wedstrijd"] = volgende.get(str(_k.get("klant_id")))
+        except Exception as e:
+            print(f"[COACHZONE-V2] klantenlijst: {e}")
 
     ongelezen_klant = sum(1 for o in opm_klant if not o.get("gelezen"))
 
