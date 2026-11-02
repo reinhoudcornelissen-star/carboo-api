@@ -4060,6 +4060,104 @@ async def cron_camera(request: Request, supabase: Client = Depends(get_supabase)
     return {"verwerkt": verwerkt}
 
 
+# ============================================================
+# KOPPEL-OPRUIM-V1 (3 november 2026) — Garmin- en Strava-koppelingen van wie
+# niet (meer) betaalt, komen vrij. Koppelen mag in de proef van twee dagen;
+# wie daarna niet verder gaat, houdt anders een plek bezet bij Garmin en Strava
+# (beperkte aantallen) zonder dat er iets tegenover staat.
+#   - alleen proef gehad: losmaken vanaf de dag na het verlopen
+#   - ooit betaald voor iets met Training: 14 dagen gratie na de laatste vervaldatum,
+#     zodat een late verlenging geen herkoppeling vraagt
+# De status in carboo_abonnementen wordt pas bijgewerkt als de gebruiker inlogt
+# (auto-verloop in mijn-abonnement), dus hier telt de vervaldatum, niet de status.
+# Trainingen en gegevens blijven staan; wie later betaalt, koppelt opnieuw.
+# Elke nacht via een Render Cron Job (header x-cron-sleutel); ?droog=true toont
+# alleen wie aan de beurt is.
+# ============================================================
+_TRAINING_PAKKETTEN = {"training", "fueling_training", "alles", "coach"}
+_PROEF_IDS = ("trial_auto_7d", "admin_trial")
+_OPRUIM_GRATIE_DAGEN = 14
+
+
+def _geeft_training(a: dict) -> bool:
+    p = a.get("pakket")
+    return p in _TRAINING_PAKKETTEN or (p == "fueling" and bool(a.get("bonus_training")))
+
+
+def _opruim_beslissing(abos: list, vandaag: str) -> Optional[str]:
+    """None = de koppeling blijft; anders de reden: 'proef' (nooit betaald voor
+    Training) of 'verlopen' (ooit betaald, gratie voorbij)."""
+    from datetime import date, timedelta
+    relevant = [a for a in abos if _geeft_training(a)]
+    for a in relevant:
+        verval = str(a.get("verval_datum") or "")[:10]
+        if a.get("status") == "actief" and (not verval or verval >= vandaag):
+            return None
+    ooit_betaald = any((a.get("mollie_payment_id") or "") not in _PROEF_IDS for a in relevant)
+    laatste = max((str(a.get("verval_datum") or "")[:10] for a in relevant), default="")
+    if not ooit_betaald:
+        return "proef"
+    grens = (date.fromisoformat(vandaag) - timedelta(days=_OPRUIM_GRATIE_DAGEN)).isoformat()
+    return "verlopen" if laatste < grens else None
+
+
+async def _koppelingen_losmaken(user_id: str, supabase: Client) -> dict:
+    uit = {"garmin": False, "strava": False}
+    try:
+        uit["garmin"] = await _garmin_losmaken(user_id)
+    except Exception as e:
+        print(f"[KOPPEL-OPRUIM-V1] garmin {user_id}: {type(e).__name__}")
+    try:
+        r = supabase.table("carboo_strava_koppelingen").select("*").eq("user_id", user_id).execute()
+        if r.data:
+            await _strava_afmelden(r.data[0], supabase)
+            supabase.table("carboo_strava_koppelingen").delete().eq("user_id", user_id).execute()
+            uit["strava"] = True
+    except Exception as e:
+        print(f"[KOPPEL-OPRUIM-V1] strava {user_id}: {type(e).__name__}")
+    return uit
+
+
+@app.post("/api/cron/koppelingen-opruimen")
+async def cron_koppelingen_opruimen(request: Request, droog: bool = False, supabase: Client = Depends(get_supabase)):
+    """Elke nacht via een Render Cron Job (header x-cron-sleutel). ?droog=true: alleen kijken."""
+    sleutel = os.getenv("CRON_SLEUTEL")
+    if not sleutel or not secrets.compare_digest(request.headers.get("x-cron-sleutel") or "", sleutel):
+        raise HTTPException(403, "Geen toegang")
+    vandaag = _vandaag_brussel()
+    garmin = supabase.table("carboo_garmin_koppelingen").select("user_id").execute().data or []
+    strava = supabase.table("carboo_strava_koppelingen").select("user_id").execute().data or []
+    uids = sorted({r["user_id"] for r in garmin} | {r["user_id"] for r in strava})
+    if not uids:
+        return {"gecontroleerd": 0, "losgemaakt": [], "droog": droog}
+    abos = supabase.table("carboo_abonnementen") \
+        .select("user_id,pakket,status,verval_datum,mollie_payment_id,bonus_training") \
+        .in_("user_id", uids).execute().data or []
+    per: dict = {}
+    for a in abos:
+        per.setdefault(a["user_id"], []).append(a)
+    los = []
+    for uid in uids:
+        reden = _opruim_beslissing(per.get(uid, []), vandaag)
+        if not reden:
+            continue
+        rij = {"user_id": uid, "reden": reden}
+        if not droog:
+            rij.update(await _koppelingen_losmaken(uid, supabase))
+            try:
+                welke = " en ".join(n for n in ("Garmin", "Strava") if rij.get(n.lower()))
+                if welke:
+                    stuur_push(uid, f"Je koppeling met {welke} is losgemaakt",
+                               "Je proefperiode is voorbij. Met een Training-abonnement koppel je zo opnieuw." if reden == "proef"
+                               else "Je Training-abonnement is verlopen. Na verlenging koppel je zo opnieuw.",
+                               url="/app/abonnement", tag="koppeling", soort="koppeling", supabase=supabase)
+            except Exception as e:
+                print(f"[KOPPEL-OPRUIM-V1] push {uid}: {type(e).__name__}")
+        los.append(rij)
+    print(f"[KOPPEL-OPRUIM-V1] {len(uids)} gecontroleerd, {len(los)} {'aan de beurt' if droog else 'losgemaakt'}")
+    return {"gecontroleerd": len(uids), "losgemaakt": los, "droog": droog}
+
+
 @app.get("/api/camera/voorstellen")
 async def camera_voorstellen(datum: Optional[str] = None, user=Depends(get_current_user),
                              supabase: Client = Depends(get_supabase)):
@@ -11098,8 +11196,25 @@ async def strava_status(user=Depends(get_current_user), supabase: Client = Depen
         "max_koppelingen": _max,
     }
 
+async def _strava_afmelden(koppeling: dict, supabase: Client):
+    """KOPPEL-OPRUIM-V1: meldt de atleet af bij Strava (oauth/deauthorize), zodat hij
+    niet meer meetelt voor de atletenlimiet van de app. Faalt stil: de rij gaat
+    hoe dan ook weg, en een dode token hoeft niet afgemeld."""
+    try:
+        token = await _refresh_token_indien_nodig(koppeling, supabase)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post("https://www.strava.com/oauth/deauthorize", data={"access_token": token})
+        if r.status_code not in (200, 204, 401):
+            print(f"[strava] afmelden gaf {r.status_code}")
+    except Exception as e:
+        print(f"[strava] afmelden mislukt: {type(e).__name__}")
+
+
 @app.delete("/api/strava/koppel")
 async def strava_ontkoppel(user=Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+    r = supabase.table("carboo_strava_koppelingen").select("*").eq("user_id", user.id).execute()
+    if r.data:
+        await _strava_afmelden(r.data[0], supabase)   # KOPPEL-OPRUIM-V1
     supabase.table("carboo_strava_koppelingen").delete().eq("user_id", user.id).execute()
     return {"ok": True}
 
@@ -12242,12 +12357,16 @@ async def garmin_callback(code: str = "", state: str = "", error: str = ""):
     return RedirectResponse(terug + "ok", status_code=302)
 
 
-@app.delete("/api/garmin/koppel")
-async def garmin_ontkoppel(wis_data: bool = False, user=Depends(get_current_user)):
-    """Koppeling verbreken: afmelden bij Garmin en de sleutels wissen. De
-    trainingen en gezondheidsgegevens blijven staan, tenzij wis_data=true
-    (dan verdwijnen ook de Garmin-activiteiten, dagwaarden en .fit-bestanden)."""
-    k, token = await _garmin_toegang(user.id)
+async def _garmin_losmaken(user_id: str) -> bool:
+    """Afmelden bij Garmin en de sleutels wissen; de gegevens blijven staan.
+    Geeft True als er een koppeling was. KOPPEL-OPRUIM-V1: ook door de opruimroute
+    gebruikt. Lukt het vernieuwen van de token niet, dan is die toch dood en gaan
+    alleen onze rijen weg."""
+    try:
+        k, token = await _garmin_toegang(user_id)
+    except Exception as e:
+        print(f"[garmin] token voor afmelden mislukt: {type(e).__name__}")
+        k, token = True, None
     if k and token:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -12257,8 +12376,17 @@ async def garmin_ontkoppel(wis_data: bool = False, user=Depends(get_current_user
                 print(f"[garmin] afmelden gaf {r.status_code}")
         except Exception as e:
             print(f"[garmin] afmelden mislukt: {type(e).__name__}")
-    supabase_admin.table("carboo_garmin_koppelingen").delete().eq("user_id", user.id).execute()
-    supabase_admin.table("carboo_garmin_koppelpogingen").delete().eq("user_id", user.id).execute()
+    supabase_admin.table("carboo_garmin_koppelingen").delete().eq("user_id", user_id).execute()
+    supabase_admin.table("carboo_garmin_koppelpogingen").delete().eq("user_id", user_id).execute()
+    return bool(k)
+
+
+@app.delete("/api/garmin/koppel")
+async def garmin_ontkoppel(wis_data: bool = False, user=Depends(get_current_user)):
+    """Koppeling verbreken: afmelden bij Garmin en de sleutels wissen. De
+    trainingen en gezondheidsgegevens blijven staan, tenzij wis_data=true
+    (dan verdwijnen ook de Garmin-activiteiten, dagwaarden en .fit-bestanden)."""
+    await _garmin_losmaken(user.id)
     if wis_data:
         _garmin_wis_data(user.id)
     return {"ok": True}
