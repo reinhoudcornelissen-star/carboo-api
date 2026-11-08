@@ -12890,13 +12890,28 @@ class WedstrijdData(BaseModel):
     rapport_id: Optional[str] = None
     # WEDSTRIJD-ONDERDELEN-V1: afstand per onderdeel bij triatlon/duatlon, bv. {"Zwemmen": 1.9, "Fietsen": 90, "Lopen": 21.1}
     onderdelen: Optional[dict] = None
+    # DOELTIJD-V1 (8 november 2026): de doeltijd in seconden, totaal en per onderdeel,
+    # bv. {"totaal": 19800, "Zwemmen": 2400, "Fietsen": 10200, "Lopen": 6900}
+    doeltijden: Optional[dict] = None
 
 
 def _wedstrijd_schoon(d: dict) -> dict:
     uit = {}
-    for k in ("datum", "naam", "prioriteit", "sport", "afstand_km", "doel", "notitie", "rapport_id", "onderdelen"):
+    for k in ("datum", "naam", "prioriteit", "sport", "afstand_km", "doel", "notitie", "rapport_id", "onderdelen", "doeltijden"):
         if k in d:
             uit[k] = d[k]
+    if "doeltijden" in uit:
+        # DOELTIJD-V1: hoogstens 6 tijden, elk een geheel aantal seconden tussen 1 s en 48 u
+        tijden = {}
+        if isinstance(uit["doeltijden"], dict):
+            for k, w in list(uit["doeltijden"].items())[:6]:
+                try:
+                    sec = int(float(str(w).replace(",", ".")))
+                except (TypeError, ValueError):
+                    continue
+                if 0 < sec <= 48 * 3600:
+                    tijden[str(k)[:30]] = sec
+        uit["doeltijden"] = tijden or None
     if "onderdelen" in uit:
         schoon = {}
         if isinstance(uit["onderdelen"], dict):
