@@ -62,3 +62,29 @@ assert main._garmin_id_uit("123456", "scheduleId") == 123456
 assert main._garmin_id_uit({"workoutId": 77, "sport": "RUNNING"}, "workoutId") == 77
 assert main._garmin_id_uit({}, "workoutId") is None and main._garmin_id_uit(None, "x") is None
 print("id-antwoord ok")
+
+# GARMIN-SCHEMA-V1 — het schema-tempo van het trainingsplan gaat voor op de eigen zones
+def stap1(sport, seg, zones=None):
+    return main._garmin_workout_json({"naam": "x", "sport": sport, "datum": "2026-11-11", "zone_verdeling": json.dumps([seg])}, zones or {})["segments"][0]["steps"][0]
+
+s = stap1("Lopen", {"naam": "Duurblok", "duur_min": 30, "zone": "Z3", "doel": "5:10–4:50 /km · 150–160 bpm", "doel_zone": "Z3", "doel_sport": "Lopen"}, zones_loop)
+assert s["targetType"] == "PACE" and abs(s["targetValueLow"] - 1000 / 310) < 0.001 and abs(s["targetValueHigh"] - 1000 / 290) < 0.001, s
+# ook zonder eigen zones, en binnen een herhaling
+w = main._garmin_workout_json({"naam": "x", "sport": "Lopen", "datum": "2026-11-11", "zone_verdeling": json.dumps([
+    {"herhaling": {"reps": 4, "blokken": [{"naam": "Work", "duur_min": 4, "zone": "Z4", "afstand_tekst": "1 km", "doel": "4:20–4:05 /km", "doel_zone": "Z4", "doel_sport": "Lopen"},
+                                          {"naam": "Recovery", "duur_min": 2, "zone": "Z1", "doel": "tot 6:00 /km", "doel_zone": "Z1", "doel_sport": "Lopen"}]}, "naam": "4x", "duur_min": 24, "zone": "Z4"}])}, {})
+a, b = w["segments"][0]["steps"][0]["steps"]
+assert a["targetType"] == "PACE" and a["durationType"] == "DISTANCE" and abs(a["targetValueHigh"] - 1000 / 245) < 0.001, a
+assert b["targetType"] == "PACE" and abs(b["targetValueHigh"] - 1000 / 360) < 0.001 and b["targetValueLow"] < b["targetValueHigh"], b
+# de zone van de stap is nadien gewijzigd: het schema-doel geldt niet meer, de eigen zones wel
+s = stap1("Lopen", {"naam": "Duurblok", "duur_min": 30, "zone": "Z3", "doel": "6:00–5:30 /km", "doel_zone": "Z2", "doel_sport": "Lopen"}, zones_loop)
+assert s["targetType"] == "PACE" and abs(s["targetValueLow"] - 1000 / 300) < 0.001, s
+# een gevoel in plaats van getallen: terugval op de eigen zones (hier geen: OPEN)
+s = stap1("Lopen", {"naam": "Duurblok", "duur_min": 30, "zone": "Z2", "doel": "rustig, je kunt nog vlot praten", "doel_zone": "Z2", "doel_sport": "Lopen"})
+assert s["targetType"] == "OPEN", s
+# fietsen: watt uit het schema; alleen hartslag in het schema: hartslag
+s = stap1("Fietsen", {"naam": "Duurblok", "duur_min": 60, "zone": "Z2", "doel": "180–220 W · 130–145 bpm", "doel_zone": "Z2", "doel_sport": "Fietsen"}, zones_fiets)
+assert s["targetType"] == "POWER" and (s["targetValueLow"], s["targetValueHigh"]) == (180, 220), s
+s = stap1("Fietsen", {"naam": "Duurblok", "duur_min": 60, "zone": "Z2", "doel": "130–145 bpm", "doel_zone": "Z2", "doel_sport": "Fietsen"})
+assert s["targetType"] == "HEART_RATE" and (s["targetValueLow"], s["targetValueHigh"]) == (130, 145), s
+print("SCHEMA OK")

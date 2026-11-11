@@ -13489,6 +13489,53 @@ def _gw_doel(sport_nl: str, zones: dict, zone) -> dict:
     return leeg
 
 
+def _gw_doel_schema(sport_nl: str, seg: dict) -> dict | None:
+    """GARMIN-SCHEMA-V1 (11 november 2026): het doel dat het trainingsplan op de
+    stap zette ("5:10–4:50 /km · 150–160 bpm", "200–240 W"). Dat is wat de fiche in
+    Carboo toont, dus het horloge moet hetzelfde tonen; de eigen zones zijn pas de
+    terugval. None als de stap geen bruikbaar schema-doel draagt (geen doel, een
+    andere zone of sport dan waarvoor het geschreven is, of alleen een gevoel)."""
+    import re as _re
+    tekst = str(seg.get("doel") or "")
+    if not tekst:
+        return None
+    if seg.get("doel_zone") and str(seg.get("doel_zone")) != str(seg.get("zone")):
+        return None
+    if seg.get("doel_sport") and str(seg.get("doel_sport")) != str(sport_nl):
+        return None
+    basis = {"targetValue": None, "targetValueType": None}
+    soort = _GW_SPORT.get(sport_nl)
+    streep = r"\s*[–-]\s*"
+    if soort == "RUNNING":
+        ms = lambda m, s: 1000 / (int(m) * 60 + int(s))
+        m = _re.search(r"(\d+):(\d\d)" + streep + r"(\d+):(\d\d)\s*/km", tekst)
+        if m:
+            a, b = ms(m.group(1), m.group(2)), ms(m.group(3), m.group(4))
+            return {**basis, "targetType": "PACE", "targetValueLow": round(min(a, b), 4), "targetValueHigh": round(max(a, b), 4)}
+        m = _re.search(r"(vanaf|tot)\s+(\d+):(\d\d)\s*/km", tekst)
+        if m:
+            v = ms(m.group(2), m.group(3))   # "vanaf" = dit tempo of sneller, "tot" = dit tempo of trager
+            lo, hi = (v, v * 1.1) if m.group(1) == "vanaf" else (v * 0.85, v)
+            return {**basis, "targetType": "PACE", "targetValueLow": round(lo, 4), "targetValueHigh": round(hi, 4)}
+    if soort == "CYCLING":
+        m = _re.search(r"(\d+)" + streep + r"(\d+)\s*W\b", tekst)
+        if m:
+            lo, hi = sorted([int(m.group(1)), int(m.group(2))])
+            if lo > 0:
+                return {**basis, "targetType": "POWER", "targetValueLow": lo, "targetValueHigh": hi}
+        m = _re.search(r"(vanaf|tot)\s+(\d+)\s*W\b", tekst)
+        if m and int(m.group(2)) > 0:
+            v = int(m.group(2))
+            lo, hi = (v, round(v * 1.2)) if m.group(1) == "vanaf" else (round(v * 0.7), v)
+            return {**basis, "targetType": "POWER", "targetValueLow": lo, "targetValueHigh": hi}
+    m = _re.search(r"(\d+)" + streep + r"(\d+)\s*bpm", tekst)
+    if m:
+        lo, hi = sorted([int(m.group(1)), int(m.group(2))])
+        if lo > 0:
+            return {**basis, "targetType": "HEART_RATE", "targetValueLow": lo, "targetValueHigh": hi}
+    return None
+
+
 def _gw_stap(seg: dict, sport_nl: str, zones: dict, volgnr: list, intensiteit: str | None = None) -> dict:
     naam = str(seg.get("naam") or "")
     intens = intensiteit or _GW_ZONE_INTENSITEIT.get(naam, "ACTIVE")
@@ -13509,7 +13556,7 @@ def _gw_stap(seg: dict, sport_nl: str, zones: dict, volgnr: list, intensiteit: s
         stap.update({"durationType": "DISTANCE", "durationValue": round(meters), "durationValueType": "METER"})
     else:
         stap.update({"durationType": "TIME", "durationValue": int(round(float(seg.get("duur_min") or 0) * 60)), "durationValueType": None})
-    stap.update(_gw_doel(sport_nl, zones, seg.get("zone")))
+    stap.update(_gw_doel_schema(sport_nl, seg) or _gw_doel(sport_nl, zones, seg.get("zone")))
     stap.update({"secondaryTargetType": None, "secondaryTargetValue": None, "secondaryTargetValueLow": None,
                  "secondaryTargetValueHigh": None, "secondaryTargetValueType": None, "strokeType": None, "drillType": None,
                  "equipmentType": None, "exerciseCategory": None, "exerciseName": None, "weightValue": None, "weightDisplayUnit": None})
