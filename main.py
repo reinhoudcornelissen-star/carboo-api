@@ -5532,19 +5532,20 @@ def _getal(x) -> str:
 # norm.", wat "Je groenten blijft" gaf, "Je hoofdmaaltijden op peil blijft", en
 # bij een te hoge waarde binnen een bereik (vet 40% bij 20-35%) zelfs "blijft
 # onder de norm". Sleutel -> (kop als het te laag is, kop als het te hoog is).
+# KRANT-TOON-V1 (11 november 2026) — de kop benoemt de stap, niet het tekort.
 _KOP_AANDACHT = {
-    "groenten": ("Je eet te weinig groenten.", None),
-    "fruit": ("Je eet te weinig fruit.", None),
-    "vezels": ("Je vezels blijven onder de norm.", None),
-    "nutrientdensiteit": ("Je voeding is weinig voedingsrijk.", None),
-    "vocht_dag": ("Je drinkt te weinig.", None),
-    "suikers_toegevoegd_pct": (None, "Te veel toegevoegde suiker."),
-    "eiwit_g_kg": ("Je eet te weinig eiwit.", None),
-    "eiwit_maaltijd_g_kg": ("Je hoofdmaaltijden hebben te weinig eiwit.", None),
-    "eiwit_maaltijden_ok": ("Niet elke hoofdmaaltijd heeft genoeg eiwit.", None),
+    "groenten": ("Een portie groenten erbij.", None),
+    "fruit": ("Fruit is je makkelijkste winst.", None),
+    "vezels": ("Meer vezels is een kleine stap.", None),
+    "nutrientdensiteit": ("Je voeding mag voedingsrijker.", None),
+    "vocht_dag": ("Meer drinken loont.", None),
+    "suikers_toegevoegd_pct": (None, "Toegevoegde suiker mag wat lager."),
+    "eiwit_g_kg": ("Er mag meer eiwit bij.", None),
+    "eiwit_maaltijd_g_kg": ("Je hoofdmaaltijden kunnen meer eiwit aan.", None),
+    "eiwit_maaltijden_ok": ("Nog niet elke hoofdmaaltijd heeft genoeg eiwit.", None),
     "eiwit_plantaardig_pct": ("Je eiwit komt vooral uit dierlijke bronnen.", None),
-    "vet_pct": ("Je eet weinig vet.", "Je eet veel vet."),
-    "verz_pct": (None, "Je verzadigd vet ligt te hoog."),
+    "vet_pct": ("Er mag wat meer vet bij.", "Je vet mag wat lager."),
+    "verz_pct": (None, "Je verzadigd vet mag wat lager."),
     "energiebalans_pct": ("Je at minder dan je dagdoel.", "Je at meer dan je dagdoel."),
 }
 _KOP_STERK = {
@@ -5973,10 +5974,22 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         return terugval
 
     # ── kwaliteit ───────────────────────────────────────────────────
+    # KRANT-TOON-V1 (11 november 2026) — drie trappen in plaats van twee. Wie
+    # minstens 85 procent van een richtlijn haalt, krijgt "bijna": een kop die
+    # zegt dat het bijna rond is en de kleine stap die nog rest. Daaronder een
+    # kop die de stap benoemt, niet het tekort. Rood blijft voor een duidelijke
+    # overschrijding.
+    def _bijna(waarde, norm):
+        return bool(norm) and waarde >= 0.85 * norm
+
     _n_groenten = _norm("groenten", "norm_min", 300)
     lage_groentedagen = len([v for v in dagen.values() if v["groenten"] < _n_groenten])
-    if d["groenten"] < _n_groenten:
-        voeg(kwaliteit, "geel", "Je groenten blijven achter",
+    if d["groenten"] < _n_groenten and _bijna(d["groenten"], _n_groenten):
+        voeg(kwaliteit, "bijna", "Je groenten zitten er bijna",
+             (_getal(d["groenten"]) + " gram per dag, de richtlijn is " + _getal(_n_groenten) +
+              ". Een halve portie erbij en je bent er."))
+    elif d["groenten"] < _n_groenten:
+        voeg(kwaliteit, "geel", "Een portie groenten erbij",
              ("Op " + str(lage_groentedagen) + " van de " + str(len(dagen)) +
               " dagen bleef je onder de " + str(round(_n_groenten)) + " gram. Eén extra portie per dag "
               "tilt meteen ook je vezels en kalium mee omhoog — die twee volgen je groenten."))
@@ -5987,10 +6000,14 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
 
     _n_fruit = _norm("fruit", "norm_min", 200)
     if d.get("fruit") is not None:
-        if d["fruit"] < _n_fruit:
-            voeg(kwaliteit, "geel", "Je fruit blijft achter",
-                 (_getal(d["fruit"]) + " gram per dag tegenover " + _getal(_n_fruit) +
-                  " als richtlijn. Twee stuks per dag brengt je er meestal."))
+        if d["fruit"] < _n_fruit and _bijna(d["fruit"], _n_fruit):
+            voeg(kwaliteit, "bijna", "Je fruit zit er bijna",
+                 (_getal(d["fruit"]) + " gram per dag, de richtlijn is " + _getal(_n_fruit) +
+                  ". Een half stuk fruit erbij en je bent er."))
+        elif d["fruit"] < _n_fruit:
+            voeg(kwaliteit, "geel", "Fruit is je makkelijkste winst",
+                 (_getal(d["fruit"]) + " gram per dag, de richtlijn is " + _getal(_n_fruit) +
+                  ". Met twee stuks per dag ben je er meestal."))
         else:
             voeg(kwaliteit, "groen", "Je fruit zit op peil",
                  ("Gemiddeld " + _getal(d["fruit"]) + " gram per dag."))
@@ -6002,7 +6019,7 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     _n_suiker = _norm("suikers_toegevoegd_pct", "norm_max", 10)
     pct_toeg = (d["suikers_toegevoegd"] * 4 / kcal_voeding) * 100
     if pct_toeg > _n_suiker:
-        voeg(kwaliteit, "rood", "Te veel toegevoegde suiker",
+        voeg(kwaliteit, "rood", "Toegevoegde suiker mag wat lager",
              ("Toegevoegde suikers leverden " + str(round(pct_toeg)) + "% van je energie, "
               "tegenover " + str(round(_n_suiker)) + "% als bovengrens. Sportvoeding tijdens "
               "je trainingen telt hier niet mee; dit komt uit je gewone maaltijden."))
@@ -6019,7 +6036,7 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     _n_verz = _norm("verz_pct", "norm_max", 10)
     pct_verz_e = (d["verzadigd"] * 9 / kcal) * 100
     if pct_verz_e > _n_verz:
-        voeg(kwaliteit, "rood", "Je verzadigd vet ligt te hoog",
+        voeg(kwaliteit, "rood", "Je verzadigd vet mag wat lager",
              (str(round(pct_verz_e)) + "% van je energie kwam uit verzadigd vet, tegenover " +
               str(round(_n_verz)) + "% als bovengrens. Kaas, boter en vet vlees zijn de gewone "
               "bronnen; één ervan vervangen brengt je er meestal onder."))
@@ -6046,10 +6063,15 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         _bereik = _getal(_n_vocht_min / 1000) + " tot " + _getal(_n_vocht_max / 1000) + " liter drank"
         _op = "Op de " + str(_drankdagen_k) + " dagen dat je drinken invulde: "
         _eten = " Het vocht uit je eten, zo'n halve liter, komt daar nog bij."
-        if _vocht < _n_vocht_min:
-            voeg(kwaliteit, "geel", "Je drinkt te weinig",
-                 (_op + _lt + " liter per dag, tegenover " + _bereik + " als richtlijn. "
-                  "Een extra glas bij elke maaltijd sluit dat gat meestal al. Reken "
+        if _vocht < _n_vocht_min and _bijna(_vocht, _n_vocht_min):
+            voeg(kwaliteit, "bijna", "Nog één glas en je drinkt genoeg",
+                 (_op + _lt + " liter per dag, de richtlijn is " + _bereik + ". "
+                  "Eén glas extra per dag en je zit erin. Reken daarbovenop wat je "
+                  "tijdens een training verliest."))
+        elif _vocht < _n_vocht_min:
+            voeg(kwaliteit, "geel", "Meer drinken loont",
+                 (_op + _lt + " liter per dag, de richtlijn is " + _bereik + ". "
+                  "Een extra glas bij elke maaltijd brengt je er meestal. Reken "
                   "daarbovenop wat je tijdens een training verliest."))
         elif _vocht > _n_vocht_max * 1.6:
             voeg(kwaliteit, "groen", "Je drinkt ruim",
@@ -6062,16 +6084,24 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     # Omega 3 en vezels na vocht: binnen dezelfde ernst gaat vocht voor, zodat
     # het niet wegvalt achter de grens van vijf vaststellingen.
     _n_omega = _norm("omega3", "norm_min", 1.5)
-    if d["omega3"] < _n_omega:
-        voeg(kwaliteit, "geel", "Weinig omega 3",
-             ("Je komt op " + _getal(d["omega3"]) + " gram per dag, tegenover " + _getal(_n_omega) +
-              " als richtlijn. Twee porties vette vis per week brengt je daar meestal."))
+    if d["omega3"] < _n_omega and _bijna(d["omega3"], _n_omega):
+        voeg(kwaliteit, "bijna", "Je omega 3 zit er bijna",
+             (_getal(d["omega3"]) + " gram per dag, de richtlijn is " + _getal(_n_omega) +
+              ". Eén keer vette vis extra en je bent er."))
+    elif d["omega3"] < _n_omega:
+        voeg(kwaliteit, "geel", "Omega 3 kan omhoog",
+             (_getal(d["omega3"]) + " gram per dag, de richtlijn is " + _getal(_n_omega) +
+              ". Met twee porties vette vis per week ben je er meestal."))
 
     _n_vezels = _norm("vezels", "norm_min", 30)
-    if d["vezels"] < _n_vezels:
-        voeg(kwaliteit, "geel", "Je vezels blijven onder de richtlijn",
-             (_getal(d["vezels"]) + " gram per dag tegenover " + _getal(_n_vezels) +
-              " als richtlijn. Volkoren in plaats van wit brood of pasta is de snelste weg."))
+    if d["vezels"] < _n_vezels and _bijna(d["vezels"], _n_vezels):
+        voeg(kwaliteit, "bijna", "Je vezels zitten er bijna",
+             (_getal(d["vezels"]) + " gram per dag, de richtlijn is " + _getal(_n_vezels) +
+              ". Een volkoren boterham of een stuk fruit extra en je bent er."))
+    elif d["vezels"] < _n_vezels:
+        voeg(kwaliteit, "geel", "Meer vezels is een kleine stap",
+             (_getal(d["vezels"]) + " gram per dag, de richtlijn is " + _getal(_n_vezels) +
+              ". Volkoren in plaats van wit brood of pasta is de snelste weg."))
     else:
         voeg(kwaliteit, "groen", "Je vezels zitten op peil",
              (_getal(d["vezels"]) + " gram per dag, boven de richtlijn van " +
@@ -6397,8 +6427,8 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         def _kop_aandacht(k):
             laag, hoog = _KOP_AANDACHT.get(k["sleutel"], (None, None))
             if _te_hoog(k):
-                return hoog or ("Je " + k["naam"] + " ligt te hoog.")
-            return laag or ("Je " + k["naam"] + " ligt te laag.")
+                return hoog or ("Je " + k["naam"] + " mag wat lager.")
+            return laag or ("Je " + k["naam"] + " mag omhoog.")
 
         def _kop_sterk(k):
             return _KOP_STERK.get(k["sleutel"]) or ("Je " + k["naam"] + " zit goed.")
@@ -6419,7 +6449,12 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         _aandacht = min(_onder, key=lambda k: k["afw"]) if _onder else None
         _sterk = max(_boven, key=lambda k: k["afw"]) if _boven else None
 
-        if _aandacht:
+        # KRANT-TOON-V1 — ligt het grootste aandachtspunt minder dan 15 procent van
+        # de norm, dan opent de krant met het sterke punt en staat "bijna" erachter.
+        if _aandacht and _sterk and _aandacht["afw"] > -15:
+            kop = _kop_sterk(_sterk)
+            kern = _zin_norm(_sterk) + " Bijna rond: " + _sterk_zin(_aandacht) + "."
+        elif _aandacht:
             kop = _kop_aandacht(_aandacht)
             kern = _zin_norm(_aandacht)
             if _sterk:
@@ -6433,8 +6468,16 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
     # ERNST-EERST-V1 — wat aandacht vraagt vóór wat goed gaat. De rubriek toont
     # er maar vijf; zonder deze volgorde viel een gele vaststelling achteraan
     # (vocht, vezels) weg achter vier groene.
-    _rang = {"rood": 0, "geel": 1, "groen": 2}
-    kwaliteit.sort(key=lambda i: _rang.get(i["ernst"], 3))
+    # KRANT-TOON-V1 — de keuze gebeurt nog altijd op ernst (rood, geel, bijna),
+    # zodat een werkpunt nooit wegvalt achter groene; er is plaats voor vier
+    # werkpunten en daarnaast voor minstens twee dingen die goed zitten. De
+    # volgorde op het blad is omgekeerd: eerst wat goed zit, dan wat bijna rond
+    # is, dan de werkpunten.
+    _rang = {"rood": 0, "geel": 1, "bijna": 2, "groen": 3}
+    _werk = sorted([i for i in kwaliteit if i["ernst"] != "groen"], key=lambda i: _rang.get(i["ernst"], 3))[:4]
+    _goed = [i for i in kwaliteit if i["ernst"] == "groen"][:max(2, 5 - len(_werk))]
+    _toon = {"groen": 0, "bijna": 1, "geel": 2, "rood": 3}
+    kwaliteit = sorted(_goed + _werk, key=lambda i: _toon.get(i["ernst"], 2))
 
     # STANDFIRST-BEPERKING-V1 — hoeveel dagen het rapport draagt, en bij weinig
     # dagen de waarschuwing erbij. Voorheen verdween die zodra de normen de kop
@@ -6456,7 +6499,7 @@ def _bouw_inzichten(res: dict, dagen: dict, profiel: dict, trainingen: list) -> 
         "standfirst": (_standfirst(res["dagen_gelogd"], laagste_dag or "één dag")
                        if not kern else
                        (_gelogd + " " + kern)),
-        "inzichten_kwaliteit": kwaliteit[:5],
+        "inzichten_kwaliteit": kwaliteit[:6],
         "inzichten_macros": macros[:3],
         "inzichten_trainingen": trainingen_inz[:4],
         "normen_kandidaten": locals().get("_kandidaten") or [],
@@ -8956,12 +8999,15 @@ async def get_lunchvraag(moment: int, user=Depends(get_current_user),
 
 
 @app.get("/api/fuelc/bord")
-async def get_bord(maand: str,
+async def get_bord(maand: Optional[str] = None,
+                   van: Optional[str] = None, tot: Optional[str] = None,
                    user=Depends(get_current_user),
                    supabase: Client = Depends(get_supabase)):
     """Per dagdeel de verdeling van het bord over een maand, in grammen.
 
-    maand in de vorm 2026-08.
+    maand in de vorm 2026-08. WEEKBORD-V1 (11 november 2026): of van en tot
+    (2026-11-02 en 2026-11-08) voor een eigen periode van hoogstens 31 dagen,
+    zodat de krant het bord van haar eigen week toont.
 
     De bordrol wordt in drie stappen opgezocht, van betrouwbaar naar minder:
     eerst via product_id, dan op naam, en pas als beide falen op de
@@ -8970,12 +9016,22 @@ async def get_bord(maand: str,
     from datetime import date as _d
     import calendar as _cal
 
-    try:
-        jaar, mnd = int(maand[:4]), int(maand[5:7])
-        van = _d(jaar, mnd, 1).isoformat()
-        tot = _d(jaar, mnd, _cal.monthrange(jaar, mnd)[1]).isoformat()
-    except Exception:
-        raise HTTPException(400, "Geef de maand op als 2026-08")
+    if van and tot:
+        try:
+            _v, _t = _d.fromisoformat(van[:10]), _d.fromisoformat(tot[:10])
+        except Exception:
+            raise HTTPException(400, "Geef van en tot op als 2026-11-02")
+        if _t < _v or (_t - _v).days > 31:
+            raise HTTPException(400, "Van en tot moeten hoogstens 31 dagen omspannen")
+        van, tot = _v.isoformat(), _t.isoformat()
+        maand = maand or van[:7]
+    else:
+        try:
+            jaar, mnd = int(maand[:4]), int(maand[5:7])
+            van = _d(jaar, mnd, 1).isoformat()
+            tot = _d(jaar, mnd, _cal.monthrange(jaar, mnd)[1]).isoformat()
+        except Exception:
+            raise HTTPException(400, "Geef de maand op als 2026-08")
 
     items = supabase.table("fuelc_dagboek") \
         .select("datum,moment,product_id,recept_id,naam,hoeveelheid_g,categorie") \
@@ -8983,7 +9039,7 @@ async def get_bord(maand: str,
         .lt("moment", 90).execute().data or []
 
     if not items:
-        return {"maand": maand, "dagen": 0, "dagdelen": []}
+        return {"maand": maand, "van": van, "tot": tot, "dagen": 0, "dagdelen": []}
 
     # bibliotheek eenmalig inlezen: op id en op naam
     op_id, op_naam, cat_naam = {}, {}, {}
@@ -9162,7 +9218,7 @@ async def get_bord(maand: str,
                             if r not in BORD_ROLLEN},
         })
 
-    return {"maand": maand, "dagen": len(dagen),
+    return {"maand": maand, "van": van, "tot": tot, "dagen": len(dagen),
             "niet_ingedeeld": onbekend, "dagdelen": uit}
 
 
