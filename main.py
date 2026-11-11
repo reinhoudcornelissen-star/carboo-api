@@ -13040,6 +13040,8 @@ class PlanWeekData(BaseModel):
     tot: str
     trainingen: list
     vervang_ids: Optional[list] = None
+    # PLAN-KIES-V1 (11 november 2026): een selectie in plaats van de hele week
+    selectie: Optional[bool] = None
 
 
 def _plan_van_sporter(plan_id: str, user_id: str) -> dict:
@@ -13082,7 +13084,11 @@ async def trainingsplan_naar_kalender(plan_id: str, item: PlanWeekData, user=Dep
     sporter ze in vervang_ids zet (alleen eigen, niet gedane). Dagen vóór
     vandaag worden overgeslagen. De rijen komen binnen zoals de bouwer ze
     maakt (sport, duur_min, zone_verdeling met segmenten, kcal, notitie,
-    starttijd, naam) en krijgen bron manueel, gedaan_op leeg en plan_id."""
+    starttijd, naam) en krijgen bron manueel, gedaan_op leeg en plan_id.
+
+    PLAN-KIES-V1: met selectie=true komt maar een deel van de week binnen. Dan
+    wordt alleen de geplande plantraining van dezelfde sport op dezelfde dag
+    vervangen; de rest van de week blijft onaangeroerd."""
     _plan_van_sporter(plan_id, user.id)
     van, tot = _plan_datum(item.van), _plan_datum(item.tot)
     if tot < van or (_dt.date.fromisoformat(tot) - _dt.date.fromisoformat(van)).days > 7:
@@ -13092,6 +13098,10 @@ async def trainingsplan_naar_kalender(plan_id: str, item: PlanWeekData, user=Dep
     bestaand = (supabase_admin.table("fuelc_trainingen").select("*").eq("user_id", user.id)
                 .gte("datum", van).lte("datum", tot).execute().data or [])
     weg = [t["id"] for t in bestaand if str(t.get("plan_id")) == str(plan_id) and not _training_gedaan(t)]
+    if item.selectie:
+        gekozen = {(str(t.get("datum") or "")[:10], str(t.get("sport") or "Training")[:60]) for t in (item.trainingen or []) if isinstance(t, dict)}
+        op_id = {t["id"]: t for t in bestaand}
+        weg = [i for i in weg if (str(op_id[i].get("datum") or "")[:10], str(op_id[i].get("sport") or "")) in gekozen]
     vervang = {str(x) for x in (item.vervang_ids or [])}
     weg += [t["id"] for t in bestaand if str(t["id"]) in vervang and t["id"] not in weg and not _training_gedaan(t)]
     gedaan_dagen = {t["datum"] for t in bestaand if str(t.get("plan_id")) == str(plan_id) and _training_gedaan(t)}

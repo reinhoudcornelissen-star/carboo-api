@@ -120,6 +120,22 @@ assert c.post("/api/trainingsplannen/ander/kalender", json={"van": "2026-11-02",
 r = c.post(f"/api/trainingsplannen/{p1['id']}/kalender", json={"van": "2026-11-02", "tot": "2026-11-08", "trainingen": sessies}).json()
 assert r == {"ok": True, "gezet": 3, "verwijderd": 3, "overgeslagen": 2}, r
 assert len([x for x in db["fuelc_trainingen"] if x.get("plan_id") == p1["id"]]) == 4, db["fuelc_trainingen"]
+# PLAN-KIES-V1 — een selectie: alleen de plantraining van dezelfde sport op dezelfde dag wordt vervangen
+r = c.post(f"/api/trainingsplannen/{p1['id']}/kalender", json={"van": "2026-11-02", "tot": "2026-11-08", "selectie": True,
+    "trainingen": [{"datum": "2026-11-08", "sport": "Fietsen", "duur_min": 150, "naam": "Lange rit korter", "starttijd": "09:00"}]}).json()
+assert r == {"ok": True, "gezet": 1, "verwijderd": 1, "overgeslagen": 0}, r
+na = [x for x in db["fuelc_trainingen"] if x.get("plan_id") == p1["id"]]
+assert sorted((x["datum"], x["duur_min"]) for x in na) == [("2026-11-04", 90), ("2026-11-05", 75), ("2026-11-06", 45), ("2026-11-08", 150)], na   # woensdag, donderdag en vrijdag blijven; alleen zondag is vervangen
+assert [x["duur_min"] for x in na if x["datum"] == "2026-11-08"] == [150], na  # alleen zondag is vervangen
+# een andere sport op dezelfde dag komt erbij, de bestaande blijft
+r = c.post(f"/api/trainingsplannen/{p1['id']}/kalender", json={"van": "2026-11-02", "tot": "2026-11-08", "selectie": True,
+    "trainingen": [{"datum": "2026-11-08", "sport": "Lopen", "duur_min": 30, "naam": "Koppelloop", "starttijd": "12:00"}]}).json()
+assert r == {"ok": True, "gezet": 1, "verwijderd": 0, "overgeslagen": 0}, r
+assert sorted(x["sport"] for x in db["fuelc_trainingen"] if x.get("plan_id") == p1["id"] and x["datum"] == "2026-11-08") == ["Fietsen", "Lopen"]
+# een gedane dag blijft ook bij een selectie overgeslagen
+r = c.post(f"/api/trainingsplannen/{p1['id']}/kalender", json={"van": "2026-11-02", "tot": "2026-11-08", "selectie": True,
+    "trainingen": [{"datum": "2026-11-04", "sport": "Fietsen", "duur_min": 70, "naam": "Drempel", "starttijd": "18:00"}]}).json()
+assert r == {"ok": True, "gezet": 0, "verwijderd": 0, "overgeslagen": 1}, r
 print("kalender ok")
 
 # verwijderen, niet van een ander
