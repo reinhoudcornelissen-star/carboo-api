@@ -87,4 +87,17 @@ s = stap1("Fietsen", {"naam": "Duurblok", "duur_min": 60, "zone": "Z2", "doel": 
 assert s["targetType"] == "POWER" and (s["targetValueLow"], s["targetValueHigh"]) == (180, 220), s
 s = stap1("Fietsen", {"naam": "Duurblok", "duur_min": 60, "zone": "Z2", "doel": "130–145 bpm", "doel_zone": "Z2", "doel_sport": "Fietsen"})
 assert s["targetType"] == "HEART_RATE" and (s["targetValueLow"], s["targetValueHigh"]) == (130, 145), s
+# GARMIN-SCHEMA-V2 — na een zonewissel volgt het horloge het schema-tempo van de nieuwe zone
+D = {"Z2": "6:00–5:30 /km", "Z3": "5:10–4:50 /km"}
+s = stap1("Lopen", {"naam": "Duurblok", "duur_min": 30, "zone": "Z3", "doel": "6:00–5:30 /km", "doel_zone": "Z2", "doel_sport": "Lopen", "doelen": D}, zones_loop)
+assert s["targetType"] == "PACE" and abs(s["targetValueLow"] - 1000 / 310) < 0.001 and abs(s["targetValueHigh"] - 1000 / 290) < 0.001, s
+# een stap die er in de kalender bij kwam (zonder doel) neemt de schema-tempo's van een andere stap
+w = main._garmin_workout_json({"naam": "x", "sport": "Lopen", "datum": "2026-11-12", "zone_verdeling": json.dumps([
+    {"naam": "Duurblok", "duur_min": 30, "zone": "Z2", "doel": "6:00–5:30 /km", "doel_zone": "Z2", "doel_sport": "Lopen", "doelen": D},
+    {"naam": "Tempowerk", "duur_min": 10, "zone": "Z3"}])}, zones_loop)
+n = w["segments"][0]["steps"][1]
+assert n["targetType"] == "PACE" and abs(n["targetValueHigh"] - 1000 / 290) < 0.001, n
+# de sport is gewijzigd: de schema-tempo's gelden niet meer
+s = stap1("Fietsen", {"naam": "Duurblok", "duur_min": 30, "zone": "Z3", "doel": "6:00–5:30 /km", "doel_zone": "Z2", "doel_sport": "Lopen", "doelen": D})
+assert s["targetType"] == "OPEN", s
 print("SCHEMA OK")

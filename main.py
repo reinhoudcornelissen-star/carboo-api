@@ -13485,19 +13485,23 @@ def _gw_doel(sport_nl: str, zones: dict, zone) -> dict:
     return leeg
 
 
-def _gw_doel_schema(sport_nl: str, seg: dict) -> dict | None:
+def _gw_doel_schema(sport_nl: str, seg: dict, doelen: dict | None = None) -> dict | None:
     """GARMIN-SCHEMA-V1 (11 november 2026): het doel dat het trainingsplan op de
     stap zette ("5:10–4:50 /km · 150–160 bpm", "200–240 W"). Dat is wat de fiche in
     Carboo toont, dus het horloge moet hetzelfde tonen; de eigen zones zijn pas de
     terugval. None als de stap geen bruikbaar schema-doel draagt (geen doel, een
     andere zone of sport dan waarvoor het geschreven is, of alleen een gevoel)."""
     import re as _re
-    tekst = str(seg.get("doel") or "")
-    if not tekst:
-        return None
-    if seg.get("doel_zone") and str(seg.get("doel_zone")) != str(seg.get("zone")):
-        return None
     if seg.get("doel_sport") and str(seg.get("doel_sport")) != str(sport_nl):
+        return None
+    tekst = str(seg.get("doel") or "")
+    if not tekst or (seg.get("doel_zone") and str(seg.get("doel_zone")) != str(seg.get("zone"))):
+        # GARMIN-SCHEMA-V2 (12 november 2026): na een zonewissel in de kalender, of bij een
+        # stap die er later bij kwam, geldt het schema-tempo van de nieuwe zone (de tempo's
+        # van alle vijf de zones reizen mee in `doelen`), zoals de omschrijving in de bouwer.
+        eigen = seg.get("doelen") if isinstance(seg.get("doelen"), dict) else None
+        tekst = str((eigen or doelen or {}).get(str(seg.get("zone") or "")) or "")
+    if not tekst:
         return None
     basis = {"targetValue": None, "targetValueType": None}
     soort = _GW_SPORT.get(sport_nl)
@@ -13532,7 +13536,7 @@ def _gw_doel_schema(sport_nl: str, seg: dict) -> dict | None:
     return None
 
 
-def _gw_stap(seg: dict, sport_nl: str, zones: dict, volgnr: list, intensiteit: str | None = None) -> dict:
+def _gw_stap(seg: dict, sport_nl: str, zones: dict, volgnr: list, intensiteit: str | None = None, doelen: dict | None = None) -> dict:
     naam = str(seg.get("naam") or "")
     intens = intensiteit or _GW_ZONE_INTENSITEIT.get(naam, "ACTIVE")
     volgnr[0] += 1
@@ -13552,7 +13556,7 @@ def _gw_stap(seg: dict, sport_nl: str, zones: dict, volgnr: list, intensiteit: s
         stap.update({"durationType": "DISTANCE", "durationValue": round(meters), "durationValueType": "METER"})
     else:
         stap.update({"durationType": "TIME", "durationValue": int(round(float(seg.get("duur_min") or 0) * 60)), "durationValueType": None})
-    stap.update(_gw_doel_schema(sport_nl, seg) or _gw_doel(sport_nl, zones, seg.get("zone")))
+    stap.update(_gw_doel_schema(sport_nl, seg, doelen) or _gw_doel(sport_nl, zones, seg.get("zone")))
     stap.update({"secondaryTargetType": None, "secondaryTargetValue": None, "secondaryTargetValueLow": None,
                  "secondaryTargetValueHigh": None, "secondaryTargetValueType": None, "strokeType": None, "drillType": None,
                  "equipmentType": None, "exerciseCategory": None, "exerciseName": None, "weightValue": None, "weightDisplayUnit": None})
@@ -13574,6 +13578,18 @@ def _garmin_workout_json(training: dict, zones: dict | None) -> dict:
         raise ValueError("Deze training heeft geen opbouw; bouw ze met blokken om ze naar Garmin te sturen")
     volgnr = [0]
     stappen = []
+    # GARMIN-SCHEMA-V2: de schema-tempo's per zone, uit de eerste stap die ze draagt (voor deze sport)
+    doelen = None
+    for seg in segs:
+        h0 = seg.get("herhaling") if isinstance(seg.get("herhaling"), dict) else None
+        kand = ((h0.get("blokken") if isinstance(h0.get("blokken"), list) and h0.get("blokken") else [h0.get("work"), h0.get("recovery")]) if h0 else [seg])
+        for b in kand:
+            if isinstance(b, dict) and isinstance(b.get("doelen"), dict) and b.get("doelen") \
+                    and (not b.get("doel_sport") or str(b.get("doel_sport")) == str(training.get("sport"))):
+                doelen = b["doelen"]
+                break
+        if doelen:
+            break
     for seg in segs:
         h = seg.get("herhaling")
         if h:
@@ -13584,10 +13600,10 @@ def _garmin_workout_json(training: dict, zones: dict | None) -> dict:
                     "repeatValue": max(1, int(h.get("reps") or 1)), "skipLastRestStep": False, "steps": []}
             for b in bl:
                 herh["steps"].append(_gw_stap(b, training.get("sport"), zones or {}, volgnr,
-                                              "RECOVERY" if str(b.get("naam")) == "Recovery" else "INTERVAL"))
+                                              "RECOVERY" if str(b.get("naam")) == "Recovery" else "INTERVAL", doelen))
             stappen.append(herh)
         else:
-            stappen.append(_gw_stap(seg, training.get("sport"), zones or {}, volgnr))
+            stappen.append(_gw_stap(seg, training.get("sport"), zones or {}, volgnr, doelen=doelen))
     if len(stappen) > 100:
         raise ValueError("Meer dan 100 stappen kan Garmin niet aan")
     naam = (training.get("naam") or training.get("sport") or "Carboo")[:80]
