@@ -1277,20 +1277,16 @@ async def get_klant_data(klant_id: str, user=Depends(get_current_user), supabase
         # weggehaald.
         result["gut_doel"] = _gut_protocol_doel(supabase, klant_id)
     if privacy.get("voedingskwaliteit") or privacy.get("performance") or privacy.get("macros"):
-        if "dagschema" not in result:
-            # Voor coach analyses: volledige velden inclusief micronutrienten
-            dag = supabase.table("fuelc_dagboek").select("datum,moment,naam,categorie,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,suikers_g,natrium_mg,kalium_mg,calcium_mg,ijzer_mg,vitd_mcg,vitb12_mcg,omega3_g,verz_g,gi").eq("user_id", klant_id).order("datum", desc=True).limit(200).execute()
-            dag_items = dag.data or []
-            # Stuur ook mee in result voor frontend berekening
-            result["dagschema_full"] = dag_items
-            # Trainingen ook nodig voor de berekening
-            tr_full = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(60).execute()
-            result["trainingen_full"] = tr_full.data or []
-        else:
-            dag_items = result["dagschema"]
-            result["dagschema_full"] = dag_items
-            tr_full = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding").eq("user_id", klant_id).order("datum", desc=True).limit(60).execute()
-            result["trainingen_full"] = tr_full.data or []
+        # PERF-STATUS-V2 — de analyses van de coach rekenen op dezelfde gegevens als
+        # die van de sporter: 600 regels (ongeveer vier weken) in plaats van 100 of 200,
+        # anders heeft de energy availability geen zeven volledige dagen; en bij de
+        # trainingen ook bron, gedaan_op en starttijd, voor de gedaan-regel (GEDAAN-V1)
+        # en het uur van voeding tijdens een training.
+        dag = supabase.table("fuelc_dagboek").select("datum,moment,naam,categorie,kcal,kh_g,eiwit_g,vet_g,vezels_g,hoeveelheid_g,suikers_g,natrium_mg,kalium_mg,calcium_mg,ijzer_mg,vitd_mcg,vitb12_mcg,omega3_g,verz_g,gi").eq("user_id", klant_id).order("datum", desc=True).limit(600).execute()
+        dag_items = dag.data or []
+        result["dagschema_full"] = dag_items
+        tr_full = supabase.table("fuelc_trainingen").select("datum,sport,duur_min,kcal_verbranding,bron,gedaan_op,starttijd").eq("user_id", klant_id).order("datum", desc=True).limit(60).execute()
+        result["trainingen_full"] = tr_full.data or []
 
     if privacy.get("macros"):
         items = dag_items if "dag_items" in dir() else []
